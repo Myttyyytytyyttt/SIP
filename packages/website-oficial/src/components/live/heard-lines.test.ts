@@ -217,13 +217,15 @@ describe("drawn", () => {
 
   it("is not read out — the region has nothing for it, its words are aria-hidden, it has no '?' — and the step that takes its row over is", () => {
     const heard = renderToStaticMarkup(createElement(PendingRows, { lines: [heardLine] }));
-    expect(heard).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${LIVE_COPY.heardLine.wallet(label)}</span></span>`);
+    expect(heard).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5 py-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${LIVE_COPY.heardLine.wallet(label)}</span></span>`);
     expect(heard).not.toContain("<button");
     expect(liveRegions(heard)).toEqual(['<div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div>']);
     const lines = linesOf(covered());
     const step = renderToStaticMarkup(createElement(PendingRows, { lines }));
     // On screen: the title, its "?" beside it (owner, 10-10), not hidden.
-    expect(step).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5"><span class="min-w-0 text-sm break-words">${PENDING_COPY.measuring(label)}</span><button type="button"`);
+    expect(step).toContain(
+      `<span class="flex min-w-0 flex-1 items-start gap-1.5 py-1.5"><span class="min-w-0 text-sm break-words">${PENDING_COPY.measuring(label)}</span><span class="contents" data-pending-why=""><button type="button"`,
+    );
     expect(step).not.toContain("data-pending-heard");
     // In the region: the step, its title and its sentence.
     expect(liveRegions(step)).toEqual([

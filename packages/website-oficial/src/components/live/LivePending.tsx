@@ -21,8 +21,24 @@
  * · SaverFi checks about once a minute"). The row keeps its figures — the
  * title, the mark, the amount — and that sentence sits in a "?" beside the
  * title (info-tip.tsx: hover and tap, never takes focus, the sentence in its
- * screen-reader text). A done row keeps its short line: it is what happened,
- * not why something waits.
+ * screen-reader text). A DONE ROW DRAWS ITS TITLE ALONE TOO (review, 10-10):
+ * its short line ("The USDC is in your vault") is said by the region when the
+ * announcer did not speak it (saidOf), and a done row as tall as a step's
+ * swaps in place without moving what is under it. A row's title and amount
+ * are one line beside its 32 px square (a wallet's title may wrap), padded to
+ * sit on the square's middle.
+ *
+ * A "?" THAT GOES HANDS ITS FOCUS ON (review, 10-10). The rows had nothing
+ * focusable before; now every step has its "?", and a step can end on any sweep.
+ * A focused "?" whose row turns done, turns heard, loses its sentence — or
+ * whose row, or card, closes and goes inert — would drop focus to <body>, and
+ * the next Tab would start again from the header. So it hands focus on first:
+ * to the next "?" still usable in its copy, else the one before it, else the
+ * copy's own box (tabIndex -1, never inert, never unmounted while the rows
+ * live). Removed: the "?"'s own cleanup (Why), which runs before React takes
+ * the node out. Made inert: the box's check after every commit (useFocusKept)
+ * — a closing Reveal goes on drawing what it last held, so the row inside it
+ * never learns it is leaving.
  *
  * THE REGION IS ITS OWN, AND HOLDS ONLY WORDS (10-10). A "?" is a button, and
  * no control may sit inside a live region (test/live-regions.ts) — so the rows
@@ -109,7 +125,7 @@
  * no two copies hold a row on clocks of their own.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 
 import { InfoTip } from "@/components/info-tip";
 import { REVEAL_MS, Reveal, revealFrameClass, revealLook, useRevealPhase } from "@/components/live/Reveal";
@@ -484,6 +500,62 @@ export function headingOf(lines: readonly ShownLine[]): string | null {
   return known.some((line) => line.active) ? LIVE_COPY.pendingHeading.active : LIVE_COPY.pendingHeading.waiting;
 }
 
+/** The copy's own box: it never goes inert, and stays mounted while the rows live (Column, TopCard). */
+const BOX = "[data-pending-steps]";
+
+/**
+ * Focus, held in `from`, handed on before `from` goes: to the next "?" still
+ * usable in the copy, else the one before it, else the box. Never to a "?" in
+ * `from` itself, nor in anything inert — a row, or the card, closing.
+ */
+function handOff(from: Element): void {
+  const box = from.closest<HTMLElement>(BOX);
+  if (box === null) return;
+  const usable = [...box.querySelectorAll<HTMLElement>("[data-pending-why] button")].filter(
+    (button) => !from.contains(button) && button.closest("[inert]") === null,
+  );
+  const next = usable.find((button) => (from.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) ?? usable.at(-1);
+  if (next === undefined) box.focus({ preventScroll: true });
+  else next.focus();
+}
+
+/**
+ * A copy's box, checked after every commit: focus inside it, on something that
+ * just went inert — a row closing, the frame closing after the last step, the
+ * card closing — is handed on before the browser drops it to <body>. Inside
+ * this effect the button still holds it: Chrome lets go of focus in an inert
+ * subtree only at its next rendering step (measured, 10-10).
+ */
+function useFocusKept(box: RefObject<HTMLDivElement | null>): void {
+  useLayoutEffect(() => {
+    const active = document.activeElement;
+    if (box.current === null || active === null || active === box.current || !box.current.contains(active)) return;
+    if (active.closest("[inert]") !== null) handOff(active);
+  });
+}
+
+/**
+ * A step's "?": the sentence that was its grey line (owner, 10-10). Unmounted
+ * — its row turned done, or heard, or lost its sentence — it hands its focus
+ * on in a layout cleanup, which React runs before it takes the node out.
+ */
+function Why({ sub }: { readonly sub: string }) {
+  const at = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const node = at.current;
+    return () => {
+      if (node !== null && node.contains(document.activeElement)) handOff(node);
+    };
+  }, []);
+  return (
+    <span ref={at} className="contents" data-pending-why="">
+      <InfoTip label={LIVE_COPY.pendingWhy} className="mt-0.5">
+        {sub}
+      </InfoTip>
+    </span>
+  );
+}
+
 function Row({ row }: { readonly row: PendingRow }) {
   if (row.show === "done") {
     const { done } = row;
@@ -491,11 +563,14 @@ function Row({ row }: { readonly row: PendingRow }) {
       // Not read out when the announcer spoke its transaction (step A5): the feed's own row is the news. When it did not, it is read, and the region says it (toldBy, saidOf).
       <div className="flex w-full items-start gap-3 px-4 py-2.5" data-pending-done={done.kind} {...(row.told === false ? {} : { "aria-hidden": true })}>
         <WorkMark state="done" tone={done.tone} />
-        <span className="min-w-0 flex-1">
-          {/* Wraps rather than truncating: at the lg column's 263 px the time at its end is what a cut would lose. */}
-          <span className="block text-sm break-words">{done.title}</span>
-          <span className="block text-xs text-muted-foreground">{done.sub}</span>
-        </span>
+        {/*
+          Its title alone (review, 10-10): its line is the region's to say, and
+          only when the announcer did not. No "?" either: the row is aria-hidden
+          while the announcer speaks it, and a button never sits inside
+          aria-hidden. Wraps rather than truncating: at the lg column's 263 px
+          the time at its end is what a cut would lose.
+        */}
+        <span className="min-w-0 flex-1 py-1.5 text-sm break-words">{done.title}</span>
       </div>
     );
   }
@@ -516,18 +591,17 @@ function Row({ row }: { readonly row: PendingRow }) {
         mark and its amount. A CHANGE HEARD IS NOT READ OUT (heard-lines.ts):
         what it becomes is, and the region says it as it joins (saidOf). Its
         words stay aria-hidden, and a button must never sit inside aria-hidden,
-        so a heard line carries no "?" at all.
+        so a heard line carries no "?" at all. ONE LINE ON THE SQUARE'S MIDDLE
+        (review, 10-10): with the grey line gone the title and the amount are
+        one 20 px line each, padded 6 px so it sits level with the 32 px
+        square's glyph; a title that wraps still starts on that line.
       */}
-      <span className="flex min-w-0 flex-1 items-start gap-1.5" {...(heard ? { "aria-hidden": true } : {})}>
+      <span className="flex min-w-0 flex-1 items-start gap-1.5 py-1.5" {...(heard ? { "aria-hidden": true } : {})}>
         {/* A wallet's line and the vault's carry no amount beside them: they wrap rather than lose their last words. */}
         <span className={cn("min-w-0 text-sm", line.kind === "measuring" || line.kind === "vault" ? "break-words" : "truncate")}>{line.title}</span>
-        {heard || line.sub === "" ? null : (
-          <InfoTip label={LIVE_COPY.pendingWhy} className="mt-0.5">
-            {line.sub}
-          </InfoTip>
-        )}
+        {heard || line.sub === "" ? null : <Why sub={line.sub} />}
       </span>
-      <span className={cn("shrink-0 text-right text-sm", MONO, TONE_TEXT[toneOf(line)])} {...(line.amountSpoken === null ? {} : { "aria-hidden": true })}>
+      <span className={cn("shrink-0 py-1.5 text-right text-sm", MONO, TONE_TEXT[toneOf(line)])} {...(line.amountSpoken === null ? {} : { "aria-hidden": true })}>
         {line.amount}
       </span>
       {line.amountSpoken ? <span className="sr-only">{line.amountSpoken}</span> : null}
@@ -641,11 +715,14 @@ function SaidRegion({ rows }: { readonly rows: readonly PendingRow[] }) {
  * In the column: the frame grows when the first step comes and closes after
  * the last. The region sits beside it, out of the flow (sr-only), so it never
  * holds a gap open, and outside the frame's Reveal, which is aria-hidden while
- * it closes.
+ * it closes. The box takes focus from a "?" that goes (handOff): tabIndex -1,
+ * so a script can focus it and Tab never stops on it.
  */
 function Column({ view, announce, className, innerClassName }: { readonly view: PendingView; readonly announce: boolean; readonly className?: string; readonly innerClassName?: string }) {
+  const box = useRef<HTMLDivElement>(null);
+  useFocusKept(box);
   return (
-    <div className={className || undefined} data-pending-steps={view.lines.length}>
+    <div ref={box} className={cn("outline-none", className)} tabIndex={-1} data-pending-steps={view.lines.length}>
       <Reveal open={standing(view)}>
         <Body view={view} card={false} {...(innerClassName === undefined ? {} : { className: innerClassName })} />
       </Reveal>
@@ -661,7 +738,8 @@ function Column({ view, announce, className, innerClassName }: { readonly view: 
  * announce, and take its `gap-4` back while it grows and closes — a Reveal
  * inside it would leave the box in the column, holding the gap open over
  * nothing. The region is absolutely placed (sr-only): it takes no cell of the
- * box's grid, and no height.
+ * box's grid, and no height. The box is also what takes focus from a "?" when
+ * the card closes under it (handOff): it only turns sr-only, it never goes.
  */
 function TopCard({ view, announce, className }: { readonly view: PendingView; readonly announce: boolean; readonly className?: string }) {
   const open = standing(view) || view.held;
@@ -671,10 +749,14 @@ function TopCard({ view, announce, className }: { readonly view: PendingView; re
   // What it showed last while open, so it closes over its content.
   const last = useRef<ReactNode>(body);
   if (open) last.current = body;
+  const box = useRef<HTMLDivElement>(null);
+  useFocusKept(box);
   return (
     <div
+      ref={box}
       // The first collapsed frame after sr-only does not transition: there is nothing to move from.
-      className={cn(look === "gone" ? "sr-only" : revealFrameClass({ grown: look === "grown", inGap: true, still: open && phase === "closed" }), className)}
+      className={cn(look === "gone" ? "sr-only" : revealFrameClass({ grown: look === "grown", inGap: true, still: open && phase === "closed" }), "outline-none", className)}
+      tabIndex={-1}
       data-pending-steps={view.lines.length}
     >
       {look === "gone" ? null : (

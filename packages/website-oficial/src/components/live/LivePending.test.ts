@@ -391,7 +391,7 @@ describe("the rows drawn", () => {
     // No "In progress" over "Nothing in progress right now", and no "Waiting" either.
     expect(out).not.toContain(LIVE_COPY.pendingHeading.active);
     expect(out).not.toContain(LIVE_COPY.pendingHeading.waiting);
-    expect(out).toMatch(/^<div class="grid [^"]*lg:hidden" data-pending-steps="0">/);
+    expect(out).toMatch(/^<div class="grid [^"]* outline-none lg:hidden" tabindex="-1" data-pending-steps="0">/);
     // The idle line is not news: not read out, and the card's region, still there, says nothing.
     expect(out).toMatch(/<p class="[^"]*" aria-hidden="true">Nothing in progress right now<\/p>/);
     expect(out).toMatch(/<div role="status" aria-live="polite" class="sr-only" data-pending-region=""><\/div><\/div>$/);
@@ -399,7 +399,7 @@ describe("the rows drawn", () => {
 
   it("keep the card's box, and the region in it, out of the flow while there is nothing, and there to announce the first step", () => {
     expect(renderToStaticMarkup(createElement(PendingRows, { lines: [], variant: "card", className: "lg:hidden" }))).toBe(
-      '<div class="sr-only lg:hidden" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>',
+      '<div class="sr-only outline-none lg:hidden" tabindex="-1" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>',
     );
   });
 
@@ -449,9 +449,11 @@ describe("the why in a '?', and the region beside the rows", () => {
     for (const line of [MEASURING, CONVERTING, BUYING]) {
       expect(onScreen(out)).toContain(line.title);
       expect(onScreen(out)).not.toContain(line.sub);
-      // The "?" sits right after the title, in the title's own box, and says the sentence to a screen reader.
+      // The "?" sits right after the title, in the title's own box, in its [data-pending-why] (handOff), and says the sentence to a screen reader.
       expect(out).toMatch(
-        new RegExp(`<span class="min-w-0 text-sm (truncate|break-words)">${literal(line.title)}</span><button type="button"[^>]*><svg[\\s\\S]*?</svg><span class="sr-only">${literal(`${LIVE_COPY.pendingWhy}: ${line.sub}`)}</span></button>`),
+        new RegExp(
+          `<span class="min-w-0 text-sm (truncate|break-words)">${literal(line.title)}</span><span class="contents" data-pending-why=""><button type="button"[^>]*><svg[\\s\\S]*?</svg><span class="sr-only">${literal(`${LIVE_COPY.pendingWhy}: ${line.sub}`)}</span></button></span>`,
+        ),
       );
     }
     // The figures stay on screen.
@@ -465,6 +467,50 @@ describe("the why in a '?', and the region beside the rows", () => {
     const out = drawn([lineRow({ ...BUYING, sub: "" })]);
     expect(out).not.toContain("<button");
     expect(liveRegions(out)).toEqual([region([BUYING.title, "$5.00"])]);
+  });
+
+  it("draws a done row's title alone, one line like a step's, with no '?': its line is the region's to say", () => {
+    for (const told of [false, true, undefined]) {
+      const out = drawn([doneRow(told), lineRow(BUYING)]);
+      // The title, padded onto the square's middle; no grey line under it, on screen or hidden.
+      expect(out).toMatch(new RegExp(`data-pending-done="converting"[^>]*><span [^>]*data-work-mark="done">[\\s\\S]*?</span><span class="min-w-0 flex-1 py-1.5 text-sm break-words">${literal(DONE.title)}</span></div>`));
+      expect(onScreen(out)).not.toContain(DONE.sub);
+      expect(out).not.toMatch(/data-pending-done="[^"]*"[\s\S]*?<span class="block text-xs text-muted-foreground">/);
+      // One "?" on the page: the buy's. None in the done row, read out or aria-hidden.
+      expect(out.match(/<button\b/g)).toHaveLength(1);
+      expect(out.match(/data-pending-why=""/g)).toHaveLength(1);
+    }
+    // Said by the region only when the announcer did not: its title and its line.
+    expect(liveRegions(drawn([doneRow(false)]))).toEqual([region([DONE.title, DONE.sub])]);
+  });
+
+  it("sits each step's title and amount on the square's middle: one 20 px line padded 6 px beside the 32 px square", () => {
+    const out = drawn([lineRow(BUYING)]);
+    expect(out).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5 py-1.5"><span class="min-w-0 text-sm truncate">${BUYING.title}</span>`);
+    expect(out).toMatch(/<span class="shrink-0 py-1\.5 text-right text-sm [^"]*">\$5\.00<\/span>/);
+    expect(out).toContain("relative flex size-8 shrink-0");
+  });
+
+  /**
+   * A "?" THAT GOES HANDS ITS FOCUS ON (review, 10-10): to another usable "?"
+   * in its copy, else the copy's box. What the markup must carry for that —
+   * the box focusable by a script and never by Tab, each step's "?" in its
+   * [data-pending-why] — is pinned here; the hand-off itself runs in a
+   * browser (vitest renders without a DOM) and was proven in headless Chrome.
+   */
+  it("gives every copy a box a script can focus and Tab never stops on, and puts each step's '?' — and only a step's — in its [data-pending-why]", () => {
+    const rows = [lineRow(HEARD), lineRow(RESTING), lineRow(BUYING), doneRow(false)];
+    for (const variant of ["column", "card"] as const) {
+      for (const announce of [true, false]) {
+        const out = drawn(rows, { variant, announce });
+        expect(out).toMatch(/^<div class="[^"]*\boutline-none\b[^"]*" tabindex="-1" data-pending-steps="\d+">/);
+        // Two steps with a sentence: two "?"s, each the only thing in its [data-pending-why].
+        expect(out.match(/<span class="contents" data-pending-why=""><button type="button"[^>]*>[\s\S]*?<\/button><\/span>/g)).toHaveLength(2);
+        expect(out.match(/<button\b/g)).toHaveLength(2);
+        // The heard row has none: its words are aria-hidden.
+        expect(out).toMatch(/data-pending-heard="">[\s\S]*?<span class="flex min-w-0 flex-1 items-start gap-1\.5 py-1\.5" aria-hidden="true"><span class="[^"]*">[^<]*<\/span><\/span><span class="shrink-0/);
+      }
+    }
   });
 
   it("says, in a region of its own, each step's title, its sentence and its amount as spoken — and holds no button and no countdown", () => {
@@ -482,7 +528,7 @@ describe("the why in a '?', and the region beside the rows", () => {
 
   it("never says a change heard, and keeps no '?' on it: its words are aria-hidden, and a button never sits inside aria-hidden", () => {
     const out = drawn([lineRow(HEARD)]);
-    expect(out).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${HEARD.title}</span></span>`);
+    expect(out).toContain(`<span class="flex min-w-0 flex-1 items-start gap-1.5 py-1.5" aria-hidden="true"><span class="min-w-0 text-sm break-words">${HEARD.title}</span></span>`);
     expect(out).not.toContain("<button");
     expect(liveRegions(out)).toEqual([region()]);
     // The step that takes its row over joins the region under the row's key: an addition, as any step that joins.
@@ -517,6 +563,6 @@ describe("the why in a '?', and the region beside the rows", () => {
       expect(out).not.toContain("data-pending-region");
       expect(out).toContain(`<span class="sr-only">${LIVE_COPY.pendingWhy}: ${CONVERTING.sub}</span>`);
     }
-    expect(renderToStaticMarkup(createElement(PendingRows, { lines: [], announce: false }))).toBe('<div data-pending-steps="0"></div>');
+    expect(renderToStaticMarkup(createElement(PendingRows, { lines: [], announce: false }))).toBe('<div class="outline-none" tabindex="-1" data-pending-steps="0"></div>');
   });
 });

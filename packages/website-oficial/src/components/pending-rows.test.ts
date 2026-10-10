@@ -52,7 +52,7 @@ const pendingRegions = (out: string): string[] => liveRegions(out).filter((regio
 describe("the rows", () => {
   it("keep a polite live region on the page even with nothing pending, and draw nothing in it", () => {
     const out = html(createElement(PendingRows, { lines: [] }));
-    expect(out).toBe('<div data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
+    expect(out).toBe('<div class="outline-none" tabindex="-1" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
   });
 
   it("put a turning mark in the square of a step under way, which stops for reduced motion", () => {
@@ -170,7 +170,7 @@ describe("a live page", () => {
 
   it("leads the activity column with the conversion under way, over the wrap that started it", () => {
     const out = render("pension", converting());
-    expect(out).toContain('<div data-pending-steps="1">');
+    expect(out).toContain('<div class="outline-none" tabindex="-1" data-pending-steps="1">');
     // Said by the steps' own region, beside the rows: the column's, and the card's below lg.
     expect(pendingRegions(out).length).toBeGreaterThanOrEqual(1);
     for (const region of pendingRegions(out)) expect(region).toContain(PENDING_COPY.converting);
@@ -189,13 +189,13 @@ describe("a live page", () => {
   it("leads the pension page's own top with the steps below lg, where the activity column is out of sight", () => {
     const out = render("pension", converting());
     // The card's own box, which holds its region: open, at the page's first paint, with nothing to grow from (Reveal.tsx).
-    const top = out.match(/<div class="([^"]*)" data-pending-steps="1"><div class="min-h-0 min-w-0"><div class="([^"]*)">/);
-    expect(top?.[1]).toBe("grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none grid-rows-[1fr] opacity-100 mt-0 lg:hidden");
+    const top = out.match(/<div class="([^"]*)" tabindex="-1" data-pending-steps="1"><div class="min-h-0 min-w-0"><div class="([^"]*)">/);
+    expect(top?.[1]).toBe("grid transition-[grid-template-rows,opacity,margin-top] duration-300 ease-out motion-reduce:transition-none grid-rows-[1fr] opacity-100 mt-0 outline-none lg:hidden");
     expect(top?.[2]).toBe("overflow-hidden rounded-md border bg-card");
     // Before the holdings and the rule card, inside the main column.
     expect(out.indexOf(top![0])).toBeLessThan(out.indexOf("data-next-investment-note"));
     const empty = render("pension", toLiveDashboard({ snapshot: liveSnapshot({ vaultTokenAccounts: { status: "exists", items: [] }, vault: { ...liveSnapshot().vault, lamports: "1285240", withdrawableLamports: "0" } }), activity: liveActivity([]), privyWallets: [] }));
-    expect(empty).toContain('<div class="sr-only lg:hidden" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
+    expect(empty).toContain('<div class="sr-only outline-none lg:hidden" tabindex="-1" data-pending-steps="0"><div role="status" aria-live="polite" class="sr-only" data-pending-region=""></div></div>');
   });
 
   it("counts the SOL on its way under Next investment, and says so", () => {
@@ -250,7 +250,7 @@ describe("a live page", () => {
     expect(regions).toHaveLength(1);
     expect(regions[0]).toContain(PENDING_COPY.converting);
     // Its divider comes and goes with the rows; the region sits after them, out of the flow.
-    expect(out).toMatch(/<div data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0 min-w-0"><div class="border-b">[\s\S]*?<div role="status" aria-live="polite" class="sr-only" data-pending-region="">/);
+    expect(out).toMatch(/<div class="outline-none" tabindex="-1" data-pending-steps="1"><div class="grid[^"]*"><div class="min-h-0 min-w-0"><div class="border-b">[\s\S]*?<div role="status" aria-live="polite" class="sr-only" data-pending-region="">/);
   });
 
   it("keeps them under All and Investing on /activity, and out of Savings and Withdrawals", () => {
@@ -288,7 +288,7 @@ describe("a live page", () => {
     });
     const label = data.wallets[0]!.label;
     const out = render("pension", data);
-    expect(out).toContain('<div data-pending-steps="1">');
+    expect(out).toContain('<div class="outline-none" tabindex="-1" data-pending-steps="1">');
     expect(out).toContain('data-pending-step="measuring"');
     expect(out).toContain(PENDING_COPY.measuring(label));
     for (const region of pendingRegions(out)) expect(region).toContain(PENDING_COPY.measuring(label));
@@ -313,7 +313,7 @@ describe("a live page", () => {
     const label = data.wallets[0]!.label;
     expect(render("pension", data)).not.toContain("data-pending-step=");
     const out = render("pension", data, { live: liveLiveness({ heard: { at: Date.now(), wallets: [WALLET_A] } }) });
-    expect(out).toContain('<div data-pending-steps="1">');
+    expect(out).toContain('<div class="outline-none" tabindex="-1" data-pending-steps="1">');
     expect(out).toContain(LIVE_COPY.heardLine.wallet(label));
     // Drawn, and not said: what it becomes is (heard-lines.ts).
     expect(pendingRegions(out).length).toBeGreaterThanOrEqual(1);
