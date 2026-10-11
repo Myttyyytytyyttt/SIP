@@ -464,22 +464,33 @@ en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, 
 - `eventsRejected` cuenta llamadas con un secreto equivocado. Nunca aparece ni el secreto ni la clave de Helius.
 - `webhook.lastDiff` dice qué vio el vigilante la última vez que miró el webhook en Helius y por qué lo dio por bueno
   o no: `addresses` (cuántas direcciones enseña la lista, cuáles faltan o sobran, y el veredicto: `same`,
-  `written-unlisted` si la lista no las enseña pero las escribió este proceso, `list-capped` si la lista se corta en
-  100, `extra-only`, o `differs`), `auth` (solo `absent`/`same`/`different` y pistas sí/no: si parece enmascarada, si
-  coinciden principio y final, si contiene la nuestra… **nunca** el valor ni un trozo), y `shape` (raw · ANY · all tal
-  como los enseña Helius). `differs: []` es que está al día. `webhook.lastEditEcho` es lo mismo para la respuesta del
-  último PUT o creación. Si me avisas de un fallo del timbre, pégame estos dos bloques: no llevan nada secreto (un
-  texto de Helius que lleve un trozo del secreto sale como `(withheld)`).
-- `auth.verdict` = `refused` quiere decir que la lista no enseña la cabecera y que, desde la última edición, se
-  rechazaron (403) al menos 3 entregas seguidas sin ninguna aceptada después. Pueden ser de Helius o de cualquiera que
-  haga POST a `/hooks/helius`: el vigilante reescribe la cabecera como mucho una vez por proceso; las demás veces lo
-  da como fallo (y `doorbell-sync` avisa) en vez de pagar otro PUT. Una entrega aceptada lo deshace.
+  `written-unlisted` si la lista no las enseña pero las escribió este proceso — sin el campo, o vacía; vacía solo
+  cuenta si la respuesta de Helius a esa edición las tenía todas o llegó una entrega aceptada después, y si la lista
+  ya las había enseñado, solo una mirada seguida —, `list-capped` si la lista se corta en 100, `extra-only`, `emptied`
+  si la lista las enseñó y luego ninguna dos miradas seguidas (Helius la vació: se reescribe una vez por proceso y la
+  barrida siguiente gira a todos; las demás veces es un fallo), o `differs`; en producción no se sabe aún si la lista
+  deja fuera el campo o lo da vacío), `auth` (solo `absent`/`same`/`different` y pistas sí/no: si parece enmascarada,
+  si coinciden principio y final, si contiene la nuestra… **nunca** el valor ni un trozo; `written-by-us` también
+  cubre un texto fijo que la lista enseñe en lugar de la cabecera, como `REDACTED`, una vez que una entrega aceptada
+  lo prueba), y `shape` (raw · ANY · all tal como los enseña Helius). `differs: []` es que está al día.
+  `webhook.lastEditEcho` es lo mismo para la respuesta del último PUT o creación. Si me avisas de un fallo del timbre,
+  pégame estos dos bloques: no llevan nada secreto (un texto de Helius que lleve un trozo del secreto sale como
+  `(withheld)`).
+- `auth.verdict` = `refused` quiere decir que la lista no enseña la cabecera, o la enseña de una forma que no se puede
+  comparar con la nuestra (`auth.hint` dice cuál: dentro de `Bearer …`, otra caja, enmascarada…), y que desde la última
+  edición se rechazaron (403) al menos 3 entregas seguidas sin ninguna aceptada después. Pueden ser de Helius o de
+  cualquiera que haga POST a `/hooks/helius`: el vigilante reescribe la cabecera como mucho una vez por proceso; las
+  demás veces lo da como fallo en vez de pagar otro PUT, y `doorbell-sync` lo avisa en el log pero **nunca** pasa a
+  crítica por eso (si de verdad son las de Helius, no suena nada: la ronda de seguridad sigue girando a todos en 30
+  minutos como mucho, y el primer cobro del vigilante cuyo eco no vuelva deja el timbre sordo, que gira a todos en cada
+  barrida y, si ya había oído algo, avisa con `doorbell-deaf`). Una entrega aceptada lo deshace.
 - `webhook.failingSince` es desde cuándo fallan las sincronizaciones seguidas; `null` mientras van bien.
 
 Dos alertas nuevas: `doorbell-deaf` (dejó de oír y vuelve a girar a todos), de aviso, y `doorbell-sync` (no consigue
-poner al día el webhook), que avisa al tercer fallo seguido y pasa a **crítica** cuando lleva una hora fallando: esa sí
-llega a Telegram aunque no cambies nada. Los avisos solo llegan si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`. Un webhook
-atascado se mira cada 10 minutos, no en cada barrida.
+poner al día el webhook), que avisa al tercer fallo seguido y pasa a **crítica** cuando lleva una hora fallando (salvo
+si lo único que falla son entregas rechazadas: eso se queda en aviso): esa sí llega a Telegram aunque no cambies nada.
+Los avisos solo llegan si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`. Un webhook atascado se mira cada 10 minutos, no en cada
+barrida.
 
 ### Cambiar el secreto
 

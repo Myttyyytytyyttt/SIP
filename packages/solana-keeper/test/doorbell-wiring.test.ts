@@ -309,33 +309,43 @@ describe("the webhook sync, reporting into the doorbell (createDoorbellWebhookSy
     expect(select(bell, links, T0 + 2 * SWEEP).fullReason).toBeNull();
   });
 
-  // W1. THE INCIDENT OF 2026-10-11, END TO END: Helius's list left the
-  // addresses out, the recheck called the boot PUT "not kept", and told the
+  // W1. THE INCIDENT OF 2026-10-11, END TO END: Helius's list showed none of
+  // the addresses, the recheck called the boot PUT "not kept", and told the
   // doorbell Helius watched nothing — every link in the "new" lane, every
-  // sweep, while authenticated deliveries kept arriving.
-  it("keeps every link out of the \"new\" lane after the recheck when Helius's list leaves the addresses out", async () => {
-    const links = fleet(200);
-    const bell = booted(links);
-    const held = [...addressesOf(links)].sort();
-    const unlisted = (hook: Record<string, unknown>) => {
-      const { accountAddresses: _omitted, ...rest } = hook;
-      return rest;
-    };
-    const api = helius(
-      [{ webhookID: "wh-held-abcdef", webhookURL: HOOK_URL, webhookType: "raw", accountAddresses: held, transactionTypes: ["ANY"], authHeader: SECRET, txnStatus: "all", active: true }],
-      unlisted,
-    );
-    const sync = build(bell, api.fetchImpl);
-    // The boot sync cannot see the addresses, so it writes them; they ring, and a turn answers them.
-    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP });
-    for (const turn of select(bell, links, T0 + 2 * SWEEP).turns) bell.recordTurn(turn.link, turn.lane, true, T0 + 2 * SWEEP, "IDLE", T0 + 2 * SWEEP);
-    // The recheck, ten minutes after: the list still shows no addresses.
-    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + RECHECK_MS });
-    const next = select(bell, links, T0 + 2 * SWEEP + RECHECK_MS);
-    expect(next.fullReason).toBeNull();
-    expect(next.lanes.new).toBe(0);
-    expect(sync.status().consecutiveFailures).toBe(0);
-  });
+  // sweep, while authenticated deliveries kept arriving. WHICH WAY it showed
+  // none is NOT known: production's numbers (held = 0) fit a list that leaves
+  // accountAddresses out and one that returns [] alike, so both are held to it
+  // — the empty one with no delivery at all, Helius's answer to the boot PUT
+  // being its only word (second review, 2026-10-11).
+  const unlisted = (hook: Record<string, unknown>) => {
+    const { accountAddresses: _omitted, ...rest } = hook;
+    return rest;
+  };
+  const listedEmpty = (hook: Record<string, unknown>) => ({ ...hook, accountAddresses: [] });
+  for (const [name, view] of [
+    ["leaves the addresses out", unlisted],
+    ["shows an empty address list", listedEmpty],
+  ] as const) {
+    it(`keeps every link out of the "new" lane after the recheck when Helius's list ${name}`, async () => {
+      const links = fleet(200);
+      const bell = booted(links);
+      const held = [...addressesOf(links)].sort();
+      const api = helius(
+        [{ webhookID: "wh-held-abcdef", webhookURL: HOOK_URL, webhookType: "raw", accountAddresses: held, transactionTypes: ["ANY"], authHeader: SECRET, txnStatus: "all", active: true }],
+        view,
+      );
+      const sync = build(bell, api.fetchImpl);
+      // The boot sync cannot see the addresses, so it writes them; they ring, and a turn answers them.
+      await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP });
+      for (const turn of select(bell, links, T0 + 2 * SWEEP).turns) bell.recordTurn(turn.link, turn.lane, true, T0 + 2 * SWEEP, "IDLE", T0 + 2 * SWEEP);
+      // The recheck, ten minutes after: the list still shows no addresses, and nothing was delivered.
+      await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + RECHECK_MS });
+      const next = select(bell, links, T0 + 2 * SWEEP + RECHECK_MS);
+      expect(next.fullReason).toBeNull();
+      expect(next.lanes.new).toBe(0);
+      expect(sync.status().consecutiveFailures).toBe(0);
+    });
+  }
 
   // W2
   it("hands the sync the doorbell's delivery counts, so an authenticated delivery after its edit proves the header", async () => {

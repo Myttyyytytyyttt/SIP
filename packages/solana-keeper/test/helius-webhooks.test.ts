@@ -285,9 +285,9 @@ describe("when a sync is due", () => {
     });
   });
 
-  it("pages after an hour of failures, not before", () => {
+  // A PIN, NOT THE BEHAVIOUR: E1, E2 and T4 watch syncAlert page (or not) by it.
+  it("pins the paging threshold at an hour", () => {
     expect(SYNC_FAILURE_CRITICAL_AFTER_MS).toBe(60 * 60_000);
-    expect(LIST_ADDRESS_CAP).toBe(100);
   });
 });
 
@@ -717,27 +717,32 @@ describe("the header the list shows (H1)", () => {
     expect(next.status().consecutiveFailures).toBe(0);
   });
 
-  // T4
-  it("withdraws that trust when deliveries since the edit were refused and none accepted: stuck, one GET per ten minutes, warn, then a page at an hour", async () => {
+  // T4. A WARN, NEVER A PAGE (second review, 2026-10-11): the refusals could be
+  // anybody's, and if they are Helius's the doorbell hears nothing and polls.
+  it("withdraws that trust when deliveries since the edit were refused and none accepted: stuck, one GET per ten minutes, a warn that never pages", async () => {
     const helius = fakeHelius([existing()]);
     const delivered = counted();
     const engine = syncOver(bearer(helius), [], { deliveries: delivered.read });
     await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
     delivered.reject(REFUSALS_TO_WITHDRAW);
     const severity = new Map<number, string | null>();
-    await minutes(engine, ["w1", "v1"], 1, 80, (minute) => severity.set(minute, engine.syncAlert().fire?.severity ?? null));
+    await minutes(engine, ["w1", "v1"], 1, 130, (minute) => severity.set(minute, engine.syncAlert().fire?.severity ?? null));
     expect(countOf(helius, "PUT")).toBe(1);
-    expect(countOf(helius, "GET")).toBe(1 + 8);
+    expect(countOf(helius, "GET")).toBe(1 + 13);
     expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "refused", evidence: "refused" });
     // Said as what it is — refused deliveries — not as an edit Helius did not keep.
     expect(engine.status().lastSyncError).toContain("refused 403");
     expect(engine.status().lastSyncError).not.toContain("did not keep");
-    // Stuck from minute 10: the third failure is minute 30, an hour of them is minute 70.
+    // AND AS WHAT THE LIST SHOWS: "Bearer <ours>" is a header it shows, in a form that cannot be compared.
+    expect(engine.status().lastSyncError).toContain("in a form this process cannot compare");
+    expect(engine.status().lastSyncError).not.toContain("does not show the header");
+    // Stuck from minute 10: the third failure is minute 30, and two hours of them never page.
     expect(engine.status().failingSince).toBe(new Date(T_BOOT + 10 * MINUTE).toISOString());
     expect(severity.get(29)).toBeNull();
     expect(severity.get(30)).toBe("warn");
-    expect(severity.get(69)).toBe("warn");
-    expect(severity.get(70)).toBe("critical");
+    expect(severity.get(70)).toBe("warn");
+    expect(severity.get(130)).toBe("warn");
+    expect(engine.syncAlert().fire!.detail).toContain("never page");
   });
 
   // T5
@@ -795,6 +800,7 @@ describe("the addresses the list shows (H2)", () => {
 
   // T9
   it("is not stuck on a list cut at Helius's 100 addresses", async () => {
+    expect(LIST_ADDRESS_CAP).toBe(100);
     const many = Array.from({ length: 120 }, (_, index) => `address-${String(index).padStart(3, "0")}`);
     const helius = fakeHelius();
     const reports: SyncReport[] = [];
@@ -808,18 +814,25 @@ describe("the addresses the list shows (H2)", () => {
     expect(engine.status().consecutiveFailures).toBe(0);
   });
 
-  // T10
-  it("is stuck on an empty list after its edit with no delivery since, and healthy once one is accepted", async () => {
+  // T10. Stuck only when NOTHING says Helius holds them: not its list, not its
+  // answer to the edit, not a delivery — and said so, not as "did not keep".
+  it("is stuck on an empty list when neither Helius's answer to its edit nor a delivery says it holds them, and healthy once one is accepted", async () => {
     const emptied = (helius: ReturnType<typeof fakeHelius>) => shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, accountAddresses: [] })) });
 
     const silent = fakeHelius([existing()]);
-    const stuck = syncOver(emptied(silent), [], { deliveries: counted().read });
+    const answeredEmpty = shaped(silent, {
+      list: (hooks) => hooks.map((hook) => ({ ...hook, accountAddresses: [] })),
+      answer: (hook) => ({ ...hook, accountAddresses: [] }),
+    });
+    const stuck = syncOver(answeredEmpty, [], { deliveries: counted().read });
     const quiet = await anHour(stuck, ["w1", "v1"], silent);
     expect(quiet.update).toBe(1);
     expect(quiet.list).toBeLessThanOrEqual(7);
     expect(stuck.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "differs" });
+    expect(stuck.status().lastEditEcho!.addresses).toMatchObject({ listed: true, held: 0 });
     expect(stuck.status().lastDiff!.auth.evidence).toBe("none");
-    expect(stuck.status().lastSyncError).toContain("did not keep");
+    expect(stuck.status().lastSyncError).toContain("shows no addresses");
+    expect(stuck.status().lastSyncError).not.toContain("did not keep");
 
     const heard = fakeHelius([existing()]);
     const delivered = counted();
@@ -831,6 +844,28 @@ describe("the addresses the list shows (H2)", () => {
     expect(healthy.status().lastDiff!.addresses.verdict).toBe("written-unlisted");
     expect(healthy.status().lastDiff!.auth.evidence).toBe("proven");
     expect(healthy.status().consecutiveFailures).toBe(0);
+  });
+
+  // T10b — THE OTHER READING OF THE INCIDENT (second review, 2026-10-11). Its
+  // numbers cannot tell `accountAddresses: []` from a missing field, and its
+  // deliveries were sparse (7 over a deployment): requiring one made a quiet
+  // hour after any deploy "not kept" — every link in the "new" lane — and a
+  // page at minute 70.
+  it("trusts an empty list when Helius's answer to its edit held every address, with no delivery for two hours: no failure, no page, every address watched", async () => {
+    const helius = fakeHelius([existing({ accountAddresses: ["v1"] })]);
+    const reports: SyncReport[] = [];
+    const engine = syncOver(shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, accountAddresses: [] })) }), reports, {
+      deliveries: counted().read,
+    });
+    const severity = new Set<string>();
+    await minutes(engine, ["w1", "v1"], 0, 120, () => severity.add(engine.syncAlert().fire?.severity ?? "none"));
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().lastEditEcho!.addresses).toMatchObject({ listed: true, held: 2, missing: 0 });
+    expect(engine.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "written-unlisted" });
+    expect(engine.status().lastDiff!.auth.evidence).toBe("none");
+    expect(engine.status().consecutiveFailures).toBe(0);
+    expect([...severity]).toEqual(["none"]);
+    for (const report of reports) expect([...report.watched].sort()).toEqual(["v1", "w1"]);
   });
 
   // T11
@@ -968,8 +1003,11 @@ describe("what the list shows plainly is a change on Helius's side", () => {
     expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "differs", hint: { looksMasked: true, prefixAgrees: false } });
   });
 
-  // R2
-  it("writes back an address list Helius emptied after it had shown the addresses, an accepted delivery notwithstanding", async () => {
+  // R2. TWO LOOKS IN A ROW, NOT ONE (second review, 2026-10-11): one empty look
+  // after a full one is a flicker, and was a PUT each time. The write-back that
+  // follows the second carries a gap, so what Helius did not deliver meanwhile
+  // is made up by a full pass; and it is bought once per process.
+  it("writes back an address list Helius emptied after it had shown the addresses — on the second empty look, with a gap, once per process", async () => {
     const helius = fakeHelius([existing({ accountAddresses: ["v1"] })]);
     const reports: SyncReport[] = [];
     const delivered = counted();
@@ -981,10 +1019,58 @@ describe("what the list shows plainly is a change on Helius's side", () => {
     expect(countOf(helius, "PUT")).toBe(1);
     helius.hooks[0] = { ...helius.hooks[0]!, accountAddresses: [] };
     await minutes(engine, addresses, 21, 30);
+    // The first empty look: a flicker, as far as anyone can tell.
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "written-unlisted" });
+    await minutes(engine, addresses, 31, 40);
     expect(countOf(helius, "PUT")).toBe(2);
     expect(helius.hooks[0]!.accountAddresses).toEqual(["v1", "w1", "x1"]);
-    expect(engine.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "differs" });
+    expect(engine.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "emptied" });
+    expect(reports.at(-1)!.gap).toContain("none on two looks in a row");
     expect([...reports.at(-1)!.watched].sort()).toEqual(["v1", "w1", "x1"]);
+    expect(engine.status().consecutiveFailures).toBe(0);
+
+    // EMPTIED AGAIN: reported — the links turned every sweep — not paid for a second time.
+    await minutes(engine, addresses, 41, 50);
+    helius.hooks[0] = { ...helius.hooks[0]!, accountAddresses: [] };
+    await minutes(engine, addresses, 51, 70);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(engine.status().lastDiff!.addresses.verdict).toBe("emptied");
+    expect(engine.status().lastSyncError).toContain("already wrote them back once");
+    expect(reports.at(-1)!.watched.size).toBe(0);
+  });
+
+  it("writes back an emptied list even while the header is stuck on refusals: the list showed that edit kept, so it is not the same edit not kept", async () => {
+    const helius = fakeHelius([existing()]);
+    const reports: SyncReport[] = [];
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), reports, { deliveries: delivered.read });
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
+    delivered.reject(REFUSALS_TO_WITHDRAW);
+    // Minute 10: the addresses are listed, the header is stuck on refusals — the boot PUT's fingerprint stays.
+    await minutes(engine, ["w1", "v1"], 1, 10);
+    expect(engine.status().lastDiff!.addresses.verdict).toBe("same");
+    helius.hooks[0] = { ...helius.hooks[0]!, accountAddresses: [] };
+    await minutes(engine, ["w1", "v1"], 11, 30);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(helius.hooks[0]!.accountAddresses).toEqual(["v1", "w1"]);
+    expect(reports.at(-1)!.gap).toContain("none on two looks in a row");
+  });
+
+  // R7 — A LIST THAT FLICKERS: the full set, then [], then the full set… while Helius holds them all.
+  it("pays no PUT for a list that alternates between the addresses and none, over six hours", async () => {
+    const helius = fakeHelius([existing()]);
+    const reports: SyncReport[] = [];
+    const delivered = counted();
+    let gets = 0;
+    const flicker = shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, accountAddresses: gets++ % 2 === 0 ? hook.accountAddresses : [] })) });
+    const engine = syncOver(flicker, reports, { deliveries: delivered.read });
+    await minutes(engine, ["w1", "v1"], 0, 6 * 60, () => delivered.accept());
+    // The one PUT is this process's first edit (the first empty look, before it had written anything); none after.
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(countOf(helius, "GET")).toBeGreaterThanOrEqual(36);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    for (const report of reports) expect([...report.watched].sort()).toEqual(["v1", "w1"]);
   });
 });
 
@@ -1010,8 +1096,10 @@ describe("refused deliveries are anybody's", () => {
     const delivered = counted();
     const engine = syncOver(shaped(helius, { list: headerless }), [], { deliveries: delivered.read });
     // Each one lands after a converged look, which cleared lastEdit: the old rule PUT on the next look, 72 times a day.
+    const severity = new Set<string>();
     await minutes(engine, ["w1", "v1"], 0, 24 * 60, (minute) => {
       if (minute % 20 === 15) delivered.reject();
+      severity.add(engine.syncAlert().fire?.severity ?? "none");
     });
     expect(countOf(helius, "POST")).toBe(1);
     expect(countOf(helius, "PUT")).toBeLessThanOrEqual(1);
@@ -1019,6 +1107,50 @@ describe("refused deliveries are anybody's", () => {
     expect(engine.status().lastDiff!.auth).toMatchObject({ state: "absent", verdict: "refused", evidence: "refused" });
     expect(engine.status().lastSyncError).toContain("refused 403");
     expect(engine.status().lastSyncError).toContain("stranger");
+    expect(engine.status().lastSyncError).toContain("does not show the header");
+    // A DAY OF STRANGERS: reported, warned in the log — and nobody paged.
+    expect(severity.has("critical")).toBe(false);
+  });
+
+  // R6 — THREE STRANGERS RIGHT AFTER THE BOOT PUT, THEN TWO QUIET HOURS (second
+  // review, 2026-10-11). Inside the boot PUT's own ten minutes the refusals
+  // read as the same edit needed again — stuck, no re-write — and an hour of
+  // that paged, while Helius held and sent the right header throughout.
+  it("pages nobody over three 403s right after the boot PUT and two hours with no delivery", async () => {
+    const helius = fakeHelius([existing()]);
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), [], { deliveries: delivered.read });
+    const severity = new Map<number, string | null>();
+    await minutes(engine, ["w1", "v1"], 0, 120, (minute) => {
+      if (minute === 1) delivered.reject(REFUSALS_TO_WITHDRAW);
+      severity.set(minute, engine.syncAlert().fire?.severity ?? null);
+    });
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ state: "absent", verdict: "refused", evidence: "refused" });
+    expect([...severity.values()]).not.toContain("critical");
+    expect(severity.get(120)).toBe("warn");
+  });
+
+  // R8 — A PAGEABLE RUN IS COUNTED ON ITS OWN: refusal-only failures before it do not bring the page forward.
+  it("counts the hour that pages over the failures that may page, in a row, not from the refusals before them", async () => {
+    const helius = fakeHelius([existing()]);
+    const delivered = counted();
+    let down = false;
+    const view = shaped(helius, { list: headerless });
+    const flaky: typeof fetch = async (input, init) => (down ? new Response("upstream error", { status: 503 }) : view(input, init));
+    const engine = syncOver(flaky, [], { deliveries: delivered.read });
+    const severity = new Map<number, string | null>();
+    await minutes(engine, ["w1", "v1"], 0, 90, (minute) => {
+      if (minute === 1) delivered.reject(REFUSALS_TO_WITHDRAW);
+      // Down from the look at minute 60 on.
+      if (minute === 59) down = true;
+      severity.set(minute, engine.syncAlert().fire?.severity ?? null);
+    });
+    // Refused from minute 10, Helius down from minute 60: the page is an hour of THAT, at minute 120 — not at 70.
+    expect(severity.get(89)).toBe("warn");
+    await minutes(engine, ["w1", "v1"], 91, 120, (minute) => severity.set(minute, engine.syncAlert().fire?.severity ?? null));
+    expect(severity.get(119)).toBe("warn");
+    expect(severity.get(120)).toBe("critical");
   });
 
   // R5 — A DELIVERY ACCEPTED ONCE DOES NOT VOUCH FOR THE HEADER FOR GOOD.
@@ -1120,5 +1252,93 @@ describe("doorbell-sync pages", () => {
     expect(severity.get(80)).toBe("critical");
     expect(severity.get(130)).toBe("critical");
     expect(engine.syncAlert().fire!.detail).toContain("addresses 2/4 listed (missing 2) differs");
+  });
+});
+
+// ── what the second review found (2026-10-11) ────────────────────────────────
+
+describe("a value the list shows in place of the header", () => {
+  // R9. A PLACEHOLDER OR A DIGEST, shown whatever Helius holds: read as
+  // "differs", every process PUT at boot, read its own edit as not kept, and
+  // paged an hour later while every delivery was accepted.
+  const placeholders: Record<string, string> = {
+    REDACTED: "REDACTED",
+    "[hidden]": "[hidden]",
+    "xxxx…": "xxxx…",
+    sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  };
+  for (const [name, shown] of Object.entries(placeholders)) {
+    it(`takes "${name}" for the header once deliveries prove it, remembers it, and is never stuck or paged over it`, async () => {
+      const helius = fakeHelius([existing()]);
+      const reports: SyncReport[] = [];
+      const delivered = counted();
+      const engine = syncOver(shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, authHeader: shown })) }), reports, {
+        deliveries: delivered.read,
+      });
+      const severity = new Set<string>();
+      const watch = () => severity.add(engine.syncAlert().fire?.severity ?? "none");
+      // Two hours, a delivery accepted every minute: the boot PUT, and nothing after.
+      await minutes(engine, ["w1", "v1"], 0, 120, () => {
+        delivered.accept();
+        watch();
+      });
+      expect(countOf(helius, "PUT")).toBe(1);
+      expect(engine.status().lastDiff!.auth).toMatchObject({ state: "different", verdict: "written-by-us", evidence: "proven" });
+      expect(engine.status().consecutiveFailures).toBe(0);
+
+      // THREE STRANGERS, THEN QUIET: the one re-write the refusals may buy, and then the
+      // remembered view stands with no delivery to prove it again — not "did not keep".
+      delivered.reject(REFUSALS_TO_WITHDRAW);
+      await minutes(engine, ["w1", "v1"], 121, 240, watch);
+      expect(countOf(helius, "PUT")).toBe(2);
+      expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "written-by-us", evidence: "none" });
+      expect(engine.status().consecutiveFailures).toBe(0);
+      expect(severity.has("critical")).toBe(false);
+      expect(severity.has("warn")).toBe(false);
+      for (const report of reports) expect([...report.watched].sort()).toEqual(["v1", "w1"]);
+    });
+  }
+
+  it("still writes back a value that replaces a header the list had shown as ours", async () => {
+    // After the list has shown ours, another value is a hand edit, not the list's way of showing ours.
+    const helius = fakeHelius([existing({ authHeader: "the-old-secret" })]);
+    const delivered = counted();
+    const engine = syncOver(helius.fetchImpl, [], { deliveries: delivered.read });
+    await minutes(engine, ["w1", "v1"], 0, 14, () => delivered.accept());
+    helius.hooks[0] = { ...helius.hooks[0]!, authHeader: "REDACTED" };
+    await minutes(engine, ["w1", "v1"], 15, 20, () => delivered.accept());
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "differs", evidence: "proven" });
+  });
+
+  it("does not take the value for the header with no delivery to prove it", async () => {
+    const helius = fakeHelius([existing()]);
+    const engine = syncOver(shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, authHeader: "REDACTED" })) }), [], {
+      deliveries: counted().read,
+    });
+    await minutes(engine, ["w1", "v1"], 0, 20);
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "differs", evidence: "none" });
+    expect(engine.status().consecutiveFailures).toBeGreaterThan(0);
+  });
+});
+
+describe("two webhooks on the URL", () => {
+  // R10. THE ONE THIS PROCESS WROTE, WHEREVER THE LIST PUTS IT: matches[0] was
+  // the other one every other look, a PUT every ten minutes for good.
+  it("judges the one it wrote whatever order the list returns them in: one PUT in three hours", async () => {
+    const helius = fakeHelius([existing({ webhookID: "wh-first-000000-aaaaaa" }), existing({ webhookID: "wh-second-00000-bbbbbb" })]);
+    let gets = 0;
+    const reversing = shaped(helius, {
+      list: (hooks) => {
+        const shown = hooks.map(({ accountAddresses: _omitted, ...rest }) => rest);
+        return gets++ % 2 === 0 ? shown : [...shown].reverse();
+      },
+    });
+    const engine = syncOver(reversing);
+    await minutes(engine, ["w1", "v1"], 0, 180);
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    expect(engine.status().reason).toContain("1 other webhook(s)");
   });
 });

@@ -47,7 +47,19 @@
 // What the deliveries alone withdraw is re-written at most once per process,
 // and otherwise reported, so outside traffic cannot buy a PUT every twenty
 // minutes.
+//
+// AND WHAT ANYBODY CAN CAUSE NEVER PAGES (second review, 2026-10-11). Three
+// POSTs to the public receiver made a healthy webhook "refused" and, an hour
+// on, a Telegram page: a failure that rests on refused deliveries alone stays
+// a warn. An empty address list is the list's habit when Helius's own answer
+// to the edit held every address, not only when a delivery came; one empty
+// look after a full one is a flicker, two are Helius emptying it — written
+// back once per process, with a gap. A value the list shows in place of the
+// header (a placeholder, a digest) is taken for ours once deliveries prove it,
+// and remembered. And the webhook this process wrote is preferred among those
+// on its URL, whatever order the list returns them in.
 
+import { createHash } from "node:crypto";
 import type { Secret } from "@sip/solana-log";
 
 export const HELIUS_API_ORIGIN = "https://mainnet.helius-rpc.com";
@@ -74,6 +86,15 @@ export const SYNC_FAILURE_ALERT_STREAK = 3;
  * warn stays in the log (Telegram forwards criticals only, by default), and a
  * webhook out of step for an hour is not a blip any more — the doorbell is
  * being kept honest by its safety nets alone.
+ *
+ * NOT A FAILURE THAT RESTS ON REFUSED DELIVERIES ALONE (EnsureResult.
+ * stuckOnRefusals): anybody can POST to the receiver, so three strangers' 403s
+ * paged an hour later (second review, 2026-10-11). It stays a warn. If Helius's
+ * own deliveries are the refused ones, nothing rings: the safety rotation still
+ * turns every link within SAFETY_PASS_MS (src/doorbell.ts), and the keeper's
+ * next settle whose echo does not come back makes the doorbell deaf — every
+ * link every sweep, and doorbell-deaf says so once the doorbell had heard
+ * anything at all.
  */
 export const SYNC_FAILURE_CRITICAL_AFTER_MS = 60 * 60_000;
 export const DOORBELL_SYNC_ALERT_KEY = "doorbell-sync";
@@ -318,15 +339,23 @@ export interface WebhookDiff {
      */
     readonly missingSample: readonly string[];
     readonly extraSample: readonly string[];
-    readonly verdict: "same" | "written-unlisted" | "list-capped" | "extra-only" | "differs";
+    /**
+     * "emptied": the list showed the addresses since this process's last edit,
+     * then none on two looks in a row — Helius emptied it. Written back once
+     * per process (with a gap), and otherwise reported. One empty look after a
+     * full one is "written-unlisted": a list that flickers is not paid for.
+     */
+    readonly verdict: "same" | "written-unlisted" | "list-capped" | "extra-only" | "emptied" | "differs";
   };
   readonly auth: {
     readonly state: "absent" | "same" | "different";
     readonly hint: AuthHint | null;
     /**
-     * "refused": one this process wrote and the list cannot show, which the
+     * "refused": one this process wrote and the list does not show, or shows
+     * in a form that cannot be compared (hint says which), which the
      * deliveries since contradict (AuthEvidence "refused") — re-written at
-     * most once per process, and otherwise reported as a failed sync.
+     * most once per process, and otherwise reported as a failed sync that
+     * warns and never pages.
      */
     readonly verdict: "same" | "masked-ours" | "written-by-us" | "refused" | "differs";
     readonly evidence: AuthEvidence;
@@ -363,10 +392,34 @@ export interface DescribeContext {
   readonly heardSinceEdit?: boolean;
   /**
    * The list has shown this webhook holding addresses since this process's
-   * last edit. An empty list after that is not the list's habit but a change
-   * on Helius's side, and is written back.
+   * last edit. An empty list after that is not the list's habit: one such look
+   * is a flicker, two in a row are Helius emptying it ("emptied").
    */
   readonly listedSinceEdit?: boolean;
+  /** Looks right before this one that showed an empty list after it had shown the addresses since the edit. */
+  readonly emptyLooksInARow?: number;
+  /**
+   * Helius's own answer to this process's last edit listed every address that
+   * edit sent. An empty list since is then the list's habit, as a missing
+   * field is — no delivery needed to say so (second review, 2026-10-11:
+   * production could not tell the two apart, and deliveries are sparse).
+   */
+  readonly editAnswerHeld?: boolean;
+  /**
+   * A look since this process's last edit showed the header as ours: the same
+   * value, or masked with ours' ends. A plain value that is not ours after that
+   * is a change on Helius's side, never the list's way of showing ours.
+   */
+  readonly shownOursSinceEdit?: boolean;
+  /**
+   * A digest (held in memory, never shown) of the value the list was proven to
+   * show IN PLACE OF the header this process wrote — a placeholder such as
+   * "REDACTED", a hash — when deliveries accepted since the edit proved Helius
+   * sends ours (EnsureResult.headerView). The same value later is taken for
+   * ours with no delivery to prove it again; a refused run still withdraws it
+   * ("refused"), as for any header the list cannot show.
+   */
+  readonly oursShownAs?: string | null;
   /** When the look happened, for WebhookDiff.at. */
   readonly now?: number;
 }
@@ -457,6 +510,18 @@ const told = (value: unknown, ours: string, max: number = DIFF_TEXT_CHARS): stri
 const canonicalWord = (value: unknown): string | null => (typeof value === "string" ? value.trim().toLowerCase() : null);
 
 /**
+ * The header as the list shows it, as a digest: what DescribeContext.
+ * oursShownAs is compared with. Held in WebhookSync's memory only — never in a
+ * WebhookDiff, a log line or /status — so the value Helius shows (which may be
+ * a secret, ours or another's) is never kept whole either.
+ */
+function viewOf(value: unknown): string {
+  return createHash("sha256")
+    .update(typeof value === "string" ? `string:${value}` : `json:${JSON.stringify(value) ?? ""}`, "utf8")
+    .digest("base64");
+}
+
+/**
  * One look at the webhook, described and judged. Pure.
  *
  * THE RULES TRUST NO MORE THAN THIS PROCESS WROTE. Each relaxation needs this
@@ -474,15 +539,19 @@ const canonicalWord = (value: unknown): string | null => (typeof value === "stri
  *     process wrote, when what the list shows cannot contradict it — no header,
  *     a blank one, a mask whose visible ends are not another's, or ours
  *     transformed (inside "Bearer …", in another case, trimmed, or a truncation
- *     of HEADER_WINDOW characters or more). That last rule holds until the
- *     deliveries say otherwise (AuthEvidence "refused"): then the verdict is
- *     "refused", and the webhook is re-written at most once per process.
+ *     of HEADER_WINDOW characters or more) — or any other value, while the
+ *     list has not shown ours since the edit and deliveries prove Helius sends
+ *     ours (a placeholder, a digest: remembered, ctx.oursShownAs). That rule
+ *     holds until the deliveries say otherwise (AuthEvidence "refused"): then
+ *     the verdict is "refused", and the webhook is re-written at most once per
+ *     process.
  *   * ADDRESSES. The same set; or one this process wrote, when the list leaves
  *     accountAddresses out, cuts it at LIST_ADDRESS_CAP, holds only extra ones
- *     besides (a PUT that merged), or shows an empty list — the last only
- *     while a delivery accepted since the edit proves the webhook works and the
- *     list has not shown the addresses since: an empty list after a full one is
- *     Helius emptying it.
+ *     besides (a PUT that merged), or shows an empty list — the last when
+ *     Helius's answer to the edit, or a delivery accepted since, says it holds
+ *     them and the list has not shown them since; or, once, right after it has
+ *     shown them (a flicker). Empty twice in a row after showing them is
+ *     "emptied": Helius emptied it.
  *   * SHAPE, compared trimmed and lower-case: raw, ["any"], all. A field the
  *     list leaves out (or shows as null) passes.
  *
@@ -494,6 +563,20 @@ const canonicalWord = (value: unknown): string | null => (typeof value === "stri
  * rotation. A webhook out of step from Helius's side shows up there.
  */
 export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: DescribeContext, source: WebhookDiff["source"]): WebhookDiff {
+  return lookAt(found, body, ctx, source).diff;
+}
+
+/**
+ * describeWebhook, and the digest of the header as the list shows it when the
+ * look took that value for ours on the deliveries' word (DescribeContext.
+ * oursShownAs) — kept apart from the diff, which /status serves.
+ */
+function lookAt(
+  found: HeliusWebhook,
+  body: WebhookBody,
+  ctx: DescribeContext,
+  source: WebhookDiff["source"],
+): { readonly diff: WebhookDiff; readonly headerView: string | null } {
   const desired = canonicalAddresses(body.accountAddresses);
   const listed = Array.isArray(found.accountAddresses as unknown);
   const held = heldAddresses(found);
@@ -523,15 +606,46 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
   // WHAT THE LIST SHOWS IN PLACE OF OURS, AND WHETHER IT COULD STILL BE OURS:
   // nothing to see (no header, a blank one, a mask whose visible ends are not
   // another's), or ours transformed. A plain value with nothing of ours in it,
-  // or a mask showing another's ends, is not — it is written back.
+  // or a mask showing another's ends, is not — it is written back — unless it
+  // is what the list shows in place of ours (shownAsOurs, below).
   const hidden = state === "absent" || (typeof theirs === "string" && theirs.trim() === "");
   const opaque = hint !== null && hint.looksMasked && hint.prefixAgrees !== false && hint.suffixAgrees !== false;
   const transformed =
     hint !== null && (hint.containsOurs || hint.equalTrimmed || hint.equalIgnoringCase || (hint.withinOurs && hint.visibleChars >= HEADER_WINDOW));
-  const mayBeWritten = wroteHeader && (hidden || opaque || transformed);
+  // A PLACEHOLDER OR A DIGEST ("REDACTED", "[hidden]", "xxxx…", a sha256) is
+  // a value unlike ours that the list shows whatever Helius holds. Read as
+  // "differs", it made every process PUT at boot, read its own edit as not
+  // kept, and page an hour later while authenticated deliveries kept coming
+  // (second review, 2026-10-11). Taken for ours when deliveries since the edit
+  // PROVE Helius sends ours, and the list has not shown ours itself since —
+  // after that, another value is a hand edit — and then remembered, so the
+  // same value is still ours when the proof is spent (a re-write it bought, a
+  // quiet hour). A refused run still withdraws it, as for any hidden header.
+  const view = state === "different" ? viewOf(theirs) : null;
+  const shownAsOurs =
+    wroteHeader &&
+    view !== null &&
+    ctx.shownOursSinceEdit !== true &&
+    ((ctx.oursShownAs !== undefined && ctx.oursShownAs !== null && ctx.oursShownAs === view) || evidence === "proven");
+  const mayBeWritten = wroteHeader && (hidden || opaque || transformed || shownAsOurs);
   const authVerdict: WebhookDiff["auth"]["verdict"] =
     state === "same" ? "same" : maskedOurs ? "masked-ours" : mayBeWritten ? (evidence === "refused" ? "refused" : "written-by-us") : "differs";
+  // Remembered only when nothing else explained the value: a hidden, masked or transformed header is judged afresh at every look.
+  const headerView = shownAsOurs && !maskedOurs && !hidden && !opaque && !transformed ? view : null;
 
+  // AN EMPTY LIST is the list's habit — as a missing field is — when Helius's
+  // own answer to the edit held every address, or a delivery came since: the
+  // incident's numbers cannot tell [] from a missing field, and requiring a
+  // delivery made a quiet hour after any deploy "not kept" again, every link
+  // in the "new" lane and a page (second review, 2026-10-11). After the list
+  // has shown the addresses since the edit, one empty look is a flicker, and
+  // two in a row are Helius emptying it.
+  const emptyList = listed && held.length === 0;
+  const emptyVerdict = (): WebhookDiff["addresses"]["verdict"] | null => {
+    if (!emptyList || !wroteAddresses) return null;
+    if (ctx.listedSinceEdit === true) return (ctx.emptyLooksInARow ?? 0) >= 1 ? "emptied" : "written-unlisted";
+    return ctx.heardSinceEdit === true || ctx.editAnswerHeld === true ? "written-unlisted" : null;
+  };
   const addressVerdict: WebhookDiff["addresses"]["verdict"] =
     missing.length === 0 && extra.length === 0
       ? "same"
@@ -539,11 +653,10 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
         ? "written-unlisted"
         : held.length === LIST_ADDRESS_CAP && desired.length > LIST_ADDRESS_CAP && extra.length === 0 && wroteAddresses
           ? "list-capped"
-          : listed && held.length === 0 && wroteAddresses && ctx.heardSinceEdit === true && ctx.listedSinceEdit !== true
-            ? "written-unlisted"
-            : missing.length === 0 && wroteAddresses
+          : (emptyVerdict() ??
+            (missing.length === 0 && wroteAddresses
               ? "extra-only"
-              : "differs";
+              : "differs"));
 
   const types: unknown = found.transactionTypes;
   const wrong: ("webhookType" | "transactionTypes" | "txnStatus")[] = [];
@@ -552,12 +665,12 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
   if (found.txnStatus != null && canonicalWord(found.txnStatus) !== "all") wrong.push("txnStatus");
 
   const differs: ("addresses" | "auth" | "shape")[] = [];
-  if (addressVerdict === "differs") differs.push("addresses");
+  if (addressVerdict === "differs" || addressVerdict === "emptied") differs.push("addresses");
   if (authVerdict === "differs" || authVerdict === "refused") differs.push("auth");
   if (wrong.length > 0) differs.push("shape");
 
   const ours = body.authHeader;
-  return {
+  const diff: WebhookDiff = {
     source,
     at: new Date(ctx.now ?? Date.now()).toISOString(),
     fields: Object.keys(found)
@@ -584,6 +697,7 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
     },
     differs,
   };
+  return { diff, headerView };
 }
 
 /**
@@ -652,10 +766,22 @@ export interface EnsureResult {
   readonly edit: string | null;
   /**
    * Set when the edit needed is the one this process already made and Helius
-   * did not keep, or a header the deliveries refuse that this process already
-   * re-wrote once; nothing was sent.
+   * did not keep, or a header the deliveries refuse — or an address list
+   * Helius emptied — that this process already re-wrote once; nothing was sent.
    */
   readonly stuck: string | null;
+  /**
+   * `stuck` rests on refused deliveries alone, which anybody can cause: it is
+   * counted and warned, never paged (SYNC_FAILURE_CRITICAL_AFTER_MS).
+   */
+  readonly stuckOnRefusals: boolean;
+  /**
+   * The digest of the header as this look's list showed it, when the look took
+   * a value unlike ours for ours — on the deliveries' word, or as remembered:
+   * WebhookSync keeps it as DescribeContext.oursShownAs. Never in a diff, a log
+   * or /status.
+   */
+  readonly headerView: string | null;
   readonly active: boolean;
   /** Other webhooks on the same URL, left alone: never created by this code, never deleted by it. */
   readonly duplicates: number;
@@ -694,6 +820,13 @@ export interface EnsureContext extends DescribeContext {
    * strangers', and a PUT for each run of them was a PUT every twenty minutes.
    */
   readonly refusedEditSpent?: boolean;
+  /**
+   * This process already wrote back an address list Helius emptied (verdict
+   * "emptied") once. The next is reported, not paid for: a list that empties
+   * itself on its own schedule would buy a PUT each time (second review,
+   * 2026-10-11).
+   */
+  readonly emptiedEditSpent?: boolean;
   /** The fingerprint of this process's last successful edit (EnsureResult.edit). */
   readonly lastEdit?: string | null;
   /** Whether a create or a reactivation may be sent. Default true. */
@@ -743,7 +876,12 @@ export async function ensureWebhook(
   const byUrl = listed.filter((webhook) => webhook.webhookURL === spec.url);
   const knownId = context.knownId ?? null;
   const matches = byUrl.length > 0 ? byUrl : listed.filter((webhook) => knownId !== null && webhook.webhookID === knownId);
-  const found = matches[0];
+  // THE ONE THIS PROCESS WROTE, WHEREVER THE LIST PUTS IT. Every rule that
+  // trusts what this process wrote needs this very id; with two webhooks on the
+  // URL and a list whose order changes, the first was the other one every
+  // other look — not written by us, so PUT, and knownId moved there: a PUT
+  // every ten minutes for good (second review, 2026-10-11).
+  const found = matches.find((webhook) => knownId !== null && webhook.webhookID === knownId) ?? matches[0];
   const fingerprint = (id: string): string => `${id}:${JSON.stringify(body)}`;
   if (found === undefined) {
     if (!allowCreate) {
@@ -761,6 +899,8 @@ export async function ensureWebhook(
       authConfirmed: true,
       edit: fingerprint(created.webhookID),
       stuck: null,
+      stuckOnRefusals: false,
+      headerView: null,
       active: created.active !== false,
       duplicates: 0,
       diff: null,
@@ -771,7 +911,7 @@ export async function ensureWebhook(
   // DESCRIBED, THEN JUDGED (describeWebhook says by which rules). What is
   // trusted there — the header or the addresses this process wrote, a masked
   // header whose ends are ours — no longer reads as "differs" on every look.
-  const diff = describeWebhook(found, body, context, "list");
+  const { diff, headerView } = lookAt(found, body, context, "list");
   context.onDiff?.(diff);
   const refused = diff.auth.verdict === "refused";
   // ONE RE-WRITE ON THE DELIVERIES' WORD ALONE, PER PROCESS. Refusals are
@@ -780,14 +920,26 @@ export async function ensureWebhook(
   // credits a time. After one, a "refused" header is reported, not re-sent; an
   // edit the addresses or the shape need still goes, and carries the header.
   const refusedAgain = refused && context.refusedEditSpent === true;
-  const toEdit = diff.differs.filter((part) => !(part === "auth" && refusedAgain));
+  // AND ONE WRITE-BACK OF AN EMPTIED LIST, PER PROCESS, for the same reason: a
+  // list that empties on its own schedule is not paid for every time.
+  const emptied = diff.addresses.verdict === "emptied";
+  const emptiedAgain = emptied && context.emptiedEditSpent === true;
+  const toEdit = diff.differs.filter((part) => !(part === "auth" && refusedAgain) && !(part === "addresses" && emptiedAgain));
   const differs = toEdit.length > 0;
   const authDiffers = diff.auth.verdict === "differs" || refused;
   const duplicates = matches.length - 1;
+  // SAID AS WHAT THE LIST SHOWS. "Does not show the header" was said of a
+  // header it shows wrapped in "Bearer …" too, and sent the reader away from
+  // the one useful fact, in lastDiff.auth.hint (second review, 2026-10-11).
+  const shownHeader: unknown = found.authHeader;
+  const headerShown = shownHeader !== undefined && shownHeader !== null && !(typeof shownHeader === "string" && shownHeader.trim() === "");
   const refusedDetail =
     `deliveries to the receiver were refused 403 since this process last wrote the webhook's header — at least ${REFUSALS_TO_WITHDRAW} in a row, ` +
-    "none accepted after them — and Helius's list does not show the header to compare; it is not sent again while this lasts, and a delivery " +
-    "accepted (or a change in the discovered addresses) ends it. A stranger's POST is refused too" +
+    "none accepted after them — and " +
+    (headerShown
+      ? "Helius's list shows the header in a form this process cannot compare with its own (lastDiff.auth.hint says how)"
+      : "Helius's list does not show the header") +
+    "; it is not sent again while this lasts, and a delivery accepted (or a change in the discovered addresses) ends it. A stranger's POST is refused too" +
     (duplicates > 0 ? `, and so is any of the ${duplicates} other webhook(s) on the same URL that holds an old header` : "") +
     ": check the header the webhook holds on Helius";
   const gaps: string[] = [];
@@ -796,24 +948,36 @@ export async function ensureWebhook(
   // differ. Telling the doorbell "what the list shows" when the list does not
   // show addresses at all put every link in the "new" lane, and kept the next
   // sweep's sync due (its key never matched): a GET every 60 s.
-  let watched: readonly string[] = diff.addresses.verdict === "differs" ? held : desired;
+  let watched: readonly string[] = diff.differs.includes("addresses") ? held : desired;
   let added: readonly string[] = [];
   let edit: string | null = null;
   let stuck: string | null = null;
+  let stuckOnRefusals = false;
   let authConfirmed = !authDiffers;
   let editEcho: WebhookDiff | null = null;
   // THE SAME EDIT, NEEDED AGAIN, IS AN EDIT HELIUS DID NOT KEEP. Sending it a
   // second time buys nothing but 100 credits; it is reported instead, as a
-  // failed sync, until the discovered addresses or the secret change.
-  if (differs && context.lastEdit !== undefined && context.lastEdit !== null && context.lastEdit === fingerprint(found.webhookID)) {
+  // failed sync, until the discovered addresses or the secret change. Not an
+  // emptied list: the list showed that edit kept, then undone.
+  const sameEditAgain = context.lastEdit !== undefined && context.lastEdit !== null && context.lastEdit === fingerprint(found.webhookID);
+  if (differs && sameEditAgain && !(emptied && toEdit.includes("addresses"))) {
     // WHAT DIFFERS ON THE DELIVERIES' WORD ALONE IS SAID SO: the list itself
     // shows nothing Helius failed to keep, and "did not keep" sent the reader
-    // to the wrong place (review, 2026-10-11).
-    stuck =
-      toEdit.length === 1 && toEdit[0] === "auth" && refused
-        ? refusedDetail
-        : "Helius did not keep the last edit of the webhook (the list still differs from what was sent); it is not sent again " +
-          "until the discovered addresses or the secret change";
+    // to the wrong place (review, 2026-10-11). So is an empty list: it shows
+    // nothing, which is not the same as showing the edit undone.
+    if (toEdit.length === 1 && toEdit[0] === "auth" && refused) {
+      stuck = refusedDetail;
+      stuckOnRefusals = true;
+    } else if (toEdit.length === 1 && toEdit[0] === "addresses" && diff.addresses.listed && diff.addresses.held === 0) {
+      stuck =
+        `Helius's list shows no addresses for the webhook, and neither Helius's answer to this process's last edit nor a delivery since says ` +
+        `it holds the ${desired.length} that edit sent; it is not sent again until the discovered addresses or the secret change, and the links ` +
+        "are turned every sweep meanwhile";
+    } else {
+      stuck =
+        "Helius did not keep the last edit of the webhook (the list still differs from what was sent); it is not sent again " +
+        "until the discovered addresses or the secret change";
+    }
   } else if (differs && allowEdit) {
     attempt();
     // THE ANSWER IS A FREE DIAGNOSTIC: what Helius says it now holds, described
@@ -835,10 +999,18 @@ export async function ensureWebhook(
       gaps.push("Helius held another Authorization header, and every delivery until now was refused 403, which it never resends");
     }
     if (diff.shape.wrong.length > 0) gaps.push("the webhook was not a raw webhook for every transaction, failed ones included");
+    // TWO LOOKS LATE, ON PURPOSE (a flicker is not paid for), so what the
+    // emptied webhook did not deliver meanwhile is made up by a full pass.
+    if (emptied) gaps.push("Helius's list showed the webhook's addresses after this process wrote them, then none on two looks in a row; what it did not deliver meanwhile is unknown");
   } else if (differs) {
     action = "held";
+  } else if (emptiedAgain) {
+    stuck =
+      "Helius's list showed the webhook's addresses after this process wrote them, then none on two looks in a row — again, after this process " +
+      "already wrote them back once; it is not written back again, and the links are turned every sweep until the list shows them";
   } else if (refusedAgain) {
     stuck = refusedDetail;
+    stuckOnRefusals = true;
   }
   let reactivated = false;
   if (found.active === false) {
@@ -860,6 +1032,8 @@ export async function ensureWebhook(
     authConfirmed,
     edit,
     stuck,
+    stuckOnRefusals,
+    headerView,
     active: true,
     duplicates,
     diff,
@@ -991,12 +1165,29 @@ export class WebhookSync {
   #deliveriesAtEdit: DeliveryCounts | null = null;
   /** Whether a look since the last edit saw the list holding addresses (DescribeContext.listedSinceEdit). */
   #listedSinceEdit = false;
+  /** Empty looks in a row since the list last showed the addresses (DescribeContext.emptyLooksInARow). */
+  #emptyLooks = 0;
+  /** Whether the answer to the last edit listed every address it sent (DescribeContext.editAnswerHeld). */
+  #editAnswerHeld = false;
+  /** Whether a look since the last edit showed the header as ours (DescribeContext.shownOursSinceEdit). */
+  #shownOursSinceEdit = false;
+  /** The digest of what the list was proven to show in place of the header written (DescribeContext.oursShownAs). */
+  #oursShownAs: string | null = null;
   /** Whether this process already re-wrote the webhook over a "refused" header (EnsureContext.refusedEditSpent). */
   #refusedEditSpent = false;
+  /** Whether this process already wrote back an emptied address list (EnsureContext.emptiedEditSpent). */
+  #emptiedEditSpent = false;
   /** The current run of failures: when it began, when it last failed, and what that last failing look saw. */
   #failingSince: number | null = null;
   #lastFailureAt: number | null = null;
   #lastFailureDiff: WebhookDiff | null = null;
+  /**
+   * When the current run of failures that may PAGE began — every failure but
+   * one resting on refused deliveries alone, which resets it — and whether the
+   * last failure was one.
+   */
+  #pageableSince: number | null = null;
+  #lastFailurePages = false;
   #status: WebhookStatus;
 
   /** Whether the webhook is managed at all here: a key, a URL and a secret. The acting keeper then runs it. */
@@ -1093,6 +1284,7 @@ export class WebhookSync {
     const client = this.#options.client!;
     let attempted = false;
     let failure: string | null = null;
+    let pages = true;
     let diff: WebhookDiff | null = null;
     try {
       const authHeader = this.#options.secret!.reveal();
@@ -1104,7 +1296,12 @@ export class WebhookSync {
         authEvidence: evidence,
         heardSinceEdit: heard,
         listedSinceEdit: this.#listedSinceEdit,
+        emptyLooksInARow: this.#emptyLooks,
+        editAnswerHeld: this.#editAnswerHeld,
+        shownOursSinceEdit: this.#shownOursSinceEdit,
+        oursShownAs: this.#oursShownAs,
         refusedEditSpent: this.#refusedEditSpent,
+        emptiedEditSpent: this.#emptiedEditSpent,
         lastEdit: this.#lastEdit,
         allowCreate,
         now,
@@ -1121,6 +1318,8 @@ export class WebhookSync {
       this.#lastFailed = false;
       this.#knownId = result.webhookID;
       if (result.edit !== null) {
+        // ANOTHER HEADER WRITTEN: what the list was proven to show in place of the old one says nothing about the new.
+        if (this.#writtenAuth !== authHeader) this.#oursShownAs = null;
         this.#writtenAuth = authHeader;
         this.#writtenKey = desired.join(",");
         this.#lastEdit = result.edit;
@@ -1128,12 +1327,33 @@ export class WebhookSync {
         this.#deliveriesAtEdit = this.#options.deliveries?.() ?? null;
         // The look was BEFORE the edit: what it listed says nothing about what the edit wrote.
         this.#listedSinceEdit = false;
+        this.#emptyLooks = 0;
+        this.#shownOursSinceEdit = false;
+        // HELIUS'S OWN WORD on what it now holds, which an empty list then does not contradict.
+        this.#editAnswerHeld = result.editEcho !== null && result.editEcho.addresses.listed && result.editEcho.addresses.missing === 0;
         if (result.diff?.auth.verdict === "refused") this.#refusedEditSpent = true;
+        if (result.diff?.addresses.verdict === "emptied") this.#emptiedEditSpent = true;
       } else {
-        if (result.diff !== null && result.diff.addresses.listed && result.diff.addresses.held > 0) this.#listedSinceEdit = true;
+        const look = result.diff;
+        if (look !== null) {
+          if (look.addresses.listed && look.addresses.held > 0) {
+            this.#listedSinceEdit = true;
+            this.#emptyLooks = 0;
+          } else if (look.addresses.listed && this.#listedSinceEdit) {
+            this.#emptyLooks += 1;
+          } else {
+            this.#emptyLooks = 0;
+          }
+          // THE LIST SHOWED OURS: it shows the header itself, so another value later is a change, not a view of ours.
+          if (look.auth.state === "same" || look.auth.verdict === "masked-ours") {
+            this.#shownOursSinceEdit = true;
+            this.#oursShownAs = null;
+          }
+        }
         // CONVERGED: whatever was last sent is what Helius holds.
         if (result.action === "unchanged" && result.stuck === null) this.#lastEdit = null;
       }
+      if (result.headerView !== null) this.#oursShownAs = result.headerView;
       this.#stuckKey = result.stuck !== null ? desired.join(",") : null;
       this.#confirmedKey = canonicalAddresses(result.watched).join(",");
       this.#status = { ...this.#status, lastDiff: result.diff, lastEditEcho: result.editEcho ?? this.#status.lastEditEcho };
@@ -1144,6 +1364,7 @@ export class WebhookSync {
         // will be sent to. It is counted (and pages) below, looked at every
         // RECHECK_MS, and due at once only when the addresses change.
         failure = result.stuck;
+        pages = !result.stuckOnRefusals;
       } else {
         const held =
           result.action === "held"
@@ -1153,6 +1374,8 @@ export class WebhookSync {
         this.#failingSince = null;
         this.#lastFailureAt = null;
         this.#lastFailureDiff = null;
+        this.#pageableSince = null;
+        this.#lastFailurePages = false;
         this.#status = {
           managed: true,
           reason: [held, duplicates].filter((part): part is string => part !== null).join("; ") || null,
@@ -1186,14 +1409,20 @@ export class WebhookSync {
     }
     // OUTSIDE THE TRY, so a logger that throws here is not caught and counted a
     // second time; tick's .catch swallows it.
-    if (failure !== null) this.#recordFailure(failure, now, diff);
+    if (failure !== null) this.#recordFailure(failure, now, diff, pages);
   }
 
-  /** One failed sync: counted, dated, logged with what the look saw (when it got that far). */
-  #recordFailure(detail: string, now: number, diff: WebhookDiff | null): void {
+  /**
+   * One failed sync: counted, dated, logged with what the look saw (when it got
+   * that far). `pages` false — refused deliveries alone — ends the run that may
+   * page: the hour is counted over failures that may, in a row.
+   */
+  #recordFailure(detail: string, now: number, diff: WebhookDiff | null, pages: boolean): void {
     this.#failingSince ??= now;
     this.#lastFailureAt = now;
     this.#lastFailureDiff = diff;
+    this.#lastFailurePages = pages;
+    this.#pageableSince = pages ? (this.#pageableSince ?? now) : null;
     const failingSince = new Date(this.#failingSince).toISOString();
     this.#status = {
       ...this.#status,
@@ -1226,13 +1455,22 @@ export class WebhookSync {
    * the warn sent minutes before. A warn alone reaches nobody by default
    * (Telegram forwards criticals), and the webhook was stuck for hours with
    * nobody told.
+   *
+   * REFUSED DELIVERIES ALONE STAY A WARN, however long they last
+   * (SYNC_FAILURE_CRITICAL_AFTER_MS says why): the hour that pages is counted
+   * over the other failures, in a row.
    */
   syncAlert(): { readonly fire: { key: string; severity: "warn" | "critical"; title: string; detail: string } | null; readonly clear: boolean } {
     const { consecutiveFailures, lastSyncError } = this.#status;
     if (consecutiveFailures === 0) return { fire: null, clear: true };
     if (consecutiveFailures < SYNC_FAILURE_ALERT_STREAK) return { fire: null, clear: false };
-    const lastedMs = this.#failingSince === null || this.#lastFailureAt === null ? 0 : this.#lastFailureAt - this.#failingSince;
+    const lastedMs =
+      !this.#lastFailurePages || this.#pageableSince === null || this.#lastFailureAt === null ? 0 : this.#lastFailureAt - this.#pageableSince;
     const look = this.#lastFailureDiff === null ? "" : ` Last look: ${summarizeDiff(this.#lastFailureDiff)}.`;
+    const refusalsOnly = this.#lastFailurePages
+      ? ""
+      : " Refused deliveries alone never page: anybody can POST to the receiver. If Helius's own are the refused ones, nothing rings — the " +
+        "safety rotation still turns every link within 30 min, and the keeper's next settle whose echo does not come back makes the doorbell deaf.";
     if (lastedMs >= SYNC_FAILURE_CRITICAL_AFTER_MS) {
       return {
         fire: {
@@ -1254,7 +1492,7 @@ export class WebhookSync {
         title: "The keeper cannot keep its Helius webhook in step",
         detail:
           `${consecutiveFailures} syncs in a row failed: ${lastSyncError ?? "unknown"}.${look} New links are turned every sweep until ` +
-          "the webhook holds them, so nothing is missed — but the webhook on Helius should be checked.",
+          `the webhook holds them, so nothing is missed — but the webhook on Helius should be checked.${refusalsOnly}`,
       },
       clear: false,
     };
