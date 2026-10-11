@@ -376,6 +376,8 @@ export class Doorbell {
   #authConfirmed = false;
   #eventsReceived = 0;
   #eventsRejected = 0;
+  /** Refused since the last authenticated delivery: the run the webhook sync judges a hidden header by. */
+  #rejectedSinceAccepted = 0;
   #eventsLost = 0;
   #lastEventAt: number | null = null;
   #lastEventLagMs: number | null = null;
@@ -477,6 +479,7 @@ export class Doorbell {
       this.#eventsReceived += transactions.length;
       // AN AUTHENTICATED TRANSACTION IS PROOF the webhook sends this secret.
       this.#authConfirmed = true;
+      this.#rejectedSinceAccepted = 0;
       this.#lastEventAt = now;
       this.#lastEventLagMs = newestBlockTime === null ? null : Math.max(0, now - newestBlockTime * 1000);
       // HEARD AGAIN: the pipe that went deaf delivers, so it is trusted again.
@@ -518,18 +521,22 @@ export class Doorbell {
    */
   rejected(): void {
     this.#eventsRejected += 1;
+    this.#rejectedSinceAccepted += 1;
     if (this.enabled && !this.#authConfirmed) {
       this.requestFullPass("a delivery was refused 403 before the webhook was known to send this secret; Helius does not resend it");
     }
   }
 
   /**
-   * Transactions authenticated and deliveries refused since boot. The webhook
-   * sync compares them with their count at its last edit: the outside word on
+   * Transactions authenticated and deliveries refused since boot, and the
+   * deliveries refused since the last authenticated one. The webhook sync
+   * compares them with their count at its last edit: the outside word on
    * whether Helius sends the header it wrote when the list will not show it.
+   * The run since the last accepted one is what lets that word change — a
+   * delivery accepted once does not vouch for the header for good.
    */
-  deliveryCounts(): { readonly accepted: number; readonly rejected: number } {
-    return { accepted: this.#eventsReceived, rejected: this.#eventsRejected };
+  deliveryCounts(): { readonly accepted: number; readonly rejected: number; readonly rejectedSinceAccepted: number } {
+    return { accepted: this.#eventsReceived, rejected: this.#eventsRejected, rejectedSinceAccepted: this.#rejectedSinceAccepted };
   }
 
   /** The webhook's Authorization header is known to be this secret (a sync confirmed or wrote it). */

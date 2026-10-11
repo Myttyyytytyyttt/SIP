@@ -468,7 +468,12 @@ en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, 
   100, `extra-only`, o `differs`), `auth` (solo `absent`/`same`/`different` y pistas sí/no: si parece enmascarada, si
   coinciden principio y final, si contiene la nuestra… **nunca** el valor ni un trozo), y `shape` (raw · ANY · all tal
   como los enseña Helius). `differs: []` es que está al día. `webhook.lastEditEcho` es lo mismo para la respuesta del
-  último PUT o creación. Si me avisas de un fallo del timbre, pégame estos dos bloques: no llevan nada secreto.
+  último PUT o creación. Si me avisas de un fallo del timbre, pégame estos dos bloques: no llevan nada secreto (un
+  texto de Helius que lleve un trozo del secreto sale como `(withheld)`).
+- `auth.verdict` = `refused` quiere decir que la lista no enseña la cabecera y que, desde la última edición, se
+  rechazaron (403) al menos 3 entregas seguidas sin ninguna aceptada después. Pueden ser de Helius o de cualquiera que
+  haga POST a `/hooks/helius`: el vigilante reescribe la cabecera como mucho una vez por proceso; las demás veces lo
+  da como fallo (y `doorbell-sync` avisa) en vez de pagar otro PUT. Una entrega aceptada lo deshace.
 - `webhook.failingSince` es desde cuándo fallan las sincronizaciones seguidas; `null` mientras van bien.
 
 Dos alertas nuevas: `doorbell-deaf` (dejó de oír y vuelve a girar a todos), de aviso, y `doorbell-sync` (no consigue

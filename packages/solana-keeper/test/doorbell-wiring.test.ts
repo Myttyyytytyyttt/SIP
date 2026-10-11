@@ -356,6 +356,12 @@ describe("the webhook sync, reporting into the doorbell (createDoorbellWebhookSy
     route.accepted(delivery([links[3]!.wallet]));
     await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + RECHECK_MS });
     expect(sync.status().lastDiff?.auth).toMatchObject({ state: "absent", verdict: "written-by-us", evidence: "proven" });
+    // W3. AND THE REFUSALS SINCE THE LAST ACCEPTED ONE: a run of them takes the proof back, which one accepted delivery once kept for good.
+    route.rejected();
+    route.rejected();
+    route.rejected();
+    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + 2 * RECHECK_MS });
+    expect(sync.status().lastDiff?.auth).toMatchObject({ state: "absent", verdict: "refused", evidence: "refused" });
   });
 
   it("scrubs the doorbell secret out of an error Helius echoes back", async () => {

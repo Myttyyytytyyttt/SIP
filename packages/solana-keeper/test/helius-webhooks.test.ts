@@ -12,12 +12,14 @@ import {
   MAX_WEBHOOK_ADDRESSES,
   MIN_EDIT_INTERVAL_MS,
   RECHECK_MS,
+  REFUSALS_TO_WITHDRAW,
   SYNC_FAILURE_ALERT_STREAK,
   SYNC_FAILURE_CRITICAL_AFTER_MS,
   WebhookSync,
   createHeliusWebhookClient,
   ensureWebhook,
   syncDue,
+  type DeliveryCounts,
   type HeliusWebhook,
   type SyncReport,
 } from "../src/helius-webhooks.js";
@@ -408,7 +410,7 @@ describe("the sync, under a logger that throws", () => {
 /** A fetch in front of the fake Helius that can rewrite its list, or refuse a method. */
 function shaped(
   helius: ReturnType<typeof fakeHelius>,
-  over: { list?: (hooks: HeliusWebhook[]) => unknown[]; refuse?: string; freezePut?: boolean; mergePut?: boolean },
+  over: { list?: (hooks: HeliusWebhook[]) => unknown[]; refuse?: string; freezePut?: boolean; mergePut?: boolean; answer?: (hook: HeliusWebhook) => unknown },
 ): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
@@ -436,6 +438,11 @@ function shaped(
       const old = helius.hooks[index]!;
       helius.hooks[index] = { ...old, ...body, accountAddresses: [...new Set([...(old.accountAddresses ?? []), ...(body.accountAddresses ?? [])])] };
       return new Response(JSON.stringify(helius.hooks[index]), { status: 200 });
+    }
+    if (method === "PUT" && over.answer !== undefined) {
+      // KEPT AS SENT, AND ANSWERED IN ANOTHER FORM: what the answer says is all that changes.
+      const response = await helius.fetchImpl(input, init);
+      return new Response(JSON.stringify(over.answer((await response.json()) as HeliusWebhook)), { status: response.status });
     }
     return helius.fetchImpl(input, init);
   };
@@ -469,7 +476,7 @@ interface Logged {
 const syncOver = (
   fetchImpl: typeof fetch,
   reports: SyncReport[] = [],
-  over: { deliveries?: () => { accepted: number; rejected: number }; secret?: Secret; logs?: Logged[] } = {},
+  over: { deliveries?: () => DeliveryCounts; secret?: Secret; logs?: Logged[] } = {},
 ) => {
   const own = over.secret ?? secret;
   return new WebhookSync({
@@ -481,6 +488,22 @@ const syncOver = (
     ...(over.deliveries === undefined ? {} : { deliveries: over.deliveries }),
   });
 };
+
+/** The doorbell's delivery counts, kept the way Doorbell.deliveryCounts keeps them: an accepted delivery ends the run of refusals. */
+function counted() {
+  const counts = { accepted: 0, rejected: 0, rejectedSinceAccepted: 0 };
+  return {
+    accept(transactions = 1): void {
+      counts.accepted += transactions;
+      counts.rejectedSinceAccepted = 0;
+    },
+    reject(deliveries = 1): void {
+      counts.rejected += deliveries;
+      counts.rejectedSinceAccepted += deliveries;
+    },
+    read: (): DeliveryCounts => ({ ...counts }),
+  };
+}
 
 describe("the sync does not pay for the same edit twice", () => {
   // THE INCIDENT: a PUT Helius refused (a hand-made "enhanced" webhook it would
@@ -697,16 +720,18 @@ describe("the header the list shows (H1)", () => {
   // T4
   it("withdraws that trust when deliveries since the edit were refused and none accepted: stuck, one GET per ten minutes, warn, then a page at an hour", async () => {
     const helius = fakeHelius([existing()]);
-    const delivered = { accepted: 0, rejected: 0 };
-    const engine = syncOver(bearer(helius), [], { deliveries: () => ({ ...delivered }) });
+    const delivered = counted();
+    const engine = syncOver(bearer(helius), [], { deliveries: delivered.read });
     await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
-    delivered.rejected += 3;
+    delivered.reject(REFUSALS_TO_WITHDRAW);
     const severity = new Map<number, string | null>();
     await minutes(engine, ["w1", "v1"], 1, 80, (minute) => severity.set(minute, engine.syncAlert().fire?.severity ?? null));
     expect(countOf(helius, "PUT")).toBe(1);
     expect(countOf(helius, "GET")).toBe(1 + 8);
-    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "differs", evidence: "refused" });
-    expect(engine.status().lastSyncError).toContain("did not keep");
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "refused", evidence: "refused" });
+    // Said as what it is — refused deliveries — not as an edit Helius did not keep.
+    expect(engine.status().lastSyncError).toContain("refused 403");
+    expect(engine.status().lastSyncError).not.toContain("did not keep");
     // Stuck from minute 10: the third failure is minute 30, an hour of them is minute 70.
     expect(engine.status().failingSince).toBe(new Date(T_BOOT + 10 * MINUTE).toISOString());
     expect(severity.get(29)).toBeNull();
@@ -718,11 +743,11 @@ describe("the header the list shows (H1)", () => {
   // T5
   it("calls the header proven once a delivery is accepted after the edit", async () => {
     const helius = fakeHelius([existing()]);
-    const delivered = { accepted: 0, rejected: 0 };
-    const engine = syncOver(bearer(helius), [], { deliveries: () => ({ ...delivered }) });
+    const delivered = counted();
+    const engine = syncOver(bearer(helius), [], { deliveries: delivered.read });
     await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
-    delivered.rejected += 1;
-    delivered.accepted += 1;
+    delivered.reject();
+    delivered.accept();
     await minutes(engine, ["w1", "v1"], 1, 30);
     expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "written-by-us", evidence: "proven" });
     expect(engine.status().consecutiveFailures).toBe(0);
@@ -788,7 +813,7 @@ describe("the addresses the list shows (H2)", () => {
     const emptied = (helius: ReturnType<typeof fakeHelius>) => shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, accountAddresses: [] })) });
 
     const silent = fakeHelius([existing()]);
-    const stuck = syncOver(emptied(silent), [], { deliveries: () => ({ accepted: 0, rejected: 0 }) });
+    const stuck = syncOver(emptied(silent), [], { deliveries: counted().read });
     const quiet = await anHour(stuck, ["w1", "v1"], silent);
     expect(quiet.update).toBe(1);
     expect(quiet.list).toBeLessThanOrEqual(7);
@@ -797,10 +822,10 @@ describe("the addresses the list shows (H2)", () => {
     expect(stuck.status().lastSyncError).toContain("did not keep");
 
     const heard = fakeHelius([existing()]);
-    const delivered = { accepted: 0, rejected: 0 };
-    const healthy = syncOver(emptied(heard), [], { deliveries: () => ({ ...delivered }) });
+    const delivered = counted();
+    const healthy = syncOver(emptied(heard), [], { deliveries: delivered.read });
     await healthy.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
-    delivered.accepted += 2;
+    delivered.accept(2);
     await minutes(healthy, ["w1", "v1"], 1, 59);
     expect(countOf(heard, "PUT")).toBe(1);
     expect(healthy.status().lastDiff!.addresses.verdict).toBe("written-unlisted");
@@ -850,33 +875,202 @@ describe("what the diagnostics may carry", () => {
   // T14. A secret of its own: the shared SECRET contains the word "secret", which a field name could contain too.
   const OWN = "Q7mZ2vKp9XwR4tLb8NcY3hJs6FdG1aEu";
   const own = new Secret(OWN, "doorbellSecret");
-  const windows = Array.from({ length: OWN.length - 5 }, (_, index) => OWN.slice(index, index + 6));
+  // COMPARED IN LOWER CASE: an upper-cased header holds none of the original's
+  // windows as they are, and a leak of what the "upper case" view shows would
+  // pass a case-sensitive search (review, 2026-10-11).
+  const windows = Array.from({ length: OWN.length - 5 }, (_, index) => OWN.slice(index, index + 6).toLowerCase());
+  const headerOf = (hook: HeliusWebhook): string => `${hook.authHeader ?? ""}`;
 
   it("never carries six characters of the header in a row — not in /status, a log line or doorbell-sync — whatever the list shows", async () => {
     // A WIDE MASK TOO: four visible characters a side could leak whole and never fill a six-character window.
     const wide = (value: string): string => `${value.slice(0, 10)}${"*".repeat(Math.max(0, value.length - 20))}${value.slice(-10)}`;
+    const listing = (rewrite: (hook: HeliusWebhook) => unknown) => (helius: ReturnType<typeof fakeHelius>) =>
+      shaped(helius, { list: (hooks) => hooks.map(rewrite) });
     const views: Record<string, (helius: ReturnType<typeof fakeHelius>) => typeof fetch> = {
       masked: masking,
-      "masked wide": (helius) => shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, authHeader: wide(hook.authHeader ?? "") })) }),
+      "masked wide": listing((hook) => ({ ...hook, authHeader: wide(headerOf(hook)) })),
       bearer,
-      unlisted: (helius) => shaped(helius, { list: (hooks) => hooks.map(({ accountAddresses: _omitted, ...rest }) => rest) }),
-      "upper case": (helius) => shaped(helius, { list: (hooks) => hooks.map((hook) => ({ ...hook, authHeader: `${hook.authHeader ?? ""}`.toUpperCase() })) }),
+      unlisted: listing(({ accountAddresses: _omitted, ...rest }) => rest),
+      "upper case": listing((hook) => ({ ...hook, authHeader: headerOf(hook).toUpperCase() })),
       frozen: (helius) => shaped(helius, { freezePut: true }),
+      // EVERY OTHER STRING HELIUS RETURNS: the header echoed where nothing looks for it.
+      "in encoding": listing((hook) => ({ ...hook, encoding: headerOf(hook) })),
+      "in txnStatus, Bearer": listing((hook) => ({ ...hook, txnStatus: `Bearer ${headerOf(hook)}` })),
+      "in transactionTypes, upper case": listing((hook) => ({ ...hook, transactionTypes: ["ANY", headerOf(hook).toUpperCase()] })),
+      "in webhookType, after 30 characters": listing((hook) => ({ ...hook, webhookType: `${"r".repeat(30)}${headerOf(hook)}` })),
+      "as an address": listing((hook) => ({ ...hook, accountAddresses: [...(hook.accountAddresses ?? []), `${"x".repeat(5000)}${headerOf(hook)}`] })),
+      "as a field name": listing((hook) => ({ ...hook, [headerOf(hook)]: true })),
+      "in the PUT's answer": (helius) =>
+        shaped(helius, { answer: (hook) => ({ ...hook, encoding: headerOf(hook), txnStatus: `Bearer ${headerOf(hook)}`, accountAddresses: [headerOf(hook)] }) }),
     };
     for (const [name, view] of Object.entries(views)) {
       for (const held of [OWN, `${OWN.slice(0, 12)}-the-old-one-${OWN.slice(-12)}`]) {
         const helius = fakeHelius([existing({ authHeader: held })]);
         const logs: Logged[] = [];
-        const delivered = { accepted: 0, rejected: 0 };
-        const engine = syncOver(view(helius), [], { secret: own, logs, deliveries: () => ({ ...delivered }) });
+        const delivered = counted();
+        const engine = syncOver(view(helius), [], { secret: own, logs, deliveries: delivered.read });
         await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
-        delivered.rejected += 1;
+        delivered.reject();
         await minutes(engine, ["w1", "v1", "w2"], 10, 90);
-        const served = [JSON.stringify(engine.status()), JSON.stringify(engine.syncAlert()), JSON.stringify(logs)].join("\n");
+        const served = [JSON.stringify(engine.status()), JSON.stringify(engine.syncAlert()), JSON.stringify(logs)].join("\n").toLowerCase();
         expect(logs.length, name).toBeGreaterThan(0);
         for (const window of windows) expect(served, `${name}: six characters of the header`).not.toContain(window);
+        // AND NOTHING HELIUS RETURNED GOES OUT UNCUT: not even a piece of the 5,000-character "address" longer than an address.
+        expect(served, `${name}: an "address" longer than any address`).not.toContain("x".repeat(45));
       }
     }
+  });
+});
+
+// ── what the review of the fix found (2026-10-11) ─────────────────────────────
+//
+// THE RULES FORGAVE TOO MUCH, AND THE DELIVERIES SAID TOO LITTLE. A plain
+// header unlike ours, and an address list emptied after it had shown the
+// addresses, were forgiven because this process had once written something;
+// one accepted delivery vouched for the header until the next edit; one
+// stranger's 403 withdrew it, made a healthy webhook stuck and paged an hour
+// later, or bought a 100-credit PUT every twenty minutes.
+
+const headerless = (hooks: HeliusWebhook[]) => hooks.map(({ authHeader: _omitted, ...rest }) => rest);
+
+describe("what the list shows plainly is a change on Helius's side", () => {
+  // R1
+  it("writes back a plain header with nothing of ours in it, a delivery proved since notwithstanding — with a gap", async () => {
+    const helius = fakeHelius([existing({ authHeader: "the-old-secret" })]);
+    const reports: SyncReport[] = [];
+    const delivered = counted();
+    const engine = syncOver(helius.fetchImpl, reports, { deliveries: delivered.read });
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
+    delivered.accept();
+    // The look at minute 10 sees ours: converged.
+    await minutes(engine, ["w1", "v1"], 1, 14);
+    expect(countOf(helius, "PUT")).toBe(1);
+    // A hand edit in the Helius dashboard, shown in plain text.
+    helius.hooks[0] = { ...helius.hooks[0]!, authHeader: "someone-typed-this-in-the-dashboard" };
+    await minutes(engine, ["w1", "v1"], 15, 20);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(helius.hooks[0]!.authHeader).toBe(SECRET);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ state: "different", verdict: "differs", evidence: "proven", hint: { looksMasked: false, containsOurs: false } });
+    expect(reports.at(-1)!.gap).toContain("Authorization");
+    expect(engine.status().consecutiveFailures).toBe(0);
+  });
+
+  it("writes back a masked header whose visible ends are another's, after having written its own", async () => {
+    const helius = fakeHelius([existing({ accountAddresses: ["v1"] })]);
+    const engine = syncOver(masking(helius));
+    // The boot PUT is for the addresses; it writes the header too.
+    await minutes(engine, ["w1", "v1"], 0, 14);
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().lastDiff!.auth.verdict).toBe("masked-ours");
+    helius.hooks[0] = { ...helius.hooks[0]!, authHeader: "zz-another-secret-0123456789abcdef-yy" };
+    await minutes(engine, ["w1", "v1"], 15, 20);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "differs", hint: { looksMasked: true, prefixAgrees: false } });
+  });
+
+  // R2
+  it("writes back an address list Helius emptied after it had shown the addresses, an accepted delivery notwithstanding", async () => {
+    const helius = fakeHelius([existing({ accountAddresses: ["v1"] })]);
+    const reports: SyncReport[] = [];
+    const delivered = counted();
+    const engine = syncOver(helius.fetchImpl, reports, { deliveries: delivered.read });
+    const addresses = ["w1", "v1", "x1"];
+    await engine.tick({ acting: true, addresses, now: T_BOOT });
+    delivered.accept();
+    await minutes(engine, addresses, 1, 20);
+    expect(countOf(helius, "PUT")).toBe(1);
+    helius.hooks[0] = { ...helius.hooks[0]!, accountAddresses: [] };
+    await minutes(engine, addresses, 21, 30);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(helius.hooks[0]!.accountAddresses).toEqual(["v1", "w1", "x1"]);
+    expect(engine.status().lastDiff!.addresses).toMatchObject({ listed: true, held: 0, verdict: "differs" });
+    expect([...reports.at(-1)!.watched].sort()).toEqual(["v1", "w1", "x1"]);
+  });
+});
+
+describe("refused deliveries are anybody's", () => {
+  // R4 — ONE STRANGER, A QUIET HOUR.
+  it("is not stuck, and pages nobody, over one 403 after the boot PUT and an hour and a quarter with no delivery", async () => {
+    const helius = fakeHelius([existing()]);
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), [], { deliveries: delivered.read });
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
+    delivered.reject();
+    const severity = new Set<string>();
+    await minutes(engine, ["w1", "v1"], 1, 75, () => severity.add(engine.syncAlert().fire?.severity ?? "none"));
+    expect(countOf(helius, "PUT")).toBe(1);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    expect([...severity]).toEqual(["none"]);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ state: "absent", verdict: "written-by-us", evidence: "none" });
+  });
+
+  // R3 — A STRANGER EVERY TWENTY MINUTES, FOR A DAY.
+  it("lets no outside traffic buy a PUT every twenty minutes: the header is re-written at most once, then reported", async () => {
+    const helius = fakeHelius();
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), [], { deliveries: delivered.read });
+    // Each one lands after a converged look, which cleared lastEdit: the old rule PUT on the next look, 72 times a day.
+    await minutes(engine, ["w1", "v1"], 0, 24 * 60, (minute) => {
+      if (minute % 20 === 15) delivered.reject();
+    });
+    expect(countOf(helius, "POST")).toBe(1);
+    expect(countOf(helius, "PUT")).toBeLessThanOrEqual(1);
+    expect(countOf(helius, "GET")).toBeLessThanOrEqual(24 * 6 + 1);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ state: "absent", verdict: "refused", evidence: "refused" });
+    expect(engine.status().lastSyncError).toContain("refused 403");
+    expect(engine.status().lastSyncError).toContain("stranger");
+  });
+
+  // R5 — A DELIVERY ACCEPTED ONCE DOES NOT VOUCH FOR THE HEADER FOR GOOD.
+  it("takes the proof back when refusals follow the last accepted delivery: one re-write with a gap, then reported, then healed by a delivery", async () => {
+    const helius = fakeHelius([existing()]);
+    const reports: SyncReport[] = [];
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), reports, { deliveries: delivered.read });
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
+    delivered.accept();
+    await minutes(engine, ["w1", "v1"], 1, 14);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "written-by-us", evidence: "proven" });
+
+    delivered.reject(REFUSALS_TO_WITHDRAW);
+    await minutes(engine, ["w1", "v1"], 15, 20);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(reports.at(-1)!.gap).toContain("refused 403");
+
+    // Nothing refused since the re-write: converged — and the next run of refusals is reported, not paid for.
+    await minutes(engine, ["w1", "v1"], 21, 34);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    delivered.reject(REFUSALS_TO_WITHDRAW);
+    await minutes(engine, ["w1", "v1"], 35, 40);
+    expect(countOf(helius, "PUT")).toBe(2);
+    expect(engine.status().consecutiveFailures).toBe(1);
+    expect(engine.status().lastSyncError).toContain("refused 403");
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "refused", evidence: "refused" });
+
+    delivered.accept();
+    await minutes(engine, ["w1", "v1"], 41, 50);
+    expect(engine.status().consecutiveFailures).toBe(0);
+    expect(engine.status().lastDiff!.auth).toMatchObject({ verdict: "written-by-us", evidence: "proven" });
+    expect(countOf(helius, "PUT")).toBe(2);
+  });
+
+  it("still re-writes a refused header that an address edit carries anyway", async () => {
+    const helius = fakeHelius([existing()]);
+    const delivered = counted();
+    const engine = syncOver(shaped(helius, { list: headerless }), [], { deliveries: delivered.read });
+    await engine.tick({ acting: true, addresses: ["w1", "v1"], now: T_BOOT });
+    await minutes(engine, ["w1", "v1"], 1, 14);
+    delivered.reject(REFUSALS_TO_WITHDRAW);
+    await minutes(engine, ["w1", "v1"], 15, 24);
+    await minutes(engine, ["w1", "v1"], 25, 34);
+    delivered.reject(REFUSALS_TO_WITHDRAW);
+    // Spent: the refused header alone is reported...
+    await minutes(engine, ["w1", "v1"], 35, 40);
+    expect(countOf(helius, "PUT")).toBe(2);
+    // ...but a new link is still written, header and all.
+    await minutes(engine, ["w1", "v1", "w2"], 41, 41);
+    expect(countOf(helius, "PUT")).toBe(3);
+    expect(helius.hooks[0]!.accountAddresses).toEqual(["v1", "w1", "w2"]);
   });
 });
 

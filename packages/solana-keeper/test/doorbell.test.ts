@@ -595,14 +595,19 @@ describe("what the webhook sync reads as evidence", () => {
   // D1. The sync judges a header the list hides by what was delivered since its edit.
   it("counts authenticated transactions and refused deliveries, and nothing a lost delivery carried", () => {
     const bell = new Doorbell(true);
-    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 0 });
+    const accepted = fixtures["solDepositToVault"]!.length;
+    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 0, rejectedSinceAccepted: 0 });
     bell.rejected();
     bell.rejected();
-    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 2 });
+    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 2, rejectedSinceAccepted: 2 });
+    // AN ACCEPTED DELIVERY ENDS THE RUN of refusals: what follows it is judged on its own.
     bell.ingest(fixtures["solDepositToVault"], new Set(), T0);
+    expect(bell.deliveryCounts()).toEqual({ accepted, rejected: 2, rejectedSinceAccepted: 0 });
+    bell.rejected();
+    // A delivery lost, or one with no transaction in it, is not an accepted one: the run goes on.
     bell.ingestBody("not json", new Set(), T0);
     bell.ingest([{}], new Set(), T0);
-    expect(bell.deliveryCounts()).toEqual({ accepted: fixtures["solDepositToVault"]!.length, rejected: 2 });
+    expect(bell.deliveryCounts()).toEqual({ accepted, rejected: 3, rejectedSinceAccepted: 1 });
     expect(bell.deliveryCounts().accepted).toBe(bell.status(T0).eventsReceived);
   });
 });

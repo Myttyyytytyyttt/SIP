@@ -36,6 +36,17 @@
 // which a converged look clears. A stuck webhook is looked at every
 // RECHECK_MS, not every sweep, and pages once it has been out of step for
 // SYNC_FAILURE_CRITICAL_AFTER_MS.
+//
+// AND WHAT THE LIST DOES SHOW IS NOT FORGIVEN BECAUSE THIS PROCESS ONCE WROTE
+// SOMETHING (review, 2026-10-11). A plain header with nothing of ours in it,
+// or an address list emptied after it had shown the addresses, is a change on
+// Helius's side, and is written back as before. The deliveries the doorbell
+// counts are judged as they come — refused in a row AFTER the last accepted
+// one, not "one accepted, once, since the edit" — and never on one 403: the
+// receiver's URL is public, and a stranger's POST is refused like Helius's.
+// What the deliveries alone withdraw is re-written at most once per process,
+// and otherwise reported, so outside traffic cannot buy a PUT every twenty
+// minutes.
 
 import type { Secret } from "@sip/solana-log";
 
@@ -72,12 +83,31 @@ export const DOORBELL_SYNC_ALERT_KEY = "doorbell-sync";
  * a webhook that lost the rest.
  */
 export const LIST_ADDRESS_CAP = 100;
+/**
+ * Deliveries refused 403 IN A ROW — after this process's last edit AND after
+ * the last delivery accepted — before they count against the header it wrote
+ * (AuthEvidence "refused"). Not one: POST /hooks/helius is a public URL, every
+ * stranger's request is refused like a delivery with the wrong header, and one
+ * probe after the boot PUT made a healthy webhook "stuck" and paged an hour
+ * later (review, 2026-10-11). An accepted delivery starts the count again.
+ */
+export const REFUSALS_TO_WITHDRAW = 3;
 const EXCERPT_CHARS = 200;
 /** How much of a look a WebhookDiff keeps: addresses named per side, characters per string, entries per list, field names. */
 const DIFF_SAMPLE = 3;
 const DIFF_TEXT_CHARS = 40;
 const DIFF_LIST_ENTRIES = 10;
 const DIFF_FIELDS = 20;
+/** A Solana address in base58 is at most 44 characters: the most of one a WebhookDiff names. */
+const ADDRESS_CHARS = 44;
+/**
+ * Characters in a row that a header the list shows must share with ours to be
+ * compared at all (a mask's visible ends, a truncation) — and that no string a
+ * WebhookDiff carries may share with ours.
+ */
+const HEADER_WINDOW = 6;
+/** What a WebhookDiff says in place of a string Helius returned that carries a piece of the header. */
+const WITHHELD = "(withheld)";
 
 export interface HeliusWebhook {
   readonly webhookID: string;
@@ -258,7 +288,13 @@ export interface AuthHint {
   readonly withinOurs: boolean;
 }
 
-/** What deliveries since this process's last edit say about the header Helius sends. */
+/**
+ * What deliveries since this process's last edit say about the header Helius
+ * sends: "refused" when at least REFUSALS_TO_WITHDRAW in a row were refused
+ * after the last one accepted (and after the edit); else "proven" once one was
+ * accepted; else "none". Read afresh at every look — a delivery accepted once
+ * does not vouch for the header for good.
+ */
 export type AuthEvidence = "proven" | "refused" | "none";
 
 /** One look at the webhook, described: what /status, the logs and doorbell-sync say about it. */
@@ -275,7 +311,11 @@ export interface WebhookDiff {
     readonly desired: number;
     readonly missing: number;
     readonly extra: number;
-    /** The first DIFF_SAMPLE of each: public, on-chain addresses. */
+    /**
+     * The first DIFF_SAMPLE of each: public, on-chain addresses. The extra ones
+     * are what Helius returned, so each is cut to ADDRESS_CHARS and withheld
+     * when it carries a piece of the header.
+     */
     readonly missingSample: readonly string[];
     readonly extraSample: readonly string[];
     readonly verdict: "same" | "written-unlisted" | "list-capped" | "extra-only" | "differs";
@@ -283,11 +323,20 @@ export interface WebhookDiff {
   readonly auth: {
     readonly state: "absent" | "same" | "different";
     readonly hint: AuthHint | null;
-    readonly verdict: "same" | "masked-ours" | "written-by-us" | "differs";
+    /**
+     * "refused": one this process wrote and the list cannot show, which the
+     * deliveries since contradict (AuthEvidence "refused") — re-written at
+     * most once per process, and otherwise reported as a failed sync.
+     */
+    readonly verdict: "same" | "masked-ours" | "written-by-us" | "refused" | "differs";
     readonly evidence: AuthEvidence;
   };
   readonly shape: {
-    /** As Helius shows them, cut to DIFF_TEXT_CHARS characters and DIFF_LIST_ENTRIES entries. */
+    /**
+     * As Helius shows them, cut to DIFF_TEXT_CHARS characters and
+     * DIFF_LIST_ENTRIES entries, and WITHHELD when one carries a piece of the
+     * header: these are Helius's strings, and /status is public.
+     */
     readonly webhookType: string | null;
     readonly transactionTypes: readonly string[] | null;
     readonly txnStatus: string | null;
@@ -305,6 +354,19 @@ export interface DescribeContext {
   /** The canonical address key (sorted, joined by ",") this process last wrote to knownId. */
   readonly writtenKey?: string | null;
   readonly authEvidence?: AuthEvidence;
+  /**
+   * A delivery was accepted since this process's last edit: the webhook
+   * delivers, whatever its list shows. Unlike authEvidence it does not go back
+   * to "no" — it is asked only about addresses, which a refused delivery does
+   * not contradict.
+   */
+  readonly heardSinceEdit?: boolean;
+  /**
+   * The list has shown this webhook holding addresses since this process's
+   * last edit. An empty list after that is not the list's habit but a change
+   * on Helius's side, and is written back.
+   */
+  readonly listedSinceEdit?: boolean;
   /** When the look happened, for WebhookDiff.at. */
   readonly now?: number;
 }
@@ -353,8 +415,45 @@ function heldAddresses(found: HeliusWebhook): string[] {
   return Array.isArray(raw) ? canonicalAddresses(raw.filter((address): address is string => typeof address === "string")) : [];
 }
 
-const shown = (value: unknown): string | null =>
-  value === undefined || value === null ? null : typeof value === "string" ? value.slice(0, DIFF_TEXT_CHARS) : `(${typeof value})`;
+/**
+ * Whether a text carries HEADER_WINDOW characters of ours in a row, in any
+ * case, as they are or URL-encoded — or all of ours, when ours is shorter.
+ */
+function carriesOurs(text: string, ours: string): boolean {
+  const haystack = text.toLowerCase();
+  for (const form of new Set([ours, encodeURIComponent(ours)])) {
+    const needle = form.toLowerCase();
+    if (needle.length === 0) continue;
+    if (needle.length <= HEADER_WINDOW) {
+      if (haystack.includes(needle)) return true;
+      continue;
+    }
+    for (let at = 0; at + HEADER_WINDOW <= needle.length; at += 1) {
+      if (haystack.includes(needle.slice(at, at + HEADER_WINDOW))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * A string Helius returned, as a WebhookDiff may carry it: cut to `max`, and
+ * WITHHELD whole when any of it carries a piece of the header.
+ *
+ * EVERY HELIUS STRING, NOT ONLY authHeader. A body that echoes the header in a
+ * renamed field, in encoding, or as an "address" someone pasted into the
+ * dashboard would otherwise reach /status — public — in full: forty characters
+ * hold a 32-character secret, and an address had no cap at all (review,
+ * 2026-10-11). The whole value is checked, not the cut, so no window of it
+ * survives the cut either.
+ */
+const told = (value: unknown, ours: string, max: number = DIFF_TEXT_CHARS): string | null =>
+  value === undefined || value === null
+    ? null
+    : typeof value !== "string"
+      ? `(${typeof value})`
+      : carriesOurs(value, ours)
+        ? WITHHELD
+        : value.slice(0, max);
 const canonicalWord = (value: unknown): string | null => (typeof value === "string" ? value.trim().toLowerCase() : null);
 
 /**
@@ -365,17 +464,30 @@ const canonicalWord = (value: unknown): string | null => (typeof value === "stri
  * header or address set, and none of them is keyed on `lastEdit`, which a
  * converged look clears — a rule that was would PUT every other look.
  *
- *   * HEADER. The same value; or a MASKED value with at least six characters
- *     showing whose visible ends are ours' ends; or one this process wrote,
- *     unless deliveries since have been refused and none accepted. That last
- *     rule covers a list that leaves the header out (the rule before this one),
- *     masks it opaquely, or shows it transformed ("Bearer …").
+ * AND ONLY WHERE THE LIST CANNOT SHOW WHAT IT HOLDS. What it does show, plainly
+ * and unlike ours, is a change on Helius's side — a hand edit in the dashboard,
+ * an instance with another secret — and having written something once does
+ * not forgive it (review, 2026-10-11).
+ *
+ *   * HEADER. The same value; or a MASKED value with at least HEADER_WINDOW
+ *     characters showing whose visible ends are ours' ends; or one this
+ *     process wrote, when what the list shows cannot contradict it — no header,
+ *     a blank one, a mask whose visible ends are not another's, or ours
+ *     transformed (inside "Bearer …", in another case, trimmed, or a truncation
+ *     of HEADER_WINDOW characters or more). That last rule holds until the
+ *     deliveries say otherwise (AuthEvidence "refused"): then the verdict is
+ *     "refused", and the webhook is re-written at most once per process.
  *   * ADDRESSES. The same set; or one this process wrote, when the list leaves
- *     accountAddresses out, cuts it at LIST_ADDRESS_CAP, shows an empty list
- *     while authenticated deliveries prove the webhook works, or holds only
- *     extra ones besides (a PUT that merged).
+ *     accountAddresses out, cuts it at LIST_ADDRESS_CAP, holds only extra ones
+ *     besides (a PUT that merged), or shows an empty list — the last only
+ *     while a delivery accepted since the edit proves the webhook works and the
+ *     list has not shown the addresses since: an empty list after a full one is
+ *     Helius emptying it.
  *   * SHAPE, compared trimmed and lower-case: raw, ["any"], all. A field the
  *     list leaves out (or shows as null) passes.
+ *
+ * NO STRING HELIUS RETURNED LEAVES WHOLE (told): field names, shape values and
+ * extra addresses are cut, and withheld when they carry a piece of the header.
  *
  * Every relaxation still has the doorbell's own nets under it: the receiver's
  * exact header check, the echo deadline that makes it deaf, and the safety
@@ -404,12 +516,21 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
   const maskedOurs =
     hint !== null &&
     hint.looksMasked &&
-    hint.visibleChars >= 6 &&
+    hint.visibleChars >= HEADER_WINDOW &&
     hint.prefixAgrees !== false &&
     hint.suffixAgrees !== false &&
     (hint.prefixAgrees === true || hint.suffixAgrees === true);
+  // WHAT THE LIST SHOWS IN PLACE OF OURS, AND WHETHER IT COULD STILL BE OURS:
+  // nothing to see (no header, a blank one, a mask whose visible ends are not
+  // another's), or ours transformed. A plain value with nothing of ours in it,
+  // or a mask showing another's ends, is not — it is written back.
+  const hidden = state === "absent" || (typeof theirs === "string" && theirs.trim() === "");
+  const opaque = hint !== null && hint.looksMasked && hint.prefixAgrees !== false && hint.suffixAgrees !== false;
+  const transformed =
+    hint !== null && (hint.containsOurs || hint.equalTrimmed || hint.equalIgnoringCase || (hint.withinOurs && hint.visibleChars >= HEADER_WINDOW));
+  const mayBeWritten = wroteHeader && (hidden || opaque || transformed);
   const authVerdict: WebhookDiff["auth"]["verdict"] =
-    state === "same" ? "same" : maskedOurs ? "masked-ours" : wroteHeader && evidence !== "refused" ? "written-by-us" : "differs";
+    state === "same" ? "same" : maskedOurs ? "masked-ours" : mayBeWritten ? (evidence === "refused" ? "refused" : "written-by-us") : "differs";
 
   const addressVerdict: WebhookDiff["addresses"]["verdict"] =
     missing.length === 0 && extra.length === 0
@@ -418,7 +539,7 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
         ? "written-unlisted"
         : held.length === LIST_ADDRESS_CAP && desired.length > LIST_ADDRESS_CAP && extra.length === 0 && wroteAddresses
           ? "list-capped"
-          : listed && held.length === 0 && wroteAddresses && evidence === "proven"
+          : listed && held.length === 0 && wroteAddresses && ctx.heardSinceEdit === true && ctx.listedSinceEdit !== true
             ? "written-unlisted"
             : missing.length === 0 && wroteAddresses
               ? "extra-only"
@@ -432,16 +553,17 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
 
   const differs: ("addresses" | "auth" | "shape")[] = [];
   if (addressVerdict === "differs") differs.push("addresses");
-  if (authVerdict === "differs") differs.push("auth");
+  if (authVerdict === "differs" || authVerdict === "refused") differs.push("auth");
   if (wrong.length > 0) differs.push("shape");
 
+  const ours = body.authHeader;
   return {
     source,
     at: new Date(ctx.now ?? Date.now()).toISOString(),
     fields: Object.keys(found)
       .sort()
       .slice(0, DIFF_FIELDS)
-      .map((name) => name.slice(0, DIFF_TEXT_CHARS)),
+      .map((name) => told(name, ours) ?? WITHHELD),
     addresses: {
       listed,
       held: held.length,
@@ -449,15 +571,15 @@ export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: De
       missing: missing.length,
       extra: extra.length,
       missingSample: missing.slice(0, DIFF_SAMPLE),
-      extraSample: extra.slice(0, DIFF_SAMPLE),
+      extraSample: extra.slice(0, DIFF_SAMPLE).map((address) => told(address, ours, ADDRESS_CHARS) ?? WITHHELD),
       verdict: addressVerdict,
     },
     auth: { state, hint, verdict: authVerdict, evidence },
     shape: {
-      webhookType: shown(found.webhookType),
-      transactionTypes: Array.isArray(types) ? types.slice(0, DIFF_LIST_ENTRIES).map((type) => shown(type) ?? "(null)") : null,
-      txnStatus: shown(found.txnStatus),
-      encoding: shown(found.encoding),
+      webhookType: told(found.webhookType, ours),
+      transactionTypes: Array.isArray(types) ? types.slice(0, DIFF_LIST_ENTRIES).map((type) => told(type, ours) ?? "(null)") : null,
+      txnStatus: told(found.txnStatus, ours),
+      encoding: told(found.encoding, ours),
       wrong,
     },
     differs,
@@ -528,7 +650,11 @@ export interface EnsureResult {
   readonly authConfirmed: boolean;
   /** The edit this call made (create or PUT), as a fingerprint the next call compares; null when none. */
   readonly edit: string | null;
-  /** Set when the edit needed is the one this process already made and Helius did not keep; nothing was sent. */
+  /**
+   * Set when the edit needed is the one this process already made and Helius
+   * did not keep, or a header the deliveries refuse that this process already
+   * re-wrote once; nothing was sent.
+   */
   readonly stuck: string | null;
   readonly active: boolean;
   /** Other webhooks on the same URL, left alone: never created by this code, never deleted by it. */
@@ -562,6 +688,12 @@ export interface EnsureContext extends DescribeContext {
   readonly writtenKey?: string | null;
   /** What deliveries since the last edit say (WebhookSync's #evidence). Default "none". */
   readonly authEvidence?: AuthEvidence;
+  /**
+   * This process already re-wrote the webhook once over a "refused" header.
+   * The next "refused" is reported (stuck), not paid for: refusals can be
+   * strangers', and a PUT for each run of them was a PUT every twenty minutes.
+   */
+  readonly refusedEditSpent?: boolean;
   /** The fingerprint of this process's last successful edit (EnsureResult.edit). */
   readonly lastEdit?: string | null;
   /** Whether a create or a reactivation may be sent. Default true. */
@@ -641,8 +773,23 @@ export async function ensureWebhook(
   // header whose ends are ours — no longer reads as "differs" on every look.
   const diff = describeWebhook(found, body, context, "list");
   context.onDiff?.(diff);
-  const differs = diff.differs.length > 0;
-  const authDiffers = diff.auth.verdict === "differs";
+  const refused = diff.auth.verdict === "refused";
+  // ONE RE-WRITE ON THE DELIVERIES' WORD ALONE, PER PROCESS. Refusals are
+  // anybody's — a stranger's POST, another webhook on this URL with an old
+  // header — so a PUT for every run of them is outside traffic spending 100
+  // credits a time. After one, a "refused" header is reported, not re-sent; an
+  // edit the addresses or the shape need still goes, and carries the header.
+  const refusedAgain = refused && context.refusedEditSpent === true;
+  const toEdit = diff.differs.filter((part) => !(part === "auth" && refusedAgain));
+  const differs = toEdit.length > 0;
+  const authDiffers = diff.auth.verdict === "differs" || refused;
+  const duplicates = matches.length - 1;
+  const refusedDetail =
+    `deliveries to the receiver were refused 403 since this process last wrote the webhook's header — at least ${REFUSALS_TO_WITHDRAW} in a row, ` +
+    "none accepted after them — and Helius's list does not show the header to compare; it is not sent again while this lasts, and a delivery " +
+    "accepted (or a change in the discovered addresses) ends it. A stranger's POST is refused too" +
+    (duplicates > 0 ? `, and so is any of the ${duplicates} other webhook(s) on the same URL that holds an old header` : "") +
+    ": check the header the webhook holds on Helius";
   const gaps: string[] = [];
   let action: EnsureResult["action"] = "unchanged";
   // WHAT HELIUS IS TAKEN TO WATCH: the desired set unless the addresses truly
@@ -659,9 +806,14 @@ export async function ensureWebhook(
   // second time buys nothing but 100 credits; it is reported instead, as a
   // failed sync, until the discovered addresses or the secret change.
   if (differs && context.lastEdit !== undefined && context.lastEdit !== null && context.lastEdit === fingerprint(found.webhookID)) {
+    // WHAT DIFFERS ON THE DELIVERIES' WORD ALONE IS SAID SO: the list itself
+    // shows nothing Helius failed to keep, and "did not keep" sent the reader
+    // to the wrong place (review, 2026-10-11).
     stuck =
-      "Helius did not keep the last edit of the webhook (the list still differs from what was sent); it is not sent again " +
-      "until the discovered addresses or the secret change";
+      toEdit.length === 1 && toEdit[0] === "auth" && refused
+        ? refusedDetail
+        : "Helius did not keep the last edit of the webhook (the list still differs from what was sent); it is not sent again " +
+          "until the discovered addresses or the secret change";
   } else if (differs && allowEdit) {
     attempt();
     // THE ANSWER IS A FREE DIAGNOSTIC: what Helius says it now holds, described
@@ -674,12 +826,19 @@ export async function ensureWebhook(
     added = desired.filter((address) => !before.has(address));
     edit = fingerprint(found.webhookID);
     authConfirmed = true;
-    if (diff.auth.state === "different" && authDiffers) {
+    if (refused) {
+      gaps.push(
+        `deliveries were refused 403 since this process last wrote the header (at least ${REFUSALS_TO_WITHDRAW} in a row, none accepted after them); ` +
+          "if they were Helius's, it never resends them",
+      );
+    } else if (diff.auth.state === "different" && authDiffers) {
       gaps.push("Helius held another Authorization header, and every delivery until now was refused 403, which it never resends");
     }
     if (diff.shape.wrong.length > 0) gaps.push("the webhook was not a raw webhook for every transaction, failed ones included");
   } else if (differs) {
     action = "held";
+  } else if (refusedAgain) {
+    stuck = refusedDetail;
   }
   let reactivated = false;
   if (found.active === false) {
@@ -702,7 +861,7 @@ export async function ensureWebhook(
     edit,
     stuck,
     active: true,
-    duplicates: matches.length - 1,
+    duplicates,
     diff,
     editEcho,
   };
@@ -783,11 +942,22 @@ export interface WebhookSyncOptions {
   readonly onSynced: (report: SyncReport) => void;
   readonly log: (level: "info" | "warn", message: string, fields: Record<string, unknown>) => void;
   /**
-   * Deliveries authenticated and refused since boot (Doorbell.deliveryCounts).
-   * Compared with their count at this process's last edit, they are the only
-   * outside word on whether Helius sends the header this process wrote.
+   * Deliveries authenticated and refused since boot, and refused since the
+   * last one authenticated (Doorbell.deliveryCounts). Compared with their count
+   * at this process's last edit, they are the only outside word on whether
+   * Helius sends the header this process wrote.
    */
-  readonly deliveries?: () => { readonly accepted: number; readonly rejected: number };
+  readonly deliveries?: () => DeliveryCounts;
+}
+
+/** What the doorbell counted (Doorbell.deliveryCounts). */
+export interface DeliveryCounts {
+  /** Transactions in authenticated deliveries, since boot. */
+  readonly accepted: number;
+  /** Deliveries refused 403, since boot: Helius's with another header, and anybody else's. */
+  readonly rejected: number;
+  /** Deliveries refused 403 since the last authenticated one (since boot, before one). */
+  readonly rejectedSinceAccepted: number;
 }
 
 /**
@@ -818,7 +988,11 @@ export class WebhookSync {
   #writtenKey: string | null = null;
   #lastEdit: string | null = null;
   /** The deliveries counted at this process's last successful edit; null before one. */
-  #deliveriesAtEdit: { readonly accepted: number; readonly rejected: number } | null = null;
+  #deliveriesAtEdit: DeliveryCounts | null = null;
+  /** Whether a look since the last edit saw the list holding addresses (DescribeContext.listedSinceEdit). */
+  #listedSinceEdit = false;
+  /** Whether this process already re-wrote the webhook over a "refused" header (EnsureContext.refusedEditSpent). */
+  #refusedEditSpent = false;
   /** The current run of failures: when it began, when it last failed, and what that last failing look saw. */
   #failingSince: number | null = null;
   #lastFailureAt: number | null = null;
@@ -850,16 +1024,22 @@ export class WebhookSync {
 
   /**
    * What deliveries since this process's last edit say about the header it
-   * wrote: "proven" once one was accepted, "refused" when some were refused
-   * and none accepted, "none" otherwise (or with nothing to count).
+   * wrote (AuthEvidence), and whether one was accepted at all (heard).
+   *
+   * READ AFRESH AT EVERY LOOK. "Proven" was "one accepted since the edit", and
+   * stayed so until the next edit however many 403s followed; "refused" was any
+   * 403 at all, a stranger's included. Now it is REFUSALS_TO_WITHDRAW refused
+   * in a row after BOTH the edit and the last accepted delivery — the shorter
+   * of the two runs the counts give — and an accepted delivery ends the run.
    */
-  #evidence(): AuthEvidence {
+  #evidence(): { readonly evidence: AuthEvidence; readonly heard: boolean } {
     const at = this.#deliveriesAtEdit;
     const now = this.#options.deliveries?.();
-    if (at === null || now === undefined) return "none";
-    if (now.accepted > at.accepted) return "proven";
-    if (now.rejected > at.rejected) return "refused";
-    return "none";
+    if (at === null || now === undefined) return { evidence: "none", heard: false };
+    const heard = now.accepted > at.accepted;
+    const refusedInARow = Math.min(now.rejected - at.rejected, now.rejectedSinceAccepted);
+    if (refusedInARow >= REFUSALS_TO_WITHDRAW) return { evidence: "refused", heard };
+    return { evidence: heard ? "proven" : "none", heard };
   }
 
   #unmanagedReason(acting: boolean): string | null {
@@ -916,11 +1096,15 @@ export class WebhookSync {
     let diff: WebhookDiff | null = null;
     try {
       const authHeader = this.#options.secret!.reveal();
+      const { evidence, heard } = this.#evidence();
       const result = await ensureWebhook(client, { url: this.#options.url!, authHeader, addresses: desired }, allowEdit, {
         knownId: this.#knownId,
         writtenAuth: this.#writtenAuth,
         writtenKey: this.#writtenKey,
-        authEvidence: this.#evidence(),
+        authEvidence: evidence,
+        heardSinceEdit: heard,
+        listedSinceEdit: this.#listedSinceEdit,
+        refusedEditSpent: this.#refusedEditSpent,
         lastEdit: this.#lastEdit,
         allowCreate,
         now,
@@ -942,9 +1126,13 @@ export class WebhookSync {
         this.#lastEdit = result.edit;
         // EVIDENCE COUNTS FROM HERE: only what was delivered after this edit says anything about it.
         this.#deliveriesAtEdit = this.#options.deliveries?.() ?? null;
-      } else if (result.action === "unchanged" && result.stuck === null) {
+        // The look was BEFORE the edit: what it listed says nothing about what the edit wrote.
+        this.#listedSinceEdit = false;
+        if (result.diff?.auth.verdict === "refused") this.#refusedEditSpent = true;
+      } else {
+        if (result.diff !== null && result.diff.addresses.listed && result.diff.addresses.held > 0) this.#listedSinceEdit = true;
         // CONVERGED: whatever was last sent is what Helius holds.
-        this.#lastEdit = null;
+        if (result.action === "unchanged" && result.stuck === null) this.#lastEdit = null;
       }
       this.#stuckKey = result.stuck !== null ? desired.join(",") : null;
       this.#confirmedKey = canonicalAddresses(result.watched).join(",");
