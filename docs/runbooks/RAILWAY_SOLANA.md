@@ -462,9 +462,19 @@ en cada barrida (lo de siempre). No puede dejar a nadie sin cobrar; como mucho, 
   ve una operación en los 1–3 s antes de que llegue su aviso. Solo es mala señal si sube a menudo mientras
   `eventsReceived` se queda quieto: entonces avísame con la hora.
 - `eventsRejected` cuenta llamadas con un secreto equivocado. Nunca aparece ni el secreto ni la clave de Helius.
+- `webhook.lastDiff` dice qué vio el vigilante la última vez que miró el webhook en Helius y por qué lo dio por bueno
+  o no: `addresses` (cuántas direcciones enseña la lista, cuáles faltan o sobran, y el veredicto: `same`,
+  `written-unlisted` si la lista no las enseña pero las escribió este proceso, `list-capped` si la lista se corta en
+  100, `extra-only`, o `differs`), `auth` (solo `absent`/`same`/`different` y pistas sí/no: si parece enmascarada, si
+  coinciden principio y final, si contiene la nuestra… **nunca** el valor ni un trozo), y `shape` (raw · ANY · all tal
+  como los enseña Helius). `differs: []` es que está al día. `webhook.lastEditEcho` es lo mismo para la respuesta del
+  último PUT o creación. Si me avisas de un fallo del timbre, pégame estos dos bloques: no llevan nada secreto.
+- `webhook.failingSince` es desde cuándo fallan las sincronizaciones seguidas; `null` mientras van bien.
 
-Dos alertas nuevas, las dos de aviso (solo llegan a Telegram si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`):
-`doorbell-deaf` (dejó de oír y vuelve a girar a todos) y `doorbell-sync` (no consigue poner al día el webhook).
+Dos alertas nuevas: `doorbell-deaf` (dejó de oír y vuelve a girar a todos), de aviso, y `doorbell-sync` (no consigue
+poner al día el webhook), que avisa al tercer fallo seguido y pasa a **crítica** cuando lleva una hora fallando: esa sí
+llega a Telegram aunque no cambies nada. Los avisos solo llegan si `SIP_SOLANA_ALERT_MIN_SEVERITY=warn`. Un webhook
+atascado se mira cada 10 minutos, no en cada barrida.
 
 ### Cambiar el secreto
 

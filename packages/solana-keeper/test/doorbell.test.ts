@@ -591,6 +591,22 @@ describe("a refused delivery before the webhook is known to hold the secret", ()
   });
 });
 
+describe("what the webhook sync reads as evidence", () => {
+  // D1. The sync judges a header the list hides by what was delivered since its edit.
+  it("counts authenticated transactions and refused deliveries, and nothing a lost delivery carried", () => {
+    const bell = new Doorbell(true);
+    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 0 });
+    bell.rejected();
+    bell.rejected();
+    expect(bell.deliveryCounts()).toEqual({ accepted: 0, rejected: 2 });
+    bell.ingest(fixtures["solDepositToVault"], new Set(), T0);
+    bell.ingestBody("not json", new Set(), T0);
+    bell.ingest([{}], new Set(), T0);
+    expect(bell.deliveryCounts()).toEqual({ accepted: fixtures["solDepositToVault"]!.length, rejected: 2 });
+    expect(bell.deliveryCounts().accepted).toBe(bell.status(T0).eventsReceived);
+  });
+});
+
 describe("addresses the webhook starts watching", () => {
   // A new link was turned in the "new" lane until the edit landed; a trade
   // between its last turn and the landing was never delivered, and the sweep

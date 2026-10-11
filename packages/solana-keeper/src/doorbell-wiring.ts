@@ -64,6 +64,9 @@ export function createHooksRoute(input: {
  *     which Helius certainly dropped deliveries: the next sweep is a full pass;
  *   * that the header is confirmed, after which a 403 is a stranger.
  *
+ * AND ONE THING THE DOORBELL TELLS THE SYNC: how many deliveries it accepted
+ * and refused, the evidence a header the list hides is judged by.
+ *
  * MANAGED BUT NOT YET CONFIRMED IS ITS OWN STATE. When this process can manage
  * the webhook, the doorbell starts with an EMPTY watched set, so every link is
  * "new" and none rests on a bell until the first sync says what Helius holds.
@@ -102,6 +105,10 @@ export function createDoorbellWebhookSync(input: {
       }
     },
     log,
+    // THE ONLY OUTSIDE WORD on the header this process wrote, when the list
+    // will not show it: an accepted delivery since the edit proves it, refused
+    // ones and none accepted withdraw the trust (describeWebhook).
+    deliveries: () => doorbell.deliveryCounts(),
   });
   if (doorbell.enabled && sync.manageable) doorbell.setWatched(new Set<string>());
   return sync;

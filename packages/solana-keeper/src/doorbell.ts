@@ -523,6 +523,15 @@ export class Doorbell {
     }
   }
 
+  /**
+   * Transactions authenticated and deliveries refused since boot. The webhook
+   * sync compares them with their count at its last edit: the outside word on
+   * whether Helius sends the header it wrote when the list will not show it.
+   */
+  deliveryCounts(): { readonly accepted: number; readonly rejected: number } {
+    return { accepted: this.#eventsReceived, rejected: this.#eventsRejected };
+  }
+
   /** The webhook's Authorization header is known to be this secret (a sync confirmed or wrote it). */
   confirmAuthorization(): void {
     this.#authConfirmed = true;

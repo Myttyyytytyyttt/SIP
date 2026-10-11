@@ -23,6 +23,19 @@
 // twice: the sync finds its own webhook by id when the URL comes back in
 // another form, trusts the header it wrote when the list leaves it out, and
 // stops (and warns) when Helius does not keep an edit it answered 200.
+//
+// WHAT THE LIST DOES NOT SHOW IS NOT WHAT HELIUS DOES NOT HOLD (production,
+// 2026-10-11). Every keeper PUT its webhook at boot and, ten minutes later,
+// read the list as "Helius did not keep the edit": stuck, a failure every
+// sweep, a GET every 60 s, a warn nobody was paged for — and the stuck path
+// told the doorbell Helius watched what the list showed, so every link sat in
+// the "new" lane while deliveries were arriving, authenticated, the whole
+// time. So a look is DESCRIBED first (describeWebhook: counts, booleans and
+// field names, never the header or any piece of it), then JUDGED by rules that
+// each trust no more than this process itself wrote, and never by `lastEdit`,
+// which a converged look clears. A stuck webhook is looked at every
+// RECHECK_MS, not every sweep, and pages once it has been out of step for
+// SYNC_FAILURE_CRITICAL_AFTER_MS.
 
 import type { Secret } from "@sip/solana-log";
 
@@ -45,8 +58,26 @@ export const MIN_EDIT_INTERVAL_MS = 10 * 60_000;
 export const RECHECK_MS = 10 * 60_000;
 /** Failed syncs in a row before doorbell-sync warns. */
 export const SYNC_FAILURE_ALERT_STREAK = 3;
+/**
+ * How long syncs may go on failing before doorbell-sync PAGES: an hour. The
+ * warn stays in the log (Telegram forwards criticals only, by default), and a
+ * webhook out of step for an hour is not a blip any more — the doorbell is
+ * being kept honest by its safety nets alone.
+ */
+export const SYNC_FAILURE_CRITICAL_AFTER_MS = 60 * 60_000;
 export const DOORBELL_SYNC_ALERT_KEY = "doorbell-sync";
+/**
+ * Helius's Get All Webhooks shows at most this many addresses per webhook (its
+ * docs point to Get Webhook by ID for the whole list). A list cut here is not
+ * a webhook that lost the rest.
+ */
+export const LIST_ADDRESS_CAP = 100;
 const EXCERPT_CHARS = 200;
+/** How much of a look a WebhookDiff keeps: addresses named per side, characters per string, entries per list, field names. */
+const DIFF_SAMPLE = 3;
+const DIFF_TEXT_CHARS = 40;
+const DIFF_LIST_ENTRIES = 10;
+const DIFF_FIELDS = 20;
 
 export interface HeliusWebhook {
   readonly webhookID: string;
@@ -56,6 +87,8 @@ export interface HeliusWebhook {
   readonly transactionTypes?: readonly string[];
   readonly authHeader?: string;
   readonly txnStatus?: string;
+  /** Only ever read for the diagnostics (WebhookDiff.shape): nothing is decided on it. */
+  readonly encoding?: string;
   readonly active?: boolean;
 }
 
@@ -200,7 +233,281 @@ export function canonicalAddresses(addresses: Iterable<string>): string[] {
   return [...new Set(addresses)].sort();
 }
 
-const sameList = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((value, index) => value === b[index]);
+// ── what a look saw, without the secret ──────────────────────────────────────
+
+/**
+ * How the Authorization header Helius shows differs from ours. Booleans and
+ * counts — NEVER the value or any piece of it, which could be ours, masked or
+ * not, and would then be in a log line, an alert and /status.
+ */
+export interface AuthHint {
+  readonly type: "string" | "other";
+  readonly length: "equal" | "shorter" | "longer";
+  /** It contains * • ● … or "...": a value shown masked. */
+  readonly looksMasked: boolean;
+  /** How many characters are not mask characters. */
+  readonly visibleChars: number;
+  /** Whether the masked value's visible start is ours' start; null when it is not masked or its start is masked too. */
+  readonly prefixAgrees: boolean | null;
+  readonly suffixAgrees: boolean | null;
+  readonly equalIgnoringCase: boolean;
+  readonly equalTrimmed: boolean;
+  /** Ours inside it, e.g. "Bearer <ours>". */
+  readonly containsOurs: boolean;
+  /** It inside ours: a truncation. */
+  readonly withinOurs: boolean;
+}
+
+/** What deliveries since this process's last edit say about the header Helius sends. */
+export type AuthEvidence = "proven" | "refused" | "none";
+
+/** One look at the webhook, described: what /status, the logs and doorbell-sync say about it. */
+export interface WebhookDiff {
+  /** The list (judged), or the answer to a create or a PUT (described, no rule applied). */
+  readonly source: "list" | "edit-answer";
+  readonly at: string;
+  /** The object's field names, sorted, at most DIFF_FIELDS: names only, never values. */
+  readonly fields: readonly string[];
+  readonly addresses: {
+    /** Whether accountAddresses was in the object at all. */
+    readonly listed: boolean;
+    readonly held: number;
+    readonly desired: number;
+    readonly missing: number;
+    readonly extra: number;
+    /** The first DIFF_SAMPLE of each: public, on-chain addresses. */
+    readonly missingSample: readonly string[];
+    readonly extraSample: readonly string[];
+    readonly verdict: "same" | "written-unlisted" | "list-capped" | "extra-only" | "differs";
+  };
+  readonly auth: {
+    readonly state: "absent" | "same" | "different";
+    readonly hint: AuthHint | null;
+    readonly verdict: "same" | "masked-ours" | "written-by-us" | "differs";
+    readonly evidence: AuthEvidence;
+  };
+  readonly shape: {
+    /** As Helius shows them, cut to DIFF_TEXT_CHARS characters and DIFF_LIST_ENTRIES entries. */
+    readonly webhookType: string | null;
+    readonly transactionTypes: readonly string[] | null;
+    readonly txnStatus: string | null;
+    readonly encoding: string | null;
+    readonly wrong: readonly ("webhookType" | "transactionTypes" | "txnStatus")[];
+  };
+  /** What still differs AFTER the rules; empty = converged. */
+  readonly differs: readonly ("addresses" | "auth" | "shape")[];
+}
+
+/** What describeWebhook may judge a look by: what this process wrote, and what deliveries said since. */
+export interface DescribeContext {
+  readonly knownId?: string | null;
+  readonly writtenAuth?: string | null;
+  /** The canonical address key (sorted, joined by ",") this process last wrote to knownId. */
+  readonly writtenKey?: string | null;
+  readonly authEvidence?: AuthEvidence;
+  /** When the look happened, for WebhookDiff.at. */
+  readonly now?: number;
+}
+
+/** A run of mask characters, or of three dots or more. A fresh one per use: a global regex carries lastIndex. */
+const maskPattern = (): RegExp => /[*•●…]+|\.{3,}/g;
+
+/**
+ * The header Helius shows, measured against ours.
+ *
+ * THE VALUE NEVER LEAVES THIS FUNCTION. The masked value's visible head and
+ * tail live in two locals, used only inside startsWith and endsWith; what comes
+ * out is booleans and counts.
+ */
+function authHint(theirs: unknown, ours: string): AuthHint {
+  const text = typeof theirs === "string" ? theirs : "";
+  const masks = [...text.matchAll(maskPattern())];
+  const looksMasked = masks.length > 0;
+  let prefixAgrees: boolean | null = null;
+  let suffixAgrees: boolean | null = null;
+  if (looksMasked) {
+    const first = masks[0]!;
+    const last = masks[masks.length - 1]!;
+    const head = text.slice(0, first.index);
+    const tail = text.slice((last.index ?? 0) + last[0].length);
+    prefixAgrees = head.length === 0 ? null : ours.startsWith(head);
+    suffixAgrees = tail.length === 0 ? null : ours.endsWith(tail);
+  }
+  return {
+    type: typeof theirs === "string" ? "string" : "other",
+    length: text.length === ours.length ? "equal" : text.length < ours.length ? "shorter" : "longer",
+    looksMasked,
+    visibleChars: text.replace(maskPattern(), "").length,
+    prefixAgrees,
+    suffixAgrees,
+    equalIgnoringCase: text.length > 0 && text.toLowerCase() === ours.toLowerCase(),
+    equalTrimmed: text.length > 0 && text.trim() === ours.trim(),
+    containsOurs: ours.length > 0 && text.includes(ours),
+    withinOurs: text.length > 0 && ours.includes(text),
+  };
+}
+
+/** The addresses the object shows, canonical; none when it shows no list (or not a list). */
+function heldAddresses(found: HeliusWebhook): string[] {
+  const raw: unknown = found.accountAddresses;
+  return Array.isArray(raw) ? canonicalAddresses(raw.filter((address): address is string => typeof address === "string")) : [];
+}
+
+const shown = (value: unknown): string | null =>
+  value === undefined || value === null ? null : typeof value === "string" ? value.slice(0, DIFF_TEXT_CHARS) : `(${typeof value})`;
+const canonicalWord = (value: unknown): string | null => (typeof value === "string" ? value.trim().toLowerCase() : null);
+
+/**
+ * One look at the webhook, described and judged. Pure.
+ *
+ * THE RULES TRUST NO MORE THAN THIS PROCESS WROTE. Each relaxation needs this
+ * very webhook to be the one this process last edited (knownId) with this very
+ * header or address set, and none of them is keyed on `lastEdit`, which a
+ * converged look clears — a rule that was would PUT every other look.
+ *
+ *   * HEADER. The same value; or a MASKED value with at least six characters
+ *     showing whose visible ends are ours' ends; or one this process wrote,
+ *     unless deliveries since have been refused and none accepted. That last
+ *     rule covers a list that leaves the header out (the rule before this one),
+ *     masks it opaquely, or shows it transformed ("Bearer …").
+ *   * ADDRESSES. The same set; or one this process wrote, when the list leaves
+ *     accountAddresses out, cuts it at LIST_ADDRESS_CAP, shows an empty list
+ *     while authenticated deliveries prove the webhook works, or holds only
+ *     extra ones besides (a PUT that merged).
+ *   * SHAPE, compared trimmed and lower-case: raw, ["any"], all. A field the
+ *     list leaves out (or shows as null) passes.
+ *
+ * Every relaxation still has the doorbell's own nets under it: the receiver's
+ * exact header check, the echo deadline that makes it deaf, and the safety
+ * rotation. A webhook out of step from Helius's side shows up there.
+ */
+export function describeWebhook(found: HeliusWebhook, body: WebhookBody, ctx: DescribeContext, source: WebhookDiff["source"]): WebhookDiff {
+  const desired = canonicalAddresses(body.accountAddresses);
+  const listed = Array.isArray(found.accountAddresses as unknown);
+  const held = heldAddresses(found);
+  const heldSet = new Set(held);
+  const desiredSet = new Set(desired);
+  const missing = desired.filter((address) => !heldSet.has(address));
+  const extra = held.filter((address) => !desiredSet.has(address));
+
+  const knownId = ctx.knownId ?? null;
+  const written = knownId !== null && found.webhookID === knownId;
+  const wroteHeader = written && ctx.writtenAuth === body.authHeader;
+  const wroteAddresses = written && ctx.writtenKey === desired.join(",");
+  const evidence = ctx.authEvidence ?? "none";
+
+  const theirs: unknown = found.authHeader;
+  const state: WebhookDiff["auth"]["state"] = theirs === undefined || theirs === null ? "absent" : theirs === body.authHeader ? "same" : "different";
+  const hint = state === "different" ? authHint(theirs, body.authHeader) : null;
+  // MASKED OURS needs one visible end compared, not merely none contradicted: a
+  // mask that shows only its middle has proven nothing.
+  const maskedOurs =
+    hint !== null &&
+    hint.looksMasked &&
+    hint.visibleChars >= 6 &&
+    hint.prefixAgrees !== false &&
+    hint.suffixAgrees !== false &&
+    (hint.prefixAgrees === true || hint.suffixAgrees === true);
+  const authVerdict: WebhookDiff["auth"]["verdict"] =
+    state === "same" ? "same" : maskedOurs ? "masked-ours" : wroteHeader && evidence !== "refused" ? "written-by-us" : "differs";
+
+  const addressVerdict: WebhookDiff["addresses"]["verdict"] =
+    missing.length === 0 && extra.length === 0
+      ? "same"
+      : !listed && wroteAddresses
+        ? "written-unlisted"
+        : held.length === LIST_ADDRESS_CAP && desired.length > LIST_ADDRESS_CAP && extra.length === 0 && wroteAddresses
+          ? "list-capped"
+          : listed && held.length === 0 && wroteAddresses && evidence === "proven"
+            ? "written-unlisted"
+            : missing.length === 0 && wroteAddresses
+              ? "extra-only"
+              : "differs";
+
+  const types: unknown = found.transactionTypes;
+  const wrong: ("webhookType" | "transactionTypes" | "txnStatus")[] = [];
+  if (found.webhookType != null && canonicalWord(found.webhookType) !== "raw") wrong.push("webhookType");
+  if (types != null && !(Array.isArray(types) && types.length === 1 && canonicalWord(types[0]) === "any")) wrong.push("transactionTypes");
+  if (found.txnStatus != null && canonicalWord(found.txnStatus) !== "all") wrong.push("txnStatus");
+
+  const differs: ("addresses" | "auth" | "shape")[] = [];
+  if (addressVerdict === "differs") differs.push("addresses");
+  if (authVerdict === "differs") differs.push("auth");
+  if (wrong.length > 0) differs.push("shape");
+
+  return {
+    source,
+    at: new Date(ctx.now ?? Date.now()).toISOString(),
+    fields: Object.keys(found)
+      .sort()
+      .slice(0, DIFF_FIELDS)
+      .map((name) => name.slice(0, DIFF_TEXT_CHARS)),
+    addresses: {
+      listed,
+      held: held.length,
+      desired: desired.length,
+      missing: missing.length,
+      extra: extra.length,
+      missingSample: missing.slice(0, DIFF_SAMPLE),
+      extraSample: extra.slice(0, DIFF_SAMPLE),
+      verdict: addressVerdict,
+    },
+    auth: { state, hint, verdict: authVerdict, evidence },
+    shape: {
+      webhookType: shown(found.webhookType),
+      transactionTypes: Array.isArray(types) ? types.slice(0, DIFF_LIST_ENTRIES).map((type) => shown(type) ?? "(null)") : null,
+      txnStatus: shown(found.txnStatus),
+      encoding: shown(found.encoding),
+      wrong,
+    },
+    differs,
+  };
+}
+
+/**
+ * A WebhookDiff in one line, for the logs and doorbell-sync's detail: e.g.
+ * "addresses 0/7 listed (no accountAddresses; missing 7) written-unlisted; header
+ * different (masked, length equal, start/end agree) masked-ours, deliveries none;
+ * shape raw·ANY·all; converged". Counts and flags only, like the diff itself.
+ */
+export function summarizeDiff(diff: WebhookDiff): string {
+  const a = diff.addresses;
+  const addressNotes = [
+    a.listed ? null : "no accountAddresses",
+    a.missing > 0 ? `missing ${a.missing}` : null,
+    a.extra > 0 ? `extra ${a.extra}` : null,
+  ].filter((note): note is string => note !== null);
+  const addresses = `addresses ${a.desired - a.missing}/${a.desired} listed${addressNotes.length > 0 ? ` (${addressNotes.join("; ")})` : ""}${a.verdict === "same" ? "" : ` ${a.verdict}`}`;
+
+  const { state, hint, verdict, evidence } = diff.auth;
+  let header = `header ${state}`;
+  if (hint !== null) {
+    const end = (agrees: boolean | null, one: boolean): string => (agrees === null ? "hidden" : agrees ? (one ? "agrees" : "agree") : one ? "differs" : "differ");
+    const ends =
+      hint.prefixAgrees === hint.suffixAgrees
+        ? `start/end ${end(hint.prefixAgrees, false)}`
+        : `start ${end(hint.prefixAgrees, true)}, end ${end(hint.suffixAgrees, true)}`;
+    const notes = [
+      hint.type === "string" ? null : "not a string",
+      hint.looksMasked ? `masked, ${hint.visibleChars} visible` : "plain",
+      `length ${hint.length}`,
+      hint.looksMasked ? ends : null,
+      hint.containsOurs ? "contains ours" : null,
+      hint.withinOurs ? "within ours" : null,
+      hint.equalIgnoringCase ? "equal ignoring case" : null,
+      hint.equalTrimmed ? "equal trimmed" : null,
+    ].filter((note): note is string => note !== null);
+    header += ` (${notes.join(", ")})`;
+  }
+  if (verdict !== "same") header += ` ${verdict}`;
+  if (evidence !== "none" || verdict === "written-by-us") header += `, deliveries ${evidence}`;
+
+  const s = diff.shape;
+  const shape = `shape ${s.webhookType ?? "-"}·${s.transactionTypes === null ? "-" : s.transactionTypes.join("+")}·${s.txnStatus ?? "-"}${s.wrong.length > 0 ? ` (wrong: ${s.wrong.join(", ")})` : ""}`;
+  const verdictOf = diff.differs.length === 0 ? (diff.source === "edit-answer" ? "matches what was sent" : "converged") : `differs: ${diff.differs.join(", ")}`;
+  const outcome = diff.source === "edit-answer" ? `answer ${verdictOf}` : verdictOf;
+  return `${addresses}; ${header}; ${shape}; ${outcome}`;
+}
 
 export interface EnsureResult {
   readonly webhookID: string;
@@ -226,10 +533,14 @@ export interface EnsureResult {
   readonly active: boolean;
   /** Other webhooks on the same URL, left alone: never created by this code, never deleted by it. */
   readonly duplicates: number;
+  /** The look at the list, described and judged; null when there was no webhook to look at (a create). */
+  readonly diff: WebhookDiff | null;
+  /** The answer to this call's create or PUT, described with no rule applied; null when none was sent. */
+  readonly editEcho: WebhookDiff | null;
 }
 
 /** What this process remembers between two ensureWebhook calls. All optional: a bare call is a first one. */
-export interface EnsureContext {
+export interface EnsureContext extends DescribeContext {
   /**
    * The id this process created or last edited. Looked up by id when no
    * webhook matches the URL exactly: a list that returns the URL in another
@@ -243,12 +554,22 @@ export interface EnsureContext {
    * on every look — a 100-credit PUT every ten minutes, forever.
    */
   readonly writtenAuth?: string | null;
+  /**
+   * The address set (canonical, joined by ",") this process last wrote to
+   * knownId. It stands in for a list that leaves accountAddresses out, cuts it
+   * at LIST_ADDRESS_CAP, or keeps extra ones — the same reason as writtenAuth.
+   */
+  readonly writtenKey?: string | null;
+  /** What deliveries since the last edit say (WebhookSync's #evidence). Default "none". */
+  readonly authEvidence?: AuthEvidence;
   /** The fingerprint of this process's last successful edit (EnsureResult.edit). */
   readonly lastEdit?: string | null;
   /** Whether a create or a reactivation may be sent. Default true. */
   readonly allowCreate?: boolean;
   /** Called right before every create, PUT or PATCH: the attempt, whatever its answer. */
   readonly onAttempt?: () => void;
+  /** Called with the look's diff as soon as it is made, so a PUT that then fails still leaves it for /status. */
+  readonly onDiff?: (diff: WebhookDiff) => void;
 }
 
 /**
@@ -310,24 +631,30 @@ export async function ensureWebhook(
       stuck: null,
       active: created.active !== false,
       duplicates: 0,
+      diff: null,
+      editEcho: describeWebhook(created, body, { now: context.now }, "edit-answer"),
     };
   }
-  const held = canonicalAddresses(found.accountAddresses ?? []);
-  // THE HEADER HELIUS SENDS, when it can be known: the list's, or the one this
-  // process wrote to this very webhook. Undefined = unknown, which differs.
-  const auth = found.authHeader ?? (found.webhookID === knownId ? (context.writtenAuth ?? undefined) : undefined);
-  const wrongShape =
-    (found.webhookType !== undefined && found.webhookType !== "raw") ||
-    (found.transactionTypes !== undefined && !sameList([...found.transactionTypes], ["ANY"])) ||
-    (found.txnStatus !== undefined && found.txnStatus !== "all");
-  const differs = !sameList(held, desired) || auth !== spec.authHeader || wrongShape;
+  const held = heldAddresses(found);
+  // DESCRIBED, THEN JUDGED (describeWebhook says by which rules). What is
+  // trusted there — the header or the addresses this process wrote, a masked
+  // header whose ends are ours — no longer reads as "differs" on every look.
+  const diff = describeWebhook(found, body, context, "list");
+  context.onDiff?.(diff);
+  const differs = diff.differs.length > 0;
+  const authDiffers = diff.auth.verdict === "differs";
   const gaps: string[] = [];
   let action: EnsureResult["action"] = "unchanged";
-  let watched = held;
+  // WHAT HELIUS IS TAKEN TO WATCH: the desired set unless the addresses truly
+  // differ. Telling the doorbell "what the list shows" when the list does not
+  // show addresses at all put every link in the "new" lane, and kept the next
+  // sweep's sync due (its key never matched): a GET every 60 s.
+  let watched: readonly string[] = diff.addresses.verdict === "differs" ? held : desired;
   let added: readonly string[] = [];
   let edit: string | null = null;
   let stuck: string | null = null;
-  let authConfirmed = auth === spec.authHeader;
+  let authConfirmed = !authDiffers;
+  let editEcho: WebhookDiff | null = null;
   // THE SAME EDIT, NEEDED AGAIN, IS AN EDIT HELIUS DID NOT KEEP. Sending it a
   // second time buys nothing but 100 credits; it is reported instead, as a
   // failed sync, until the discovered addresses or the secret change.
@@ -337,17 +664,20 @@ export async function ensureWebhook(
       "until the discovered addresses or the secret change";
   } else if (differs && allowEdit) {
     attempt();
-    await client.update(found.webhookID, body);
+    // THE ANSWER IS A FREE DIAGNOSTIC: what Helius says it now holds, described
+    // against what was sent, with no rule applied.
+    const answer = await client.update(found.webhookID, body);
+    editEcho = describeWebhook(answer, body, { now: context.now }, "edit-answer");
     action = "updated";
     watched = desired;
     const before = new Set(held);
     added = desired.filter((address) => !before.has(address));
     edit = fingerprint(found.webhookID);
     authConfirmed = true;
-    if (auth !== undefined && auth !== spec.authHeader) {
+    if (diff.auth.state === "different" && authDiffers) {
       gaps.push("Helius held another Authorization header, and every delivery until now was refused 403, which it never resends");
     }
-    if (wrongShape) gaps.push("the webhook was not a raw webhook for every transaction, failed ones included");
+    if (diff.shape.wrong.length > 0) gaps.push("the webhook was not a raw webhook for every transaction, failed ones included");
   } else if (differs) {
     action = "held";
   }
@@ -373,6 +703,8 @@ export async function ensureWebhook(
     stuck,
     active: true,
     duplicates: matches.length - 1,
+    diff,
+    editEcho,
   };
 }
 
@@ -386,13 +718,25 @@ export function syncDue(input: {
    * sweep: 60 an hour at 100 credits each (review, 2026-09-23).
    */
   readonly lastEditAt: number | null;
+  /** The last sync threw: the list could not be read, or an edit was refused. */
   readonly lastFailed: boolean;
+  /** The last create, PUT or PATCH failed (an edit refused, not a list unread). */
+  readonly lastAttemptFailed: boolean;
+  /** The webhook is stuck on this very address set: the edit it needs is the one Helius did not keep. */
+  readonly stuck: boolean;
   /** The discovered addresses differ from what Helius was last seen holding. */
   readonly differs: boolean;
 }): { readonly due: boolean; readonly allowEdit: boolean } {
   const allowEdit = input.lastEditAt === null || input.now - input.lastEditAt >= MIN_EDIT_INTERVAL_MS;
-  if (input.lastCheckAt === null || input.lastFailed) return { due: true, allowEdit };
-  if (input.differs && allowEdit) return { due: true, allowEdit };
+  // A FAILED LIST is looked at again next sweep; a FAILED EDIT waits for its
+  // debounce — the GET before it buys nothing until the PUT may be sent again.
+  if (input.lastFailed) return { due: !input.lastAttemptFailed || allowEdit, allowEdit };
+  if (input.lastCheckAt === null) return { due: true, allowEdit };
+  // STUCK IS NOT DUE EVERY SWEEP. Its addresses "differ" and its debounce has
+  // long passed, so this line made it a GET every 60 s; nothing is sent until
+  // the addresses or the secret change, and RECHECK_MS is soon enough to see
+  // that Helius came round.
+  if (input.differs && allowEdit && !input.stuck) return { due: true, allowEdit };
   return { due: input.now - input.lastCheckAt >= RECHECK_MS, allowEdit };
 }
 
@@ -409,6 +753,12 @@ export interface WebhookStatus {
   readonly lastSyncAt: string | null;
   readonly lastSyncError: string | null;
   readonly consecutiveFailures: number;
+  /** The last look at the list, described: what differed and by which rule it was forgiven. Never the header. */
+  readonly lastDiff: WebhookDiff | null;
+  /** The answer to the last create or PUT, described with no rule applied. */
+  readonly lastEditEcho: WebhookDiff | null;
+  /** When the current run of failed syncs began; null while the last one succeeded. */
+  readonly failingSince: string | null;
 }
 
 /** What a successful sync tells the doorbell. */
@@ -432,6 +782,12 @@ export interface WebhookSyncOptions {
   /** Told after every successful sync (src/doorbell-wiring.ts hands it to the doorbell). */
   readonly onSynced: (report: SyncReport) => void;
   readonly log: (level: "info" | "warn", message: string, fields: Record<string, unknown>) => void;
+  /**
+   * Deliveries authenticated and refused since boot (Doorbell.deliveryCounts).
+   * Compared with their count at this process's last edit, they are the only
+   * outside word on whether Helius sends the header this process wrote.
+   */
+  readonly deliveries?: () => { readonly accepted: number; readonly rejected: number };
 }
 
 /**
@@ -454,10 +810,19 @@ export class WebhookSync {
   #lastAttemptFailed = false;
   #lastFailed = false;
   #confirmedKey: string | null = null;
+  /** The address key the webhook is stuck on (EnsureResult.stuck), or null: not due every sweep while it stays. */
+  #stuckKey: string | null = null;
   /** What this process knows about the webhook between syncs (EnsureContext). */
   #knownId: string | null = null;
   #writtenAuth: string | null = null;
+  #writtenKey: string | null = null;
   #lastEdit: string | null = null;
+  /** The deliveries counted at this process's last successful edit; null before one. */
+  #deliveriesAtEdit: { readonly accepted: number; readonly rejected: number } | null = null;
+  /** The current run of failures: when it began, when it last failed, and what that last failing look saw. */
+  #failingSince: number | null = null;
+  #lastFailureAt: number | null = null;
+  #lastFailureDiff: WebhookDiff | null = null;
   #status: WebhookStatus;
 
   /** Whether the webhook is managed at all here: a key, a URL and a secret. The acting keeper then runs it. */
@@ -477,7 +842,24 @@ export class WebhookSync {
       lastSyncAt: null,
       lastSyncError: null,
       consecutiveFailures: 0,
+      lastDiff: null,
+      lastEditEcho: null,
+      failingSince: null,
     };
+  }
+
+  /**
+   * What deliveries since this process's last edit say about the header it
+   * wrote: "proven" once one was accepted, "refused" when some were refused
+   * and none accepted, "none" otherwise (or with nothing to count).
+   */
+  #evidence(): AuthEvidence {
+    const at = this.#deliveriesAtEdit;
+    const now = this.#options.deliveries?.();
+    if (at === null || now === undefined) return "none";
+    if (now.accepted > at.accepted) return "proven";
+    if (now.rejected > at.rejected) return "refused";
+    return "none";
   }
 
   #unmanagedReason(acting: boolean): string | null {
@@ -503,6 +885,8 @@ export class WebhookSync {
       lastCheckAt: this.#lastCheckAt,
       lastEditAt: this.#lastAttemptAt,
       lastFailed: this.#lastFailed,
+      lastAttemptFailed: this.#lastAttemptFailed,
+      stuck: this.#stuckKey === key,
       differs: key !== this.#confirmedKey,
     });
     // URGENT CHANGES — a missing webhook, a disabled one — are not held for the
@@ -528,16 +912,24 @@ export class WebhookSync {
   async #run(desired: readonly string[], allowEdit: boolean, allowCreate: boolean, now: number): Promise<void> {
     const client = this.#options.client!;
     let attempted = false;
+    let failure: string | null = null;
+    let diff: WebhookDiff | null = null;
     try {
       const authHeader = this.#options.secret!.reveal();
       const result = await ensureWebhook(client, { url: this.#options.url!, authHeader, addresses: desired }, allowEdit, {
         knownId: this.#knownId,
         writtenAuth: this.#writtenAuth,
+        writtenKey: this.#writtenKey,
+        authEvidence: this.#evidence(),
         lastEdit: this.#lastEdit,
         allowCreate,
+        now,
         onAttempt: () => {
           attempted = true;
           this.#lastAttemptAt = now;
+        },
+        onDiff: (described) => {
+          diff = described;
         },
       });
       if (attempted) this.#lastAttemptFailed = false;
@@ -546,70 +938,134 @@ export class WebhookSync {
       this.#knownId = result.webhookID;
       if (result.edit !== null) {
         this.#writtenAuth = authHeader;
+        this.#writtenKey = desired.join(",");
         this.#lastEdit = result.edit;
+        // EVIDENCE COUNTS FROM HERE: only what was delivered after this edit says anything about it.
+        this.#deliveriesAtEdit = this.#options.deliveries?.() ?? null;
       } else if (result.action === "unchanged" && result.stuck === null) {
         // CONVERGED: whatever was last sent is what Helius holds.
         this.#lastEdit = null;
       }
+      this.#stuckKey = result.stuck !== null ? desired.join(",") : null;
       this.#confirmedKey = canonicalAddresses(result.watched).join(",");
+      this.#status = { ...this.#status, lastDiff: result.diff, lastEditEcho: result.editEcho ?? this.#status.lastEditEcho };
       this.#options.onSynced({ watched: new Set(result.watched), added: result.added, gap: result.gap, authConfirmed: result.authConfirmed, now });
-      if (result.stuck !== null) throw new Error(result.stuck);
-      const held =
-        result.action === "held"
-          ? `the webhook holds ${result.watched.length} addresses and ${desired.length} are discovered; the edit waits for the debounce, and the links it lacks are turned every sweep`
-          : null;
-      const duplicates = result.duplicates > 0 ? `${result.duplicates} other webhook(s) point at the same URL and deliver twice` : null;
-      this.#status = {
-        managed: true,
-        reason: [held, duplicates].filter((part): part is string => part !== null).join("; ") || null,
-        idSuffix: result.webhookID.slice(-6),
-        addresses: result.watched.length,
-        active: result.active,
-        lastAction: result.reactivated ? `${result.action}, reactivated` : result.action,
-        lastSyncAt: new Date(now).toISOString(),
-        lastSyncError: null,
-        consecutiveFailures: 0,
-      };
-      if (result.action !== "unchanged" || result.reactivated) {
-        this.#options.log("info", "helius webhook synced", {
-          action: this.#status.lastAction,
+      if (result.stuck !== null) {
+        // STUCK IS A FAILURE, NOT A THROW. A throw set #lastFailed, and a failed
+        // sync is due again next sweep: a GET every 60 s for a webhook nothing
+        // will be sent to. It is counted (and pages) below, looked at every
+        // RECHECK_MS, and due at once only when the addresses change.
+        failure = result.stuck;
+      } else {
+        const held =
+          result.action === "held"
+            ? `the webhook holds ${result.watched.length} addresses and ${desired.length} are discovered; the edit waits for the debounce, and the links it lacks are turned every sweep`
+            : null;
+        const duplicates = result.duplicates > 0 ? `${result.duplicates} other webhook(s) point at the same URL and deliver twice` : null;
+        this.#failingSince = null;
+        this.#lastFailureAt = null;
+        this.#lastFailureDiff = null;
+        this.#status = {
+          managed: true,
+          reason: [held, duplicates].filter((part): part is string => part !== null).join("; ") || null,
+          idSuffix: result.webhookID.slice(-6),
           addresses: result.watched.length,
-          idSuffix: this.#status.idSuffix,
-        });
+          active: result.active,
+          lastAction: result.reactivated ? `${result.action}, reactivated` : result.action,
+          lastSyncAt: new Date(now).toISOString(),
+          lastSyncError: null,
+          consecutiveFailures: 0,
+          lastDiff: this.#status.lastDiff,
+          lastEditEcho: this.#status.lastEditEcho,
+          failingSince: null,
+        };
+        if (result.action !== "unchanged" || result.reactivated) {
+          this.#options.log("info", "helius webhook synced", {
+            action: this.#status.lastAction,
+            addresses: result.watched.length,
+            idSuffix: this.#status.idSuffix,
+            diff: result.diff === null ? null : summarizeDiff(result.diff),
+            echo: result.editEcho === null ? null : summarizeDiff(result.editEcho),
+          });
+        }
       }
     } catch (error) {
       this.#lastFailed = true;
       if (attempted) this.#lastAttemptFailed = true;
       // HeliusWebhookError carries no URL by construction; anything else is
       // reduced to its name, so nothing unexpected can carry one out either.
-      const detail = error instanceof HeliusWebhookError || (error instanceof Error && error.name === "Error") ? error.message : `${(error as Error)?.name ?? "error"}`;
-      this.#status = {
-        ...this.#status,
-        managed: true,
-        reason: "the last sync failed",
-        lastSyncError: detail,
-        consecutiveFailures: this.#status.consecutiveFailures + 1,
-      };
-      this.#options.log("warn", "helius webhook sync failed", { detail, consecutiveFailures: this.#status.consecutiveFailures });
+      failure = error instanceof HeliusWebhookError || (error instanceof Error && error.name === "Error") ? error.message : `${(error as Error)?.name ?? "error"}`;
     }
+    // OUTSIDE THE TRY, so a logger that throws here is not caught and counted a
+    // second time; tick's .catch swallows it.
+    if (failure !== null) this.#recordFailure(failure, now, diff);
+  }
+
+  /** One failed sync: counted, dated, logged with what the look saw (when it got that far). */
+  #recordFailure(detail: string, now: number, diff: WebhookDiff | null): void {
+    this.#failingSince ??= now;
+    this.#lastFailureAt = now;
+    this.#lastFailureDiff = diff;
+    const failingSince = new Date(this.#failingSince).toISOString();
+    this.#status = {
+      ...this.#status,
+      managed: true,
+      reason: "the last sync failed",
+      lastSyncError: detail,
+      consecutiveFailures: this.#status.consecutiveFailures + 1,
+      lastDiff: diff ?? this.#status.lastDiff,
+      failingSince,
+    };
+    this.#options.log("warn", "helius webhook sync failed", {
+      detail,
+      consecutiveFailures: this.#status.consecutiveFailures,
+      failingSince,
+      diff: diff === null ? null : summarizeDiff(diff),
+    });
   }
 
   status(): WebhookStatus {
     return this.#status;
   }
 
-  /** doorbell-sync: warned once the failures reach SYNC_FAILURE_ALERT_STREAK in a row, cleared by a success. */
-  syncAlert(): { readonly fire: { key: string; severity: "warn"; title: string; detail: string } | null; readonly clear: boolean } {
+  /**
+   * doorbell-sync: warned once the failures reach SYNC_FAILURE_ALERT_STREAK in
+   * a row, CRITICAL once they have gone on for SYNC_FAILURE_CRITICAL_AFTER_MS,
+   * cleared by a success.
+   *
+   * ONE KEY, TWO SEVERITIES, like not-acting (bin/keeper.mts): the alerter lets
+   * an escalation through its dedup window, so the page is not swallowed by
+   * the warn sent minutes before. A warn alone reaches nobody by default
+   * (Telegram forwards criticals), and the webhook was stuck for hours with
+   * nobody told.
+   */
+  syncAlert(): { readonly fire: { key: string; severity: "warn" | "critical"; title: string; detail: string } | null; readonly clear: boolean } {
     const { consecutiveFailures, lastSyncError } = this.#status;
     if (consecutiveFailures === 0) return { fire: null, clear: true };
     if (consecutiveFailures < SYNC_FAILURE_ALERT_STREAK) return { fire: null, clear: false };
+    const lastedMs = this.#failingSince === null || this.#lastFailureAt === null ? 0 : this.#lastFailureAt - this.#failingSince;
+    const look = this.#lastFailureDiff === null ? "" : ` Last look: ${summarizeDiff(this.#lastFailureDiff)}.`;
+    if (lastedMs >= SYNC_FAILURE_CRITICAL_AFTER_MS) {
+      return {
+        fire: {
+          key: DOORBELL_SYNC_ALERT_KEY,
+          severity: "critical",
+          title: "The keeper's Helius webhook has been out of step for an hour",
+          detail:
+            `${consecutiveFailures} syncs in a row failed over ${Math.floor(lastedMs / 60_000)} min: ${lastSyncError ?? "unknown"}.${look} ` +
+            "The links the webhook lacks are turned every sweep and a deaf doorbell turns everyone, so nothing is missed — " +
+            "but the webhook on Helius needs a look now (/status → doorbell.webhook.lastDiff).",
+        },
+        clear: false,
+      };
+    }
     return {
       fire: {
         key: DOORBELL_SYNC_ALERT_KEY,
         severity: "warn",
         title: "The keeper cannot keep its Helius webhook in step",
         detail:
-          `${consecutiveFailures} syncs in a row failed: ${lastSyncError ?? "unknown"}. New links are turned every sweep until ` +
+          `${consecutiveFailures} syncs in a row failed: ${lastSyncError ?? "unknown"}.${look} New links are turned every sweep until ` +
           "the webhook holds them, so nothing is missed — but the webhook on Helius should be checked.",
       },
       clear: false,

@@ -28,6 +28,7 @@ import { Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { Doorbell, type DoorLink } from "../src/doorbell.js";
 import { createDoorbellWebhookSync, createHooksRoute } from "../src/doorbell-wiring.js";
+import { RECHECK_MS } from "../src/helius-webhooks.js";
 import { LegFeeBook, SigningRoutes } from "../src/sweep-decision.js";
 import { HEARTBEAT_HEADERS_TIMEOUT_MS, HEARTBEAT_REQUEST_TIMEOUT_MS, createHeartbeatServer } from "../src/status.js";
 
@@ -228,8 +229,11 @@ describe("the receiver's callbacks (createHooksRoute)", () => {
 });
 
 describe("the webhook sync, reporting into the doorbell (createDoorbellWebhookSync)", () => {
-  /** An in-memory Helius that holds one webhook, as the tests of src/helius-webhooks.ts do. */
-  function helius(initial: Record<string, unknown>[] = []) {
+  /**
+   * An in-memory Helius that holds one webhook, as the tests of src/helius-webhooks.ts do.
+   * `listed` is how its list shows a webhook: Helius's list need not show everything it holds.
+   */
+  function helius(initial: Record<string, unknown>[] = [], listed: (hook: Record<string, unknown>) => Record<string, unknown> = (hook) => hook) {
     const hooks = initial.map((hook) => ({ ...hook }));
     let next = 1;
     const fetchImpl: typeof fetch = async (input, init) => {
@@ -237,7 +241,7 @@ describe("the webhook sync, reporting into the doorbell (createDoorbellWebhookSy
       const method = init?.method ?? "GET";
       const body = init?.body === undefined ? undefined : JSON.parse(String(init.body));
       const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
-      if (method === "GET") return json(hooks);
+      if (method === "GET") return json(hooks.map(listed));
       if (method === "POST") {
         const created = { webhookID: `wh-${next++}-abcdef`, active: true, ...body };
         hooks.push(created);
@@ -303,6 +307,55 @@ describe("the webhook sync, reporting into the doorbell (createDoorbellWebhookSy
     bell.rejected();
     bell.ingestBody(delivery(["nobody"]).toString("utf8"), new Set(), T0 + SWEEP);
     expect(select(bell, links, T0 + 2 * SWEEP).fullReason).toBeNull();
+  });
+
+  // W1. THE INCIDENT OF 2026-10-11, END TO END: Helius's list left the
+  // addresses out, the recheck called the boot PUT "not kept", and told the
+  // doorbell Helius watched nothing — every link in the "new" lane, every
+  // sweep, while authenticated deliveries kept arriving.
+  it("keeps every link out of the \"new\" lane after the recheck when Helius's list leaves the addresses out", async () => {
+    const links = fleet(200);
+    const bell = booted(links);
+    const held = [...addressesOf(links)].sort();
+    const unlisted = (hook: Record<string, unknown>) => {
+      const { accountAddresses: _omitted, ...rest } = hook;
+      return rest;
+    };
+    const api = helius(
+      [{ webhookID: "wh-held-abcdef", webhookURL: HOOK_URL, webhookType: "raw", accountAddresses: held, transactionTypes: ["ANY"], authHeader: SECRET, txnStatus: "all", active: true }],
+      unlisted,
+    );
+    const sync = build(bell, api.fetchImpl);
+    // The boot sync cannot see the addresses, so it writes them; they ring, and a turn answers them.
+    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP });
+    for (const turn of select(bell, links, T0 + 2 * SWEEP).turns) bell.recordTurn(turn.link, turn.lane, true, T0 + 2 * SWEEP, "IDLE", T0 + 2 * SWEEP);
+    // The recheck, ten minutes after: the list still shows no addresses.
+    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + RECHECK_MS });
+    const next = select(bell, links, T0 + 2 * SWEEP + RECHECK_MS);
+    expect(next.fullReason).toBeNull();
+    expect(next.lanes.new).toBe(0);
+    expect(sync.status().consecutiveFailures).toBe(0);
+  });
+
+  // W2
+  it("hands the sync the doorbell's delivery counts, so an authenticated delivery after its edit proves the header", async () => {
+    const links = fleet(20);
+    const bell = booted(links);
+    const held = [...addressesOf(links)].sort();
+    const headerless = (hook: Record<string, unknown>) => {
+      const { authHeader: _omitted, ...rest } = hook;
+      return rest;
+    };
+    const api = helius(
+      [{ webhookID: "wh-held-abcdef", webhookURL: HOOK_URL, webhookType: "raw", accountAddresses: held, transactionTypes: ["ANY"], authHeader: SECRET, txnStatus: "all", active: true }],
+      headerless,
+    );
+    const sync = build(bell, api.fetchImpl);
+    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP });
+    const route = createHooksRoute({ secret: new Secret(SECRET, "doorbellSecret"), doorbell: bell, known: () => addressesOf(links), log: quiet })!;
+    route.accepted(delivery([links[3]!.wallet]));
+    await sync.tick({ acting: true, addresses: held, now: T0 + SWEEP + RECHECK_MS });
+    expect(sync.status().lastDiff?.auth).toMatchObject({ state: "absent", verdict: "written-by-us", evidence: "proven" });
   });
 
   it("scrubs the doorbell secret out of an error Helius echoes back", async () => {
