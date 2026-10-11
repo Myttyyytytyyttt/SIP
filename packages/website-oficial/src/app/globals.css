@@ -458,11 +458,19 @@
   animation-play-state: paused;
 }
 
-@keyframes live-breathe {
-  50% { opacity: 0.35; }
+/* THE PAGE'S LIGHT (owner, 10-11): while it is working the dot pulses green —
+   a halo of its own colour growing out of it and fading, every 2 s. Painted by
+   this span alone (background: currentColor), so the dot itself never moves. */
+@keyframes live-halo {
+  0% { transform: scale(1); opacity: 0.55; }
+  70%, 100% { transform: scale(2.6); opacity: 0; }
 }
-.live-breathe {
-  animation: live-breathe 1.2s ease-in-out infinite;
+.live-halo {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: currentColor;
+  animation: live-halo 2s ease-out infinite;
 }
 
 @keyframes live-ping {
@@ -482,8 +490,8 @@
     animation: none;
     background-color: color-mix(in oklab, var(--live-tone) 10%, transparent);
   }
-  .live-breathe {
-    animation: none;
+  .live-halo {
+    display: none;
   }
   .live-ping {
     display: none;

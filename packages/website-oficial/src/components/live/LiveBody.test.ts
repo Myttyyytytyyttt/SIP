@@ -495,11 +495,12 @@ describe("how fresh the page is", () => {
   /** The header's markup, which the dot must be in. */
   const header = (html: string): string => html.match(/<header\b[\s\S]*?<\/header>/)?.[0] ?? "";
 
-  it("is a dot in the header, before the account, on both views", () => {
+  it("is a dot at the header's far right, after the account and the theme, on both views (owner, 10-11)", () => {
     for (const view of ["pension", "activity"] as const) {
       const bar = header(withAccount(view));
       expect(bar).toContain('data-pulse="fresh"');
-      expect(bar.indexOf("data-pulse")).toBeLessThan(bar.indexOf("data-account"));
+      expect(bar.indexOf("data-pulse")).toBeGreaterThan(bar.indexOf("data-account"));
+      expect(bar.indexOf("data-pulse")).toBeGreaterThan(bar.indexOf("Toggle theme"));
     }
   });
 
@@ -509,7 +510,7 @@ describe("how fresh the page is", () => {
     expect(seen(bar)).not.toContain(LIVE_COPY.pulse.updated(LIVE_COPY.pulse.ago(0)));
   });
 
-  it("reads the store's own signals: Live only while the push is live, breathing while a check is out", () => {
+  it("reads the store's own signals: Live only while the push is live, a check out while one is", () => {
     expect(header(withAccount("pension", null, { socket: "live" }))).toContain(`aria-label="${LIVE_COPY.pulse.live(LIVE_COPY.pulse.ago(0)).replace(" · ", ", ")}"`);
     expect(header(withAccount("pension", null, { reading: true }))).toContain('data-pulse="checking"');
     expect(header(withAccount("activity", null, { heard: { at: Date.now(), wallets: [] } }))).toContain('data-pulse="heard"');

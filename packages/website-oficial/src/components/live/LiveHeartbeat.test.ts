@@ -20,6 +20,7 @@ import {
   NEXT_IN_MAX_S,
   NextCheck,
   PULSE_DOT,
+  PULSE_HALO,
   PULSE_UPDATE,
   UpdateOffer,
   checkEnableAt,
@@ -85,7 +86,10 @@ const nameOf = (html: string): string | null => html.match(/aria-label="([^"]*)"
 /** What a person reads in the bar: the markup without its tags. */
 const seen = (html: string): string => html.replace(/<[^>]*>/g, "").trim();
 /** The dot's own box, the span inside the button. */
-const boxOf = (html: string): string => html.match(/<span aria-hidden="true" class="([^"]*)"/)?.[1] ?? "";
+/** The dot's own box — the span beside its halo, inside the 8 px frame. */
+const boxOf = (html: string): string => html.match(/<span class="(relative size-2 rounded-full[^"]*)"/)?.[1] ?? "";
+/** Whether the green pulse is drawn. */
+const pulses = (html: string): boolean => html.includes("data-pulse-halo");
 
 const facts = (over: Partial<PulseFacts> = {}): PulseFacts => ({
   state: "fresh",
@@ -281,37 +285,39 @@ describe("in the bar", () => {
     expect(nameOf(dotAt(T, { live: { socket: "off", backingOff: true } }))).toBe("Updated just now. Not live right now");
   });
 
-  it("breathes while a check is out — the page's own included — and while a change heard has not arrived", () => {
+  it("pulses green whenever the page is working — up to date, a check out, a change heard, live or not (owner, 10-11)", () => {
     const reading = dotAt(T, { live: { reading: true } });
     expect(reading).toContain('data-pulse="checking"');
-    expect(boxOf(reading)).toContain("live-breathe");
-    // The breath says it; the name a focus rests on does not change with every check.
+    // The name a focus rests on does not change with every check.
     expect(nameOf(reading)).toBe("Updated just now");
 
     const heard = dotAt(T, { live: { heard: HEARD } });
     expect(heard).toContain('data-pulse="heard"');
-    expect(boxOf(heard)).toContain("live-breathe");
     expect(nameOf(heard)).toBe("Updated just now. Change seen on Solana, updating");
 
-    expect(boxOf(dotAt(T))).not.toContain("live-breathe");
+    for (const html of [dotAt(T), reading, heard, dotAt(T, { live: { socket: "live" } }), dotAt(T, { live: { socket: "off" } })]) {
+      expect(boxOf(html)).toContain("bg-emerald-500");
+      expect(pulses(html)).toBe(true);
+    }
   });
 
-  it("does not breathe for a change heard while the history cannot be read, and says it is not on this page yet", () => {
+  it("is not \"updating\" for a change heard while the history cannot be read, and says it is not on this page yet", () => {
     const html = dotAt(T, { live: { heard: HEARD }, heardBehind: true });
     expect(html).toContain('data-pulse="fresh"');
-    expect(boxOf(html)).not.toContain("live-breathe");
     expect(nameOf(html)).toBe("Updated just now. Change seen on Solana, not on this page yet");
-    // A check really out still breathes — for the check, never as "heard".
+    // A check really out is a check — never "heard".
     const reading = dotAt(T, { live: { heard: HEARD, reading: true }, heardBehind: true });
     expect(reading).toContain('data-pulse="checking"');
     expect(reading).not.toContain('data-pulse="heard"');
   });
 
-  it("is hollow and says so when the last update failed, with the moment the figures are from", () => {
+  it("is red and says so when the last update failed, with the moment the figures are from", () => {
     // Six minutes on, the updates since have failed: the figures are the snapshot's, read at 11:59:58.
     const html = dotAt(T + 6 * 60_000, { stale: failed({ since: T + 6 * 60_000 }), live: { heard: HEARD, reading: true } });
     expect(html).toContain('data-pulse="behind"');
-    expect(boxOf(html)).toMatch(/border border-muted-foreground bg-transparent/);
+    // Red, and still: no pulse over a failure.
+    expect(boxOf(html)).toContain("bg-red-500");
+    expect(pulses(html)).toBe(false);
     expect(nameOf(html)).toBe("Behind — couldn’t update. As of 11:59 UTC. Change seen on Solana, not on this page yet");
   });
 
@@ -351,7 +357,8 @@ describe("in the bar", () => {
       dotAt(T, { stale: failed() }),
       dotAt(T, { updateAvailable: true }),
     ].map(boxOf);
-    for (const box of boxes) expect(box).toMatch(/^size-2 rounded-full /);
+    for (const box of boxes) expect(box).toMatch(/^relative size-2 rounded-full /);
+    // The halo is out of the flow (absolute), so its coming and going moves nothing either.
   });
 });
 
@@ -413,17 +420,12 @@ describe("a newer version, in the popover", () => {
 });
 
 describe("reduced motion", () => {
-  it("the dot breathes only through the class globals.css stills, and only a failed update is hollow", () => {
-    for (const state of ["checking", "heard"] as const) expect(PULSE_DOT[state]).toContain("live-breathe");
-    // Still, a check out looks fresh, a change heard is the breath's low point, and neither wears the failed look.
-    expect(PULSE_DOT.checking).not.toContain("motion-reduce:");
-    expect(PULSE_DOT.heard).toContain("motion-reduce:bg-muted-foreground/35");
-    for (const state of ["fresh", "checking", "heard"] as const) expect(PULSE_DOT[state]).not.toMatch(/bg-transparent|(^|\s)(motion-reduce:)?border(\s|$)/);
-    expect(PULSE_DOT.behind).toContain("bg-transparent");
-    for (const look of [...Object.values(PULSE_DOT), PULSE_UPDATE]) expect(look).not.toMatch(/(^|\s)animate-/);
-    // Only a check out or a change heard moves at all; the update's ring never does.
-    expect(PULSE_DOT.fresh).not.toContain("live-");
-    expect(PULSE_DOT.behind).not.toContain("live-");
-    expect(PULSE_UPDATE).not.toContain("live-");
+  it("pulses only through the halo globals.css removes, so the green stands still; red is the failure alone and never pulses", () => {
+    // One green for every working state, red for "behind" (owner, 10-11).
+    for (const state of ["fresh", "checking", "heard"] as const) expect(PULSE_DOT[state]).toBe("bg-emerald-500");
+    expect(PULSE_DOT.behind).toBe("bg-red-500");
+    // The only moving thing is the halo's class; no look animates by itself, the update's ring included.
+    expect(PULSE_HALO).toContain("live-halo");
+    for (const look of [...Object.values(PULSE_DOT), PULSE_UPDATE]) expect(look).not.toMatch(/(^|\s)animate-|live-/);
   });
 });

@@ -41,6 +41,7 @@ export function SiteHeader({
   control = null,
   contributions = null,
   account,
+  status = null,
   current = "pension",
   mode = null,
 }: {
@@ -57,6 +58,12 @@ export function SiteHeader({
   contributions?: React.ReactNode;
   /** Connect, Disconnect, the pension key, or a placeholder while Privy is asked. */
   account: React.ReactNode;
+  /**
+   * How fresh the page is, at the far right — after the theme, last of all
+   * (owner, 10-11). Only the live page passes it (LiveHeartbeat); a slot like
+   * the rest, so the sample's header is exactly what it was.
+   */
+  status?: React.ReactNode;
   readonly current?: "pension" | "activity" | "leaderboard" | "dashboard";
   /**
    * THE MODE THE TABS CARRY (owner, 09-24). A bare "/" is the landing to a
@@ -174,6 +181,7 @@ export function SiteHeader({
           {control}
           {account}
           <ModeToggle />
+          {status}
         </div>
       </div>
     </header>

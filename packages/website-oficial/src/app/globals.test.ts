@@ -67,12 +67,12 @@ const liveClasses = (selector: string): string[] => selector.match(/\.live-[a-z-
 
 describe("the live marks", () => {
   it("are there to check, so a rename cannot make this pass by finding nothing", () => {
-    expect(LIVE.map((rule) => rule.selector)).toEqual(expect.arrayContaining([".live-wash", ".live-breathe", ".live-ping"]));
+    expect(LIVE.map((rule) => rule.selector)).toEqual(expect.arrayContaining([".live-wash", ".live-halo", ".live-ping"]));
   });
 
   it("each stand still under reduced motion", () => {
     const moving = new Set(LIVE.filter((rule) => !rule.within.includes(REDUCED) && sets(rule.body, "animation")).flatMap((rule) => liveClasses(rule.selector)));
-    expect([...moving].sort()).toEqual([".live-breathe", ".live-ping", ".live-wash"]);
+    expect([...moving].sort()).toEqual([".live-halo", ".live-ping", ".live-wash"]);
     const stilled = new Set(
       LIVE.filter((rule) => rule.within.includes(REDUCED) && (/animation\s*:\s*none/.test(rule.body) || /display\s*:\s*none/.test(rule.body))).flatMap((rule) =>
         liveClasses(rule.selector),
@@ -86,12 +86,12 @@ describe("the live marks", () => {
     expect(wash?.body).toMatch(/background-color\s*:\s*color-mix/);
   });
 
-  it("paint only from the wash and the ping, never from a class on a host", () => {
+  it("paint only from the wash, the ping and the halo, never from a class on a host", () => {
     const painting = LIVE.filter((rule) => !rule.selector.startsWith("@keyframes") && (sets(rule.body, "background") || sets(rule.body, "background-color") || sets(rule.body, "box-shadow")));
     expect(painting.length).toBeGreaterThan(0);
     for (const rule of painting) {
       const subject = rule.selector.trim().split(/\s+/).at(-1) ?? "";
-      expect(subject, rule.selector).toMatch(/^\.live-(?:wash|ping)(?:\[[^\]]*\])*$/);
+      expect(subject, rule.selector).toMatch(/^\.live-(?:wash|ping|halo)(?:\[[^\]]*\])*$/);
     }
   });
 

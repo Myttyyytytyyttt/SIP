@@ -1,19 +1,23 @@
 "use client";
 
 /**
- * HOW FRESH THE PAGE IS, AS ONE DOT IN THE HEADER (10-09).
+ * HOW FRESH THE PAGE IS, AS ONE DOT IN THE HEADER (10-09), AT ITS FAR RIGHT (10-11).
  *
  * A healthy page and a stuck one used to look the same (G1): nothing said when
  * the figures last changed, and a failed update showed only in the note above
- * the cards. The dot says it at a glance, beside the pension key:
+ * the cards. The dot says it at a glance, last of all in the bar:
  *
- *   solid       as of the last update            "Updated just now" / "Live · updated 2 min ago"
- *   breathing   a check is out                   the same words: a check changes none of them
- *   breathing   the chain said something         "Change seen on Solana · updating"
- *               changed, and an update can bring it
- *   solid       …and the history cannot be read  "Change seen on Solana · not on this page yet"
- *   hollow      the last update failed           "Behind — couldn’t update" · "As of 14:32 UTC"
- *   ringed      a newer version is served        "A newer version of SaverFi is available" · Reload page
+ *   green, pulsing   the page is working — up to date, a check out, a change
+ *                    on its way, live or checking every 20 s — "Updated just now" /
+ *                    "Live · updated 2 min ago" / "Change seen on Solana · updating"
+ *   red              the last update failed           "Behind — couldn’t update" · "As of 14:32 UTC"
+ *   ringed           a newer version is served        "A newer version of SaverFi is available" · Reload page
+ *
+ * THE OWNER'S LIGHT (10-11): "siempre que funciona se queda como pulso verde y
+ * en caso de algún error … rojo". One green for every working state, whether
+ * the push is live or the page checks about every 20 s (he chose green for that
+ * too); the popover's words tell them apart. Red is the failure alone — the
+ * dot, not the page. Under reduced motion the green stands still.
  *
  * THE DOT ONLY, AT EVERY WIDTH (owner, 10-09). Its words are its popover and its
  * accessible name, never text in the bar, and every look is one box: no state
@@ -27,16 +31,16 @@
  * on useLiveDashboard). Nothing here is captured or guessed any more:
  *  * "Updated …" counts from `live.lastReadAt`, the last update that LANDED; a
  *    failure never moves it.
- *  * It breathes while `live.reading` — a check out, the page's own included —
- *    or while `live.heard`: the chain rang about a change no update has
- *    brought yet. A press of Check now breathes because it starts a check,
- *    not because it was pressed.
+ *  * The state follows `live.reading` — a check out, the page's own included —
+ *    and `live.heard`: the chain rang about a change no update has brought yet.
+ *    Since 10-11 all of these wear the same green pulse (the owner's light);
+ *    the popover's words are what tell them apart.
  *  * A CHECK CHANGES NO WORD (review, 10-09; plan P1: background checks never
  *    change the text). The page checks every 20–60 s, and the dot keeps the
  *    focus after Escape: a name that flipped to "Checking…" on every check
- *    was read out again each time. Only the breath says a check is out; a
- *    press says "Checking…" on Check now itself, where the focus then is.
- *  * A CHANGE HEARD WHILE THE HISTORY CANNOT BE READ DOES NOT BREATHE
+ *    was read out again each time. A press says "Checking…" on Check now
+ *    itself, where the focus then is.
+ *  * A CHANGE HEARD WHILE THE HISTORY CANNOT BE READ IS NOT "UPDATING"
  *    (review, 10-09). What was heard is not on the page then, and no update is
  *    known to be bringing it: the dot says "not on this page yet", the rows'
  *    own words for the same moment (heard-lines.ts) — LiveBody hands both the
@@ -66,14 +70,12 @@
  * spoken; a failure is announced by the stale note's own region
  * (DashboardSource.tsx).
  *
- * REDUCED MOTION: the dot does not breathe. A check under way looks as fresh
- * does (Check now says it, once pressed), a change heard is the faint dot —
- * the breath held at its low point — and only a failed update is hollow
- * (review, 10-09: with no words in the bar, a check must never wear the
- * failed look). The popover appears at once, without its fade and zoom, and
+ * REDUCED MOTION: the halo is not drawn (globals.css), so the green stands
+ * still; red is still at every setting. A check never wears the failed look
+ * (review, 10-09). The popover appears at once, without its fade and zoom, and
  * Check now's glyph stands still.
  *
- * LIVE ONLY. LiveBody puts it before the account in the header. The sample, the
+ * LIVE ONLY. LiveBody puts it in the header's status slot, after the theme. The sample, the
  * first read, and the unreadable and keyless screens never draw it.
  */
 
@@ -151,8 +153,8 @@ const spoken = (line: string): string => line.replaceAll(" · ", ", ");
  * the dot's accessible name. The name says everything on its own, an update
  * included, which in the popover is its own section. A check under way is NOT
  * in it (review, 10-09; plan P1): the page checks every 20–60 s, and a focused
- * dot whose name flipped with each check was read out again each time — only
- * the breath says it, and a press says it on Check now. Nor is the next check:
+ * dot whose name flipped with each check was read out again each time — a
+ * press says it on Check now. Nor is the next check:
  * that counts down in the popover (NextCheck), and a name is read once.
  */
 export function pulseWords(facts: PulseFacts): { readonly lines: readonly string[]; readonly name: string } {
@@ -206,16 +208,17 @@ export function checkLook(input: { readonly left: number | null; readonly checki
 
 /** The dot's look in each state. All are the same box, so no state moves anything. */
 export const PULSE_DOT: Readonly<Record<PulseState, string>> = {
-  fresh: "bg-muted-foreground/70",
-  // globals.css stops the breath under reduced motion. A check out then looks
-  // fresh — background checks change nothing but the breath (plan B2) — and a
-  // change heard is the breath held at its low point. The hollow ring is
-  // "behind" alone: with no words in the bar (owner, 10-09) a check must never
-  // wear the failed look.
-  checking: "live-breathe bg-muted-foreground/70",
-  heard: "live-breathe bg-muted-foreground/70 motion-reduce:bg-muted-foreground/35",
-  behind: "border border-muted-foreground bg-transparent",
+  // Working, in every way the page can be: one green (owner, 10-11), with the
+  // halo pulsing beside it (PULSE_HALO). A background check is never a second look.
+  fresh: "bg-emerald-500",
+  checking: "bg-emerald-500",
+  heard: "bg-emerald-500",
+  // Red for the failure alone, and still: the popover says why and when it tries again.
+  behind: "bg-red-500",
 };
+
+/** The pulse, drawn by its own span behind the dot (globals.css .live-halo) — for every working state, none for "behind". */
+export const PULSE_HALO = "live-halo text-emerald-500";
 
 /**
  * WORN OVER ANY LOOK while a newer version is served: a ring set off from the
@@ -308,7 +311,7 @@ export function LiveHeartbeat({
    * What was heard is not on the page, and no update is known to be bringing
    * it — the stale note, or the history unreadable: heard-lines.ts's own
    * `behind`, the same value LiveBody hands the rows. A change heard then does
-   * not breathe, and says "not on this page yet".
+   * not count as "updating", and says "not on this page yet".
    */
   readonly heardBehind: boolean;
   /** A newer build is served than this tab runs (use-update-available.ts). */
@@ -319,7 +322,7 @@ export function LiveHeartbeat({
   // The ticker is what re-renders; the clock is read here, as in use-countdown.ts.
   useTicker(true, PULSE_TICK_MS);
   const now = Date.now();
-  // A change heard breathes only while an update can bring it; behind, the dot breathes only for a check really out.
+  // A change heard is "updating" only while an update can bring it; the failed look is "behind" alone.
   const state = pulseStateOf({ stale: stale !== null, heard: live.heard !== null && !heardBehind, reading: live.reading });
   const words = pulseWords({
     state,
@@ -396,7 +399,10 @@ export function LiveHeartbeat({
             setOpen(next);
           }}
         >
-          <span aria-hidden className={cn("size-2 rounded-full", PULSE_DOT[state], updateAvailable && PULSE_UPDATE)} />
+          <span aria-hidden className="relative flex size-2">
+            {state === "behind" ? null : <span className={PULSE_HALO} data-pulse-halo="" />}
+            <span className={cn("relative size-2 rounded-full", PULSE_DOT[state], updateAvailable && PULSE_UPDATE)} />
+          </span>
         </Button>
       </PopoverTrigger>
       <PopoverContent

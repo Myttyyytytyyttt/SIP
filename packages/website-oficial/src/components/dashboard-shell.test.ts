@@ -575,7 +575,7 @@ describe("the header's freshness dot", () => {
     expect(html).not.toContain(DOT);
   });
 
-  it("is on a connected pension once the chain has answered, before its key, on both views", () => {
+  it("is on a connected pension once the chain has answered, at the bar's far right after its key, on both views", () => {
     mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
     mocked.search = new URLSearchParams("mode=live");
     mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
@@ -583,7 +583,7 @@ describe("the header's freshness dot", () => {
       mocked.pathname = pathname;
       const html = render(true, view);
       expect(html.match(/data-pulse="fresh"/g)).toHaveLength(1);
-      expect(html.indexOf(DOT)).toBeLessThan(html.indexOf(shortAddress(PENSION_KEY)));
+      expect(html.indexOf(DOT)).toBeGreaterThan(html.indexOf(shortAddress(PENSION_KEY)));
     }
   });
 });

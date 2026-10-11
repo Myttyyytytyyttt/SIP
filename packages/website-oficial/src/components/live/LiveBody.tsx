@@ -368,22 +368,19 @@ export function LiveBody({
         // the feed: a settlement read from a wallet's link is not in the
         // vault's own page and is a contribution all the same.
         contributions={<HeaderContributions rows={data.settlementRows} arrived={arrivals.arrived} />}
-        // HOW FRESH THIS PAGE IS: a dot before the pension key, its words in
-        // its popover (LiveHeartbeat.tsx). Wrapped in here, so the header — the
-        // sample's too — is not edited for it.
-        account={
-          <>
-            <LiveHeartbeat
-              nowMs={data.nowMs}
-              stale={stale}
-              live={live}
-              activityRetryAt={activityRetryAt}
-              heardBehind={heardBehind}
-              updateAvailable={updateAvailable}
-              onCheck={onRefresh}
-            />
-            {account}
-          </>
+        account={account}
+        // HOW FRESH THIS PAGE IS: a dot at the bar's far right (owner, 10-11),
+        // its words in its popover (LiveHeartbeat.tsx).
+        status={
+          <LiveHeartbeat
+            nowMs={data.nowMs}
+            stale={stale}
+            live={live}
+            activityRetryAt={activityRetryAt}
+            heardBehind={heardBehind}
+            updateAvailable={updateAvailable}
+            onCheck={onRefresh}
+          />
         }
         current={view}
       />
