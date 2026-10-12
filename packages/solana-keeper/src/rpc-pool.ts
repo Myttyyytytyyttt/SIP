@@ -21,6 +21,7 @@
 // individual calls, which would have to reason about each one.
 
 import type { Secret } from "@sip/solana-log";
+import type { RpcMeter } from "./rpc-usage.js";
 
 const COOLDOWN_MS = 30_000;
 
@@ -49,12 +50,22 @@ export const endpointLabel = (index: number, total: number): string => `endpoint
  * the choice of endpoint has been made and, for `onAnswer`, after the response
  * is in hand; a caller that throws from one breaks its own request and changes
  * no routing.
+ *
+ * `meter` IS TOLD THE SAME KIND OF THING, AND MORE QUIETLY (src/rpc-usage.ts):
+ * the request it was handed — the JSON-RPC body is the only place the method is
+ * written, so a per-method count can only be taken here — and how each attempt
+ * at each endpoint ended. Unlike the two callbacks it CANNOT break a request:
+ * every report to it is made inside a try of its own, because a meter is
+ * instrumentation, and instrumentation that can fail a settle's send is an
+ * outage it caused. Omitted, the pool behaves exactly as it did before it had
+ * one; bin/ready.mts and the policy CLI pass none.
  */
 export function poolFetch(
   urls: readonly Secret[],
   onFailover?: (message: string, fields: Record<string, unknown>) => void,
   timeoutMs = 30_000,
   onAnswer?: (at: string) => void,
+  meter?: RpcMeter,
 ): typeof fetch {
   // Per pool and keyed by POSITION, so the cooldown table holds no URL either.
   const downUntil = new Map<number, number>();
@@ -68,8 +79,22 @@ export function poolFetch(
     return live.length > 0 ? live : all;
   };
 
+  /** A report to the meter that can only ever be lost, never thrown. */
+  const metered = (report: (meter: RpcMeter) => void): void => {
+    if (meter === undefined) return;
+    try {
+      report(meter);
+    } catch {
+      // The request goes on, counted or not.
+    }
+  };
+
   return (async (_input: unknown, init?: RequestInit): Promise<Response> => {
     const refusals: string[] = [];
+    // COUNTED ONCE, BEFORE ANY ENDPOINT IS TRIED: what the keeper ASKED for,
+    // whichever endpoint answers and whether any does. The attempts below say
+    // where it went.
+    metered((m) => m.request(init?.body));
     for (const index of usable()) {
       const at = endpointLabel(index, urls.length);
       let response: Response;
@@ -84,10 +109,12 @@ export function poolFetch(
         // NEVER THE URL, AND NOT EVEN THE MESSAGE: undici's messages can quote
         // the host and the request. The error's NAME says timeout vs refused.
         downUntil.set(index, Date.now() + COOLDOWN_MS);
+        metered((m) => m.attempt(at, "unreachable"));
         refusals.push(`${at} ${error instanceof Error ? error.name : "unknown"}`);
         onFailover?.("solana endpoint set aside", { at, detail: error instanceof Error ? error.name : "unknown" });
         continue;
       }
+      metered((m) => m.attempt(at, response.status));
       if (!response.ok) {
         downUntil.set(index, Date.now() + COOLDOWN_MS);
         refusals.push(`${at} HTTP ${response.status}`);

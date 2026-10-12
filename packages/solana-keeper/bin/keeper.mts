@@ -88,9 +88,11 @@ import {
 } from "../src/privy-signer.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
+import { CREDIT_BURN_ALERT_KEY, countConfirmations, createRpcUsage, creditBurnAlert, heliusRestFetch } from "../src/rpc-usage.js";
+import { createPrivyUsage } from "../src/privy-usage.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
 import { activeBps, measurementStart, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
-import { runSettleTick, type SettleDeps, type SettleOutcome } from "../src/settle-tick.js";
+import { runSettleTick, type SettleDeps, type SettleOutcome, type SettleSend } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
@@ -118,6 +120,7 @@ import {
   SWEEP_SKIPPED_CRITICAL_STREAK,
   SWEEP_SLOW_ALERT_KEY,
   createSweepTimes,
+  createTurnTimers,
   jupiterCalls,
   settleWalked,
   sweepSkippedAlert,
@@ -238,6 +241,23 @@ const noteProgress = (): void => {
  */
 let failovers = 0;
 let rpcEndpointInUse: string | null = null;
+/**
+ * WHAT THIS KEEPER ASKS OF ITS PROVIDERS, AND WHAT IT COSTS (ADR L1a). The RPC
+ * meter is told every request the pool is handed and how each endpoint
+ * answered (src/rpc-usage.ts); the Privy meter every request a Privy client of
+ * this process makes and every settle signature by mode (src/privy-usage.ts);
+ * the turn timers what a settle and a send take. All three are read only by
+ * /status and by credit-burn, which is off until SIP_SOLANA_CREDIT_BUDGET_DAY is
+ * set. NONE OF THEM IS ASKED ANYTHING BEFORE A DECISION: they are told after.
+ */
+const rpcUsage = createRpcUsage({
+  archivalCredits: config.archivalCredits,
+  archivalCreditsSource: config.archivalCreditsSource,
+  budgetPerDay: config.creditBudgetPerDay,
+  startedAt: Date.now(),
+});
+const privyUsage = createPrivyUsage({ startedAt: Date.now() });
+const turnTimers = createTurnTimers();
 const rpcFetch = poolFetch(
   config.rpcUrls,
   (message, fields) => {
@@ -248,6 +268,7 @@ const rpcFetch = poolFetch(
   (at) => {
     rpcEndpointInUse = at;
   },
+  rpcUsage,
 );
 /**
  * The same transport, plus the one thing /health needs: AN ANSWER FROM THE CHAIN
@@ -265,6 +286,31 @@ const connection = new Connection(config.rpcUrls[0]!.reveal(), {
   commitment: "confirmed",
   fetch: trackedFetch,
 });
+// THE ONE CALL THE POOL CANNOT SEE: Anchor's sendAndConfirm, behind every invest
+// send, confirms on a websocket web3.js opens beside the transport. Counted and
+// timed around the call, which runs and answers exactly as it did
+// (countConfirmations, src/rpc-usage.ts).
+countConfirmations(connection, {
+  started: () => rpcUsage.webSocketConfirmation(),
+  ended: (ms) => turnTimers.record("investConfirmMs", ms),
+});
+
+/**
+ * What one live settle send took and how it ended (SettleDeps.onSend): its two
+ * waits go to the turn timers, and a send through Privy is one signature on the
+ * free tier, counted by the mode it charged.
+ */
+function noteSettleSend(send: SettleSend): void {
+  turnTimers.record("settleSubmitMs", send.submitMs);
+  if (send.confirmMs !== null) turnTimers.record("settleConfirmMs", send.confirmMs);
+  if (send.route === "privy") privyUsage.signature(send.mode, send.ended !== "threw");
+}
+
+/** The four usage blocks of /status, read at the moment of the request: each is a sliding window. */
+function usageStatus(): Pick<KeeperStatus, "rpc" | "privy" | "jupiter" | "turnTimes"> {
+  const now = Date.now();
+  return { rpc: rpcUsage.report(now), privy: privyUsage.report(now), jupiter: jupiterCalls.report(now), turnTimes: turnTimers.report() };
+}
 
 /** Armed only. The attester and the crank are this one key during the hackathon. */
 const settleKeypair: Keypair | null = config.signing?.settleKey.keypair() ?? null;
@@ -483,6 +529,10 @@ const webhookSync = createDoorbellWebhookSync({
   url: config.doorbellUrl,
   doorbell,
   log: (level, message, fields) => log[level](message, fields),
+  // ITS REQUESTS ARE ON THE SAME HELIUS BILL: an edit is 100 credits. Counted by
+  // verb and then made unchanged (heliusRestFetch); the URL, which carries the
+  // key, is never read.
+  fetch: heliusRestFetch(rpcUsage),
 });
 /** The /status block, folded in at render like pendingCarries: the receiver can change it between sweeps. */
 const doorbellStatus = (): DoorbellStatus => ({
@@ -491,7 +541,15 @@ const doorbellStatus = (): DoorbellStatus => ({
   apiKeySource: config.heliusApiKeySource,
 });
 
-const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
+/**
+ * The Privy signing config, with a fetch that COUNTS each request by kind and
+ * then makes it unchanged (privyUsage.fetch, src/privy-usage.ts). It goes in
+ * through the fetch every Privy client already takes (pinnedPrivyClient), so
+ * the client, its host, its log level and its one attempt are exactly as
+ * before. Null in a dry run, as it always was: nothing is read, nothing counted.
+ */
+const privyConfig: PrivySolanaConfig | null =
+  config.signing?.privy === null || config.signing?.privy === undefined ? null : { ...config.signing.privy, fetch: privyUsage.fetch() };
 
 // SAYING WHAT IS NOT BEING CHECKED, once per process rather than once per sweep.
 // Which of the three states the two public ids amount to, and what each costs,
@@ -884,7 +942,7 @@ if (config.port !== null) {
   const port = config.port;
   const server = createHeartbeatServer(
     httpHandler(
-      () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }, sharedRedactor),
+      () => renderStatus({ ...health, ...usageStatus(), pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }, sharedRedactor),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
       () => leaderboard,
       hooks,
@@ -1065,6 +1123,19 @@ function noteSweepCost(
   const slow = sweepSlowAlert({ p90Ms: health.sweepMsP90, sweepMs: config.sweepMs, samples: sweepTimes.length });
   if (slow === null) alerter.clear(SWEEP_SLOW_ALERT_KEY);
   else alerter.fire(slow);
+  // WHAT THE SWEEP ASKED OF ITS PROVIDERS, frozen as the "last sweep" figures;
+  // the doorbell's delivered transactions are billed too, one credit each.
+  // LAST IN THIS FUNCTION, so nothing added here can keep the skip run above
+  // from ending or the sweep-slow warning from being asked.
+  rpcUsage.webhookEventsSeen(doorbell.deliveryCounts().accepted);
+  rpcUsage.endSweep();
+  privyUsage.endSweep();
+  // AND WHETHER THIS SERVICE IS BURNING THROUGH ITS SHARE OF THE CREDITS. Off
+  // until SIP_SOLANA_CREDIT_BUDGET_DAY is set: with no budget creditBurnAlert
+  // neither fires nor clears.
+  const burn = creditBurnAlert(rpcUsage.report(Date.now()));
+  if (burn.fire !== null) alerter.fire(burn.fire);
+  else if (burn.clear) alerter.clear(CREDIT_BURN_ALERT_KEY);
 }
 
 async function sweep(): Promise<void> {
@@ -1101,6 +1172,9 @@ async function sweep(): Promise<void> {
   // ZEROED AT THE TOP, READ IN THE `finally`: one sweep runs at a time, so the
   // count between those two points is this sweep's.
   jupiterCalls.startSweep();
+  // AND THE RPC AND PRIVY METERS' PER-SWEEP COUNTS, on the same terms.
+  rpcUsage.startSweep();
+  privyUsage.startSweep();
   // The walk cache counts since boot; the `finally` reports this sweep's difference.
   const walkAtStart = walkCache.counters;
   // WHERE THIS SWEEP'S MILLISECONDS WENT. Declared out here so the `finally`
@@ -1111,6 +1185,7 @@ async function sweep(): Promise<void> {
   let vaultReadMs = 0;
   let triageMs = 0;
   let expensiveMs = 0;
+  let privyIndexMs = 0;
   let linksTriaged = 0;
   // /health's clock. A sweep that throws below still counts as a sweep that
   // happened, so an endpoint outage is reported by sweep-failed and /status,
@@ -1291,10 +1366,19 @@ async function sweep(): Promise<void> {
     // wallet falls back to its own lookup, and a local keypair still works.
     let privyIndex: ReadonlyMap<string, PrivyWalletEntry> | undefined;
     if (privyConfig !== null && turns.length > 0) {
+      // TIMED ON BOTH PATHS, like the vault read: a listing that failed after
+      // paging for a minute is the expensive case, not the free one.
+      const privyIndexAt = Date.now();
+      let indexBuilt = false;
       try {
         privyIndex = await buildPrivySolanaIndex(privyConfig);
+        indexBuilt = true;
       } catch (error) {
         log.warn("privy wallet index failed; falling back to per-wallet lookups", { detail: summarizeUpstreamError(error) });
+      } finally {
+        privyIndexMs = Date.now() - privyIndexAt;
+        privyUsage.indexBuilt(privyIndexMs, indexBuilt);
+        turnTimers.record("privyIndexMs", privyIndexMs);
       }
     }
 
@@ -1399,6 +1483,9 @@ async function sweep(): Promise<void> {
           walletSigner = localSigners?.signers.get(wallet) ?? null;
           route = walletSigner !== null ? "local-keypair" : "none";
           if (privyConfig !== null) {
+            // WITHOUT THE SWEEP'S INDEX, THIS RESOLUTION LISTS EVERY WALLET IN
+            // THE APP FOR ONE WALLET: counted, because N of them is the cliff.
+            if (privyIndex === undefined) privyUsage.fallbackLookup();
             try {
               const resolution = await createPrivySolanaSigner(
                 privyConfig,
@@ -1522,6 +1609,7 @@ async function sweep(): Promise<void> {
               unreachable(base);
           }
         }
+        const settleAt = Date.now();
         const settle = await runSettleTick({
           connection,
           program,
@@ -1536,8 +1624,16 @@ async function sweep(): Promise<void> {
           settles: profile.settles,
           ...volumeTurn,
           walkCache,
+          // TOLD AFTER EACH SEND, never asked before one (SettleDeps.onSend).
+          onSend: noteSettleSend,
         });
         settleOutcome = settle.outcome;
+        // A HOT SETTLE'S WALL TIME, the number the dispatcher is sized on and
+        // nobody had measured. Only a LIVE turn that SETTLED: a resting turn's
+        // time is the sweep's triage lane, already on /status, and a dry run's
+        // "would settle" is also SETTLED but sends nothing and waits for no
+        // confirmation, so its time would understate the very number wanted.
+        if (settleTurn.live && settle.outcome === "SETTLED") turnTimers.record("settleSettledMs", Date.now() - settleAt);
         // EVERY TRANSACTION THIS KEEPER SENDS MUST COME BACK THROUGH THE
         // WEBHOOK: it touches the wallet and the vault, both watched. One that
         // does not come back makes the doorbell deaf (src/doorbell.ts).
@@ -1677,6 +1773,7 @@ async function sweep(): Promise<void> {
         // to go.
         phase = "invest";
         const investTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner: null });
+        const investAt = Date.now();
         const invest = await runInvestTick({
           connection,
           program,
@@ -1692,6 +1789,8 @@ async function sweep(): Promise<void> {
           live: investTurn.live,
           protocolPaused,
         });
+        // The same rule for a basket: a live turn that INVESTED, sends and all.
+        if (investTurn.live && invest.outcome === "INVESTED") turnTimers.record("investInvestedMs", Date.now() - investAt);
         // INVESTED/FAILED/REFUSED always log; NO_POLICY, IDLE and PAUSED log on change.
         if (invest.outcome === "INVESTED" || invest.outcome === "FAILED" || invest.outcome === "REFUSED") {
           log[invest.outcome === "INVESTED" ? "info" : "warn"](`invest ${invest.outcome.toLowerCase()}`, { vault: vaultAddr, detail: invest.detail });
@@ -1969,7 +2068,7 @@ async function sweep(): Promise<void> {
     try {
       noteSweepCost(
         Date.now() - cycleBeganAt,
-        { chainReadMs, discoveryMs, vaultReadMs, triageMs, expensiveMs },
+        { chainReadMs, discoveryMs, vaultReadMs, triageMs, expensiveMs, privyIndexMs },
         linksTriaged,
         walkAtStart,
       );

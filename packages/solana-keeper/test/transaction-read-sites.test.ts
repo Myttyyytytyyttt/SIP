@@ -13,7 +13,10 @@
 //
 // THE WAYS OUT, listed before the matching: a web3.js Connection method that
 // fetches a transaction, and a raw JSON-RPC body naming the method. The bench's
-// chain stub names it too, because it SERVES it; that is the one exception.
+// chain stub names it too, because it SERVES it; and the RPC meter
+// (src/rpc-usage.ts) names it in its list of archival methods, because it
+// PRICES it. Those are the two exceptions, and the meter's is held to that one
+// list.
 
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -54,8 +57,17 @@ describe("where the keeper reads a transaction", () => {
     expect(found[0]!.index).toBeLessThan(end);
   });
 
-  it("names the raw RPC method only in the bench's chain stub, which serves it", () => {
-    expect(sitesOf(RAW_METHOD).map((site) => site.path)).toEqual(["src/bench/chain-stub.ts"]);
+  it("names the raw RPC method only in the bench's chain stub, which serves it, and in the meter's price list, which sends nothing", () => {
+    const sites = sitesOf(RAW_METHOD);
+    expect([...new Set(sites.map((site) => site.path))]).toEqual(["src/bench/chain-stub.ts", "src/rpc-usage.ts"]);
+    const meter = sources.find((candidate) => candidate.path === "src/rpc-usage.ts")!.text;
+    const list = meter.indexOf("export const ARCHIVAL_METHODS");
+    const end = meter.indexOf("]);", list);
+    expect(list).toBeGreaterThan(-1);
+    for (const site of sites.filter((candidate) => candidate.path === "src/rpc-usage.ts")) {
+      expect(site.index).toBeGreaterThan(list);
+      expect(site.index).toBeLessThan(end);
+    }
   });
 
   it("the backfill reads through readTransaction", () => {

@@ -23,8 +23,9 @@
 
 import type { Alert } from "./alerts.js";
 import type { WalkCounters } from "./measure-window.js";
+import { DAY_BUCKET_MS, DAY_MS, MINUTE_BUCKET_MS, MINUTE_MS, createRollingCounts, createRollingPeak } from "./rolling-counts.js";
 import type { SettleOutcome } from "./settle-decision.js";
-import type { SweepWalk } from "./status.js";
+import type { DurationStats, JupiterUsageStatus, SweepWalk, TurnTimes } from "./status.js";
 
 /**
  * How many sweeps' durations are kept for the percentiles: thirty.
@@ -82,6 +83,95 @@ export function createSweepTimes(capacity: number = SWEEP_TIMES_KEPT): SweepTime
     },
     p50: () => percentileMs(kept, 0.5),
     p90: () => percentileMs(kept, 0.9),
+  };
+}
+
+/**
+ * How many samples each turn timer keeps: fifty.
+ *
+ * MORE THAN THE SWEEP RING, because these are EVENTS, not sweeps: a settle that
+ * lands or a basket that is bought happens a few times a day on today's fleet
+ * (RECHECK D3), so thirty would be a month of them; fifty is enough that p90 is
+ * not one unlucky send, and still bounded for a process that runs for weeks.
+ */
+export const TURN_TIMES_KEPT = 50;
+
+/** A bounded ring of durations, read as DurationStats. */
+export interface DurationRing {
+  add(ms: number): void;
+  stats(): DurationStats;
+}
+
+export function createDurationRing(capacity: number = TURN_TIMES_KEPT): DurationRing {
+  const kept: number[] = [];
+  let samples = 0;
+  let last: number | null = null;
+  return {
+    add(ms) {
+      // The sweep ring's rule: a negative or non-finite duration did not happen.
+      if (!Number.isFinite(ms) || ms < 0) return;
+      kept.push(ms);
+      while (kept.length > capacity) kept.shift();
+      samples += 1;
+      last = ms;
+    },
+    stats() {
+      return {
+        samples,
+        lastMs: last,
+        p50Ms: percentileMs(kept, 0.5),
+        p90Ms: percentileMs(kept, 0.9),
+        maxMs: kept.length === 0 ? null : Math.max(...kept),
+      };
+    },
+  };
+}
+
+/** The phases TurnTimes (status.ts) times, each in its own ring. */
+export type TurnPhase = keyof TurnTimes;
+
+/**
+ * The phase timers the ADR asks L1a for (§6.2, §8 question 5): what a settle and
+ * a send actually take, where the money moves.
+ *
+ * WHY NOW. The window walls, the queue's trigger and its 302 s worst-case job
+ * all scale with "settle wall time ≈ 1.5 s" and "send time ≈ 2 s", and both are
+ * ASSUMED: nobody has ever measured either (ADR §3.7, [QUEUE] §5). The sweep's
+ * own phases (lastSweepPhaseMs) split a sweep by lane; these split a TURN, so
+ * the numbers the dispatcher would be sized on are read from production
+ * instead of from a laptop.
+ *
+ * Recorded by bin/keeper.mts around the calls it already makes, and by the
+ * settle's own report of its send (settle-tick.ts, onSend). Nothing reads them
+ * but /status.
+ */
+export interface TurnTimers {
+  record(phase: TurnPhase, ms: number): void;
+  report(): TurnTimes;
+}
+
+const TURN_PHASES: readonly TurnPhase[] = [
+  "settleSettledMs",
+  "settleSubmitMs",
+  "settleConfirmMs",
+  "investInvestedMs",
+  "investConfirmMs",
+  "privyIndexMs",
+];
+
+export function createTurnTimers(capacity: number = TURN_TIMES_KEPT): TurnTimers {
+  const rings = new Map<TurnPhase, DurationRing>(TURN_PHASES.map((phase) => [phase, createDurationRing(capacity)]));
+  return {
+    record(phase, ms) {
+      try {
+        rings.get(phase)?.add(ms);
+      } catch {
+        // A lost sample is a gap on /status, never a turn that stopped.
+      }
+    },
+    report() {
+      return Object.fromEntries(TURN_PHASES.map((phase) => [phase, rings.get(phase)!.stats()])) as unknown as TurnTimes;
+    },
   };
 }
 
@@ -234,6 +324,15 @@ export const JUPITER_KEYLESS_CALLS_PER_MINUTE = 30;
  * money path changed to carry a number that must never affect them. One sweep
  * runs at a time (bin/keeper.mts's `cycleRunning`), so the per-sweep total is
  * unambiguous.
+ *
+ * AND PER MINUTE, WHICH IS HOW THE LIMIT IS WRITTEN. A sweep total says what a
+ * sweep spent; Jupiter refuses by the minute, and two buying turns in one
+ * minute can spend more than either sweep shows. `report` serves the last
+ * minute, the busiest minute of the last day — a burst is over before anyone
+ * reads /status, so the current minute alone reads 0 every time — and both
+ * against the keyless 30. COUNTED, NEVER CONSULTED: the pacer that would defer
+ * a turn on this number is P8 (ADR §3.9), which ships with `jupiter-key`, not
+ * here.
  */
 export interface JupiterCallCounter {
   /** Zero the per-sweep total. Called at the top of a sweep, by the sweep. */
@@ -244,11 +343,18 @@ export interface JupiterCallCounter {
   sweepTotal(): number;
   /** What this process has spent since it came up. */
   total(): number;
+  /** The per-minute view, for /status. */
+  report(now: number): JupiterUsageStatus;
 }
 
-export function createJupiterCallCounter(): JupiterCallCounter {
+export function createJupiterCallCounter(options: { readonly startedAt?: number; readonly now?: () => number } = {}): JupiterCallCounter {
+  const now = options.now ?? (() => Date.now());
+  const startedAt = options.startedAt ?? now();
   let sweep = 0;
   let all = 0;
+  const minute = createRollingCounts({ windowMs: MINUTE_MS, bucketMs: MINUTE_BUCKET_MS, startedAt });
+  const day = createRollingCounts({ windowMs: DAY_MS, bucketMs: DAY_BUCKET_MS, startedAt });
+  const busiest = createRollingPeak({ windowMs: DAY_MS, bucketMs: DAY_BUCKET_MS });
   return {
     startSweep() {
       sweep = 0;
@@ -257,9 +363,32 @@ export function createJupiterCallCounter(): JupiterCallCounter {
       if (!Number.isFinite(calls) || calls <= 0) return;
       sweep += calls;
       all += calls;
+      try {
+        const at = now();
+        minute.add("calls", calls, at);
+        day.add("calls", calls, at);
+        // THE MINUTE ENDING NOW, noted at the moment it is fullest: a count only
+        // ever raises it, so the peak is read where it happens.
+        busiest.note(minute.total(at), at);
+      } catch {
+        // The per-sweep and lifetime counts above are already kept.
+      }
     },
     sweepTotal: () => sweep,
     total: () => all,
+    report(at) {
+      const lastMinute = minute.total(at);
+      const peak = busiest.peak(at);
+      return {
+        callsLastMinute: lastMinute,
+        peakPerMinuteLastDay: peak,
+        budgetPerMinute: JUPITER_KEYLESS_CALLS_PER_MINUTE,
+        peakPctOfBudget: Math.round((peak / JUPITER_KEYLESS_CALLS_PER_MINUTE) * 1_000) / 10,
+        callsPerDay: day.total(at),
+        observedMs: day.observedMs(at),
+        callsSinceBoot: all,
+      };
+    },
   };
 }
 

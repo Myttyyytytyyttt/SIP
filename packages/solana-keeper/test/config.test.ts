@@ -599,3 +599,43 @@ describe("the doorbell's settings", () => {
     for (const name of SIGNING_SECRET_VARS) expect(reads.has(name)).toBe(false);
   });
 });
+
+// WHAT THE RPC CALLS COST (src/rpc-usage.ts): the archival price and the daily
+// credit budget. Neither moves money; both are strict, because a value read as
+// "unset" would put a number off by ten on /status, or leave an alert the owner
+// believes is standing switched off (readCreditSettings).
+describe("the credit settings", () => {
+  it("prices archival at 1 by default, says it was not configured, and sets no budget", () => {
+    const config = loadConfig(dry(), new Redactor());
+    expect(config.archivalCredits).toBe(1);
+    expect(config.archivalCreditsSource).toBe("default");
+    expect(config.creditBudgetPerDay).toBeNull();
+  });
+
+  it("takes exactly 1 or 10 for the archival price, and a whole number of credits for the budget", () => {
+    const config = loadConfig(dry({ SIP_SOLANA_ARCHIVAL_CREDITS: " 10 ", SIP_SOLANA_CREDIT_BUDGET_DAY: "160000" }), new Redactor());
+    expect(config.archivalCredits).toBe(10);
+    expect(config.archivalCreditsSource).toBe("env");
+    expect(config.creditBudgetPerDay).toBe(160_000);
+    expect(loadConfig(dry({ SIP_SOLANA_ARCHIVAL_CREDITS: "1" }), new Redactor()).archivalCreditsSource).toBe("env");
+    // Named, so an operator who set them is not told they are read by nobody.
+    expect(config.warnings).toEqual([]);
+    expect(JSON.parse(JSON.stringify(config))).toMatchObject({ archivalCredits: 10, archivalCreditsSource: "env", creditBudgetPerDay: 160_000 });
+  });
+
+  it("refuses to start on any other archival price, naming the variable and never echoing the value", () => {
+    for (const bad of ["100", "0", "1.0", "ten", "-1", "1,10"]) {
+      const error = refusal(dry({ SIP_SOLANA_ARCHIVAL_CREDITS: bad }));
+      expect(error.message, bad).toContain("SIP_SOLANA_ARCHIVAL_CREDITS must be exactly 1 or 10");
+    }
+    expect(refusal(dry({ SIP_SOLANA_ARCHIVAL_CREDITS: "TenCreditsSecretLooking" })).message).not.toContain("TenCreditsSecretLooking");
+  });
+
+  it("refuses a budget that is not a positive whole number, zero included: unsetting is how it is switched off", () => {
+    for (const bad of ["0", "2M", "-5", "1.5", "160 000", "1e6"]) {
+      const error = refusal(dry({ SIP_SOLANA_CREDIT_BUDGET_DAY: bad }));
+      expect(error.message, bad).toContain("SIP_SOLANA_CREDIT_BUDGET_DAY");
+      expect(error.message, bad).toContain("Unset it to switch the credit-burn alert off");
+    }
+  });
+});

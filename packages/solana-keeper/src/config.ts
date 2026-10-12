@@ -44,6 +44,7 @@ import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
 import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, type KeeperRole } from "./role-registry.js";
+import { DEFAULT_ARCHIVAL_CREDITS, type ArchivalCredits } from "./rpc-usage.js";
 
 /**
  * The literal acknowledgement that arms the keeper. Nothing else does.
@@ -89,8 +90,70 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   // WHICH KEEPER THIS SERVICE IS (readRole): unset for the profit keeper, "volume"
   // for the volume keeper, a separate Railway service with its own lock.
   "SIP_SOLANA_ROLE",
+  // WHAT THIS KEEPER'S RPC CALLS COST (src/rpc-usage.ts, readCreditSettings):
+  // the price of an archival call, and the daily credit budget whose 80 % and
+  // 100 % raise credit-burn. Neither changes what the keeper does; unset, the
+  // estimate prices archival at 1 and no alert can fire.
+  "SIP_SOLANA_ARCHIVAL_CREDITS",
+  "SIP_SOLANA_CREDIT_BUDGET_DAY",
   ...SIGNING_SECRET_VARS,
 ]);
+
+/**
+ * SIP_SOLANA_ARCHIVAL_CREDITS and SIP_SOLANA_CREDIT_BUDGET_DAY, read strictly
+ * (ADR §6.1 rule 3: a new variable is parsed strictly and an unknown value
+ * refuses to start, as readRole does).
+ *
+ * STRICT, ALTHOUGH NEITHER CAN MOVE MONEY. The doorbell's settings warn and
+ * switch themselves off instead (readDoorbell), because refusing over an
+ * optimisation would take the money path down to protect it. These are the
+ * other case: a refused deploy fails its healthcheck and Railway keeps the one
+ * before it running, so nothing stops — while a price of "100" read as
+ * "unset" would put a number on /status that is off by ten without a word,
+ * and a budget of "2M" read as nothing would leave the owner believing an
+ * alert stands guard. Only the exact forms are taken:
+ *   * the archival price is "1" or "10" — the two readings of Helius's pages
+ *     (src/rpc-usage.ts, ArchivalCredits); unset is DEFAULT_ARCHIVAL_CREDITS;
+ *   * the budget is a positive whole number of credits a day, digits only;
+ *     unset is no budget. Zero is refused rather than read as "off": unsetting
+ *     is how it is switched off, and a zero budget would page on the first hour.
+ */
+export function readCreditSettings(env: NodeJS.ProcessEnv): {
+  readonly archivalCredits: ArchivalCredits;
+  readonly archivalCreditsSource: "default" | "env";
+  readonly creditBudgetPerDay: number | null;
+  readonly problems: readonly string[];
+} {
+  const problems: string[] = [];
+  let archivalCredits: ArchivalCredits = DEFAULT_ARCHIVAL_CREDITS;
+  let archivalCreditsSource: "default" | "env" = "default";
+  const archivalRaw = trimmed(env["SIP_SOLANA_ARCHIVAL_CREDITS"]);
+  if (archivalRaw !== undefined) {
+    if (archivalRaw === "1" || archivalRaw === "10") {
+      archivalCredits = archivalRaw === "1" ? 1 : 10;
+      archivalCreditsSource = "env";
+    } else {
+      problems.push(
+        `SIP_SOLANA_ARCHIVAL_CREDITS must be exactly 1 or 10 (what one archival call costs on Helius); it holds ${shape(archivalRaw)}. ` +
+          "Unset, the estimate prices it at 1.",
+      );
+    }
+  }
+  let creditBudgetPerDay: number | null = null;
+  const budgetRaw = trimmed(env["SIP_SOLANA_CREDIT_BUDGET_DAY"]);
+  if (budgetRaw !== undefined) {
+    const parsed = /^[0-9]+$/.test(budgetRaw) ? Number(budgetRaw) : Number.NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      problems.push(
+        `SIP_SOLANA_CREDIT_BUDGET_DAY must be a whole number of Helius credits a day, at least 1; it holds ${shape(budgetRaw)}. ` +
+          "Unset it to switch the credit-burn alert off.",
+      );
+    } else {
+      creditBudgetPerDay = parsed;
+    }
+  }
+  return { archivalCredits, archivalCreditsSource, creditBudgetPerDay, problems };
+}
 
 /**
  * SIP_SOLANA_ROLE, read strictly: unset, empty or "profit" is the profit keeper
@@ -263,6 +326,11 @@ export interface KeeperConfig {
    * is this service's own domain.
    */
   readonly doorbellUrl: string | null;
+  /** What one archival call is priced at on /status (readCreditSettings), and whether that was configured. */
+  readonly archivalCredits: ArchivalCredits;
+  readonly archivalCreditsSource: "default" | "env";
+  /** This service's daily share of the Helius credits, or null: no credit-burn alert. */
+  readonly creditBudgetPerDay: number | null;
   /** Null in dry run: nothing in this object can sign anything. */
   readonly signing: SigningConfig | null;
   /** Already scrubbed. */
@@ -563,6 +631,9 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     doorbell: config.doorbellSecret !== null,
     heliusApiKeySource: config.heliusApiKeySource,
     doorbellUrl: config.doorbellUrl,
+    archivalCredits: config.archivalCredits,
+    archivalCreditsSource: config.archivalCreditsSource,
+    creditBudgetPerDay: config.creditBudgetPerDay,
     signing:
       config.signing === null
         ? null
@@ -699,6 +770,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     }
   }
   const pools = parsePools(env["SIP_SOLANA_POOLS"], problems);
+  const credits = readCreditSettings(env);
+  problems.push(...credits.problems);
 
   // --- operational credentials: readable in dry run, never logged or served ----
   let alertWebhook: Secret | null = null;
@@ -864,6 +937,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     privySignerId,
     privyPolicyId,
     ...doorbell,
+    archivalCredits: credits.archivalCredits,
+    archivalCreditsSource: credits.archivalCreditsSource,
+    creditBudgetPerDay: credits.creditBudgetPerDay,
     signing,
     warnings: Object.freeze(warnings.map(scrub)),
   };
