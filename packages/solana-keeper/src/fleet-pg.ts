@@ -1,18 +1,17 @@
 // The receiver's and the fleet page's statements against Postgres (Q4, Q5),
-// over the dispatcher's tables as ADR §3.4 and [QUEUE] §2.3 design them:
-// keeper_link, vault_work, send_intent, worker and fleet, plus the loss_carry
-// table L2 already ships.
+// over the dispatcher's tables: keeper_link, vault_work, send_intent, worker and
+// fleet, plus the loss_carry table L2 already ships.
 //
-// THE TABLES ARE NOT THIS FILE'S. The queue's store track (Q1) adds them to
-// sql/sip_solana.sql, additive and idempotent like the rest of that file, with
-// the four lease statements. This file only rings bells, asks for and takes a
-// full pass, and reads the fleet; the columns it names are FLEET_COLUMNS, and
-// missingFleetColumns lists which of them a database lacks — for the
-// scheduler's boot check (Q2) to refuse by name, rather than lose its first
-// bell to a refused write. test/fleet-pg.test.ts runs every statement here on
-// Postgres 16, over the schema file first and the ADR's DDL only for the tables
-// the file does not have yet — so once Q1 merges, the same test runs against
-// Q1's tables.
+// THE TABLES ARE NOT THIS FILE'S. The store track (Q1) owns them, in
+// sql/sip_solana.sql with the four lease statements (src/dispatch-store.ts),
+// additive and idempotent like the rest of that file. This file only rings
+// bells, asks for and takes a full pass, and reads the fleet; the columns it
+// names are FLEET_COLUMNS, and missingFleetColumns lists which of them a
+// database lacks — for the scheduler's boot check (Q2) to refuse by name,
+// rather than lose its first bell to a refused write. test/fleet-pg.test.ts runs
+// every statement here on Postgres 16 over the schema file alone, Q1's CHECKs
+// included: a drift between the two is a failing test, not a refused write in
+// production.
 //
 // EVERY TIME IS clock_timestamp(), read once per statement (the `t` CTE): the
 // database's wall clock, the one the lease statements compare against (ADR
@@ -20,9 +19,10 @@
 // clock, which is wrong on some replica eventually.
 //
 // NO CLIENT IS HELD ACROSS AN AWAIT. Each statement is one round trip on the
-// pool, its row locks gone at its own commit: the receiver runs on the
-// scheduler's two connections, and a client held between statements is one the
-// tick cannot use.
+// pool, its row locks gone at its own commit: the receiver, the page and the
+// tick share the scheduler's ONE pooled connection (SCHEDULER_POOL_MAX in
+// src/dispatch-store.ts, from ADR §3.11's 3 + 2r), and a client held between
+// statements is one the other two cannot use.
 
 import type pg from "pg";
 import { ECHO_DEADLINE_MS } from "./doorbell.js";
@@ -71,7 +71,7 @@ export const FLEET_COLUMNS = {
     "parked_reason",
   ],
   send_intent: ["id", "kind", "state", "signature", "created_at", "resolved_at", "echoed_at"],
-  worker: ["worker_id", "kind", "version", "started_at", "heartbeat_at", "slots", "busy", "rps_quota", "jup_quota", "stopped_at", "stats"],
+  worker: ["worker_id", "kind", "version", "started_at", "heartbeat_at", "slots", "busy", "rps_quota", "jup_quota", "quota_at", "stopped_at", "stats"],
   fleet: ["id", "scheduler_id", "tick_at", "full_pass_reason", "board_dirty_at", "discovery_ok_at"],
   loss_carry: ["link_addr"],
 } as const satisfies Record<string, readonly string[]>;
@@ -166,7 +166,14 @@ RETURNING old.full_pass_reason AS reason`;
  * whose attempts say earlier claims never completed.
  *
  * send_intent is read only for the last hour and the open intents: at
- * N = 1,000 the table holds ≈ 14k rows a day for 35 days ([QUEUE] §2.3).
+ * N = 1,000 the table holds ≈ 14k rows a day for 35 days ([QUEUE] §2.3), and
+ * the schema's two indexes for exactly these (send_intent_open, partial on
+ * resolved_at IS NULL, and send_intent_created) keep the older ones unread.
+ *
+ * OPEN IS resolved_at IS NULL, NOT state = 'intent'. Under
+ * SIP_SOLANA_DISPATCH=shadow every intent is written as 'shadow' and stays so
+ * when it is resolved (Q1, plan design detail 1); only resolved_at tells an open
+ * one. Under `on` the two agree (the schema's send_intent_open_is_unresolved).
  */
 export const FLEET_SNAPSHOT_SQL = `WITH t AS (SELECT clock_timestamp() AS now)
 SELECT json_build_object(
@@ -185,7 +192,8 @@ SELECT json_build_object(
                 'startedAt', w.started_at,
                 'heartbeatAgeMs', round(extract(epoch FROM t.now - w.heartbeat_at) * 1000),
                 'stoppedAt', w.stopped_at, 'slots', w.slots, 'busy', w.busy,
-                'rpsQuota', w.rps_quota, 'jupQuota', w.jup_quota, 'stats', w.stats,
+                'rpsQuota', w.rps_quota, 'jupQuota', w.jup_quota,
+                'quotaAgeMs', round(extract(epoch FROM t.now - w.quota_at) * 1000), 'stats', w.stats,
                 'leases', coalesce(h.leases, 0))
                 ORDER BY w.kind, w.started_at, w.worker_id), '[]'::json)
                FROM (SELECT * FROM ${S}.worker x
@@ -228,11 +236,11 @@ SELECT json_build_object(
                         WHERE holder IS NOT NULL AND (lease_until IS NULL OR lease_until < t.now OR attempts >= 2)
                         ORDER BY vault_addr LIMIT 1000) e),
   'sends', (SELECT json_build_object(
-              'open', count(*) FILTER (WHERE s.state = 'intent'),
-              'oldestOpenAgeMs', round(max(extract(epoch FROM t.now - s.created_at) * 1000) FILTER (WHERE s.state = 'intent')),
+              'open', count(*) FILTER (WHERE s.resolved_at IS NULL),
+              'oldestOpenAgeMs', round(max(extract(epoch FROM t.now - s.created_at) * 1000) FILTER (WHERE s.resolved_at IS NULL)),
               'unechoed', count(*) FILTER (WHERE s.state = 'landed' AND s.echoed_at IS NULL AND s.created_at > t.now - interval '1 hour'
                                              AND s.resolved_at < t.now - make_interval(secs => $3::double precision)))
-              FROM ${S}.send_intent s WHERE s.state = 'intent' OR s.created_at > t.now - interval '1 hour'),
+              FROM ${S}.send_intent s WHERE s.resolved_at IS NULL OR s.created_at > t.now - interval '1 hour'),
   'lastHour', (SELECT coalesce(json_agg(json_build_object('kind', h.kind, 'state', h.state, 'count', h.n) ORDER BY h.kind, h.state), '[]'::json)
                  FROM (SELECT kind, state, count(*) AS n FROM ${S}.send_intent
                         WHERE created_at > t.now - interval '1 hour' GROUP BY kind, state) h),
@@ -286,6 +294,7 @@ function workerRow(value: unknown): FleetWorkerRow | null {
     leases: count(row["leases"]),
     rpsQuota: num(row["rpsQuota"]),
     jupQuota: num(row["jupQuota"]),
+    quotaAgeMs: num(row["quotaAgeMs"]),
     stats: workerStats(row["stats"]),
   };
 }
@@ -400,8 +409,9 @@ export function parseFleetSnapshot(raw: unknown): FleetSnapshot {
 
 /**
  * The fleet's Postgres side for the receiver and the page. One pool, injected:
- * the scheduler's own (Q2), so the receiver, the page and the tick share its
- * two connections ([QUEUE] §2.12) rather than opening a pool each.
+ * the scheduler's own, createDispatchPool(…, "scheduler") (src/dispatch-store.ts),
+ * so the receiver, the page and the tick share its one connection rather than
+ * opening a pool each ([QUEUE] §2.12; ADR §3.11's 3 + 2r).
  */
 export class PgFleetStore implements FleetBellStore, FleetStatusSource {
   readonly #db: FleetDb;

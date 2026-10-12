@@ -3,9 +3,10 @@
 // §3.4–3.7, decision S-3; safety §2.2; plan P3a, Q1).
 //
 // DARK. Nothing a legacy keeper runs imports this file (test/dispatch-store.test.ts
-// scans for it): only the dispatcher's own entry points will, and with
-// SIP_SOLANA_DISPATCH unset none of them runs. Its tables are additive; a legacy
-// keeper neither reads nor writes them.
+// scans for it, and test/dispatch-dark.test.ts walks every bin/ entry point's
+// imports for it and the other dispatcher modules): only the dispatcher's own
+// entry points will, and with SIP_SOLANA_DISPATCH unset none of them runs. Its
+// tables are additive; a legacy keeper neither reads nor writes them.
 //
 // THE FOUR STATEMENTS, as ADR §3.5 writes them:
 //
@@ -101,6 +102,19 @@
 // dispatchConnections() is that arithmetic. AN ASSUMED SESSION POOL OF 15 FITS
 // r ≤ 2 WITH A DEPLOY, AND NO r WHILE THE LEGACY KEEPERS SHADOW A PUSH.
 //
+// WHAT THE OTHER P3a TRACKS READ AND WRITE THROUGH IT (the merge's wiring):
+//   * the quota hand-out (src/rpc-quota.ts): the scheduler's handOutQuotas
+//     writes each live worker's share and `quota_at`, the database's time of the
+//     write; a worker's beat (beatProcess, or quotaSource for QuotaFollower)
+//     reads it back as an AGE on that one clock, so a worker whose own clock is
+//     wrong still drops to its floor two minutes after the scheduler went quiet;
+//   * worker.stats, the page's contract with the worker (src/fleet-status.ts
+//     WORKER_STATS_KEYS): beatProcess writes those keys and no other;
+//   * rpc_usage (src/credit-governor.ts): PgRpcUsageFeed is the RpcUsageFeed
+//     every collector flushes into and the governor reads.
+// The bell and the fleet page have their own statements over these tables
+// (src/fleet-pg.ts), on the scheduler's pool from createDispatchPool.
+//
 // WHERE THIS FILE FOLLOWS THE CODE OVER THE ADR'S PROSE, said once:
 //   * ADR §3.11 says "2 per replica plus 1 pinned on the lock-holding scheduler"
 //     and then "steady 3 + 2r". With two scheduler replicas at 2 each that would
@@ -115,7 +129,11 @@
 import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
 import { CARRY_LOCK_CLASS, type CarryLink } from "./carry-store.js";
+import type { RpcUsageFeed, RpcUsageRow, UsageClass, UsageProvider } from "./credit-governor.js";
+import { WORKER_DEAD_AFTER_MS, WORKER_STATS_KEYS } from "./fleet-status.js";
 import { READ_MODEL_SCHEMA, databaseAnswered, sslFor } from "./read-model.js";
+import type { RpcLane } from "./rpc-budget.js";
+import { fleetQuotas, type FleetQuotaInput, type FleetQuotas, type WorkerQuotaRow, type WorkerQuotaSource } from "./rpc-quota.js";
 import type { LossCarry } from "./settle-decision.js";
 
 /** The dispatcher's seven tables, in sql/sip_solana.sql's order (ADR §3.4). */
@@ -168,6 +186,7 @@ const VAULT_WORK = `${READ_MODEL_SCHEMA}.vault_work`;
 const SEND_INTENT = `${READ_MODEL_SCHEMA}.send_intent`;
 const LOSS_CARRY = `${READ_MODEL_SCHEMA}.loss_carry`;
 const WORKER = `${READ_MODEL_SCHEMA}.worker`;
+const RPC_USAGE = `${READ_MODEL_SCHEMA}.rpc_usage`;
 
 /** CLAIM (ADR §3.5): up to $2 free slots, for worker $1. */
 export const CLAIM_SQL = `WITH c AS (
@@ -294,9 +313,75 @@ export const CARRY_UPSERT_SQL = `INSERT INTO ${LOSS_CARRY}
 export const REGISTER_WORKER_SQL = `INSERT INTO ${WORKER} (worker_id, kind, version, started_at, heartbeat_at, slots)
 VALUES ($1, $2, $3, clock_timestamp(), clock_timestamp(), $4)
 ON CONFLICT (worker_id) DO UPDATE SET heartbeat_at = clock_timestamp(), stopped_at = NULL, slots = EXCLUDED.slots`;
-export const WORKER_BEAT_SQL = `UPDATE ${WORKER} SET heartbeat_at = clock_timestamp(), busy = $2
- WHERE worker_id = $1 RETURNING rps_quota, jup_quota`;
+/**
+ * The process's beat: its busy slots and, when given, its stats ($3, jsonb of
+ * WORKER_STATS_KEYS only; NULL keeps what is there). Answers the quotas the
+ * scheduler last wrote for it and HOW LONG AGO, by the database's clock alone:
+ * NULL until the first hand-out.
+ */
+export const WORKER_BEAT_SQL = `UPDATE ${WORKER} SET heartbeat_at = clock_timestamp(), busy = $2, stats = COALESCE($3::jsonb, stats)
+ WHERE worker_id = $1
+RETURNING rps_quota, jup_quota, round(extract(epoch FROM clock_timestamp() - quota_at) * 1000) AS quota_age_ms`;
 export const WORKER_STOPPED_SQL = `UPDATE ${WORKER} SET stopped_at = clock_timestamp(), busy = 0 WHERE worker_id = $1`;
+
+/** The workers a hand-out divides among: kind 'worker', not stopped, heard within $1 seconds. */
+export const LIVE_WORKERS_SQL = `SELECT worker_id FROM ${WORKER}
+ WHERE kind = 'worker' AND stopped_at IS NULL AND heartbeat_at > clock_timestamp() - make_interval(secs => $1::double precision)
+ ORDER BY worker_id`;
+
+/** The hand-out itself: the same share for each worker named, and quota_at = the database's now. */
+export const WRITE_QUOTAS_SQL = `UPDATE ${WORKER} SET rps_quota = $2, jup_quota = $3, quota_at = clock_timestamp()
+ WHERE kind = 'worker' AND worker_id = ANY($1::text[])
+RETURNING worker_id`;
+
+/**
+ * A flush into rpc_usage (credit-governor.ts, RpcUsageFeed.add): each row's
+ * counts ADDED onto the stored row with its key. Rows of one flush that share a
+ * key are summed first — ON CONFLICT cannot touch one row twice in a statement.
+ * Buckets travel as ms since the epoch, the collector's unit.
+ */
+export const USAGE_ADD_SQL = `INSERT INTO ${RPC_USAGE} AS u (bucket, worker_id, provider, lane, class, calls, errors_429, errors_other)
+SELECT to_timestamp(r.bucket_ms / 1000.0), r.worker_id, r.provider, r.lane, r.usage_class, sum(r.calls), sum(r.errors_429), sum(r.errors_other)
+  FROM unnest($1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::bigint[], $8::bigint[])
+       AS r(bucket_ms, worker_id, provider, lane, usage_class, calls, errors_429, errors_other)
+ GROUP BY 1, 2, 3, 4, 5
+ON CONFLICT (bucket, worker_id, provider, lane, class) DO UPDATE SET
+  calls = u.calls + EXCLUDED.calls,
+  errors_429 = u.errors_429 + EXCLUDED.errors_429,
+  errors_other = u.errors_other + EXCLUDED.errors_other`;
+
+/** Every rpc_usage row whose bucket starts in [$1, $2), both ms since the epoch. */
+export const USAGE_READ_SQL = `SELECT (extract(epoch FROM bucket) * 1000)::bigint AS bucket_ms, worker_id, provider, lane, class, calls, errors_429, errors_other
+  FROM ${RPC_USAGE}
+ WHERE bucket >= to_timestamp($1 / 1000.0) AND bucket < to_timestamp($2 / 1000.0)`;
+
+/** The 35-day retention ([QUEUE] §2.3), the scheduler's reap: rows whose bucket starts before $1 ms. */
+export const USAGE_PRUNE_SQL = `DELETE FROM ${RPC_USAGE} WHERE bucket < to_timestamp($1 / 1000.0)`;
+
+/** What a worker reports on its beat: the page's keys (WORKER_STATS_KEYS), counters since its boot. */
+export type WorkerStatsWrite = { readonly [K in (typeof WORKER_STATS_KEYS)[number]]?: number };
+
+/**
+ * The jsonb a beat writes: WORKER_STATS_KEYS only, each a whole number of zero
+ * or more. The column is free jsonb and the page is public; a key the page does
+ * not name never reaches the row, and a value that is not a count is dropped
+ * rather than served.
+ */
+export function workerStatsJson(stats: WorkerStatsWrite | undefined): string | null {
+  if (stats === undefined) return null;
+  const out: Record<string, number> = {};
+  for (const key of WORKER_STATS_KEYS) {
+    const value = stats[key];
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) out[key] = value;
+  }
+  return JSON.stringify(out);
+}
+
+/** A hand-out as the scheduler made it: the arithmetic, and the workers it was written to. */
+export interface QuotaHandOut {
+  readonly quotas: FleetQuotas;
+  readonly workers: readonly string[];
+}
 
 /** What the store needs of pg: a pool that lends clients. pg.Pool is one. */
 export interface DispatchPool {
@@ -616,13 +701,57 @@ export class DispatchStore {
     await this.#one(REGISTER_WORKER_SQL, [this.holder, kind, version, slots]);
   }
 
-  /** The process's own beat: its busy slots, and the quotas the scheduler wrote for it (null until it has). */
-  async beatProcess(busy: number): Promise<{ readonly rpsQuota: number | null; readonly jupQuota: number | null } | null> {
-    const rows = await this.#one(WORKER_BEAT_SQL, [this.holder, busy]);
+  /**
+   * The process's own beat: its busy slots and, when given, its stats. Answers
+   * its row's quotas as QuotaFollower reads them — requests a second, Jupiter
+   * calls a minute, and how long ago the scheduler wrote them by the database's
+   * clock (null before the first hand-out) — or null when the row is gone.
+   */
+  async beatProcess(busy: number, stats?: WorkerStatsWrite): Promise<WorkerQuotaRow | null> {
+    const rows = await this.#one(WORKER_BEAT_SQL, [this.holder, busy, workerStatsJson(stats)]);
     const row = rows[0];
     if (row === undefined) return null;
     const quota = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
-    return { rpsQuota: quota(row["rps_quota"]), jupQuota: quota(row["jup_quota"]) };
+    return { rpsQuota: quota(row["rps_quota"]), jupQuotaPerMinute: quota(row["jup_quota"]), ageMs: quota(row["quota_age_ms"]) };
+  }
+
+  /**
+   * The beat as QuotaFollower's source (src/rpc-quota.ts): every read IS the
+   * 10 s beat, so following the quota costs no statement of its own. `beat`
+   * says what this beat reports.
+   */
+  quotaSource(beat: () => { readonly busy: number; readonly stats?: WorkerStatsWrite }): WorkerQuotaSource {
+    return {
+      readQuota: () => {
+        const now = beat();
+        return this.beatProcess(now.busy, now.stats);
+      },
+    };
+  }
+
+  /**
+   * THE SCHEDULER'S HAND-OUT (ADR §3.8 step 7, §3.9): fleetQuotas over the
+   * workers alive now, written to each of them with quota_at. Two statements, on
+   * purpose not one transaction: a worker that registers between them is not
+   * written and stays on its floor until the next tick, which is the same place a
+   * worker stands before its first beat has read anything.
+   *
+   * MORE ALIVE THAN maxWorkers (a deploy's boot window, where old and new workers
+   * overlap, or a killed worker whose row is still inside WORKER_DEAD_AFTER_MS)
+   * is divided among all of them: the shares never add up to more than the
+   * fleet's budget, where fleetQuotas alone would refuse the count. The
+   * answer's floorRps is then the floor over that larger count; each worker's
+   * own floor is its configuration, never written here.
+   */
+  async handOutQuotas(input: Omit<FleetQuotaInput, "liveWorkers">): Promise<QuotaHandOut> {
+    if (!Number.isSafeInteger(input.maxWorkers) || input.maxWorkers < 1) {
+      throw new Error(`maxWorkers must be a whole number of workers, at least 1, not ${input.maxWorkers}`);
+    }
+    const live = (await this.#one(LIVE_WORKERS_SQL, [WORKER_DEAD_AFTER_MS / 1000])).map((row) => String(row["worker_id"]));
+    const quotas = fleetQuotas({ ...input, liveWorkers: live.length, maxWorkers: Math.max(input.maxWorkers, live.length) });
+    if (live.length === 0 || quotas.perWorkerRps === null) return { quotas, workers: [] };
+    const written = await this.#one(WRITE_QUOTAS_SQL, [live, quotas.perWorkerRps, quotas.perWorkerJupiterPerMinute]);
+    return { quotas, workers: written.map((row) => String(row["worker_id"])) };
   }
 
   /** The process's row closed, on its way out. */
@@ -741,4 +870,88 @@ export function createDispatchPool(
   // 'error' on the pool, and unhandled that takes the process down.
   pool.on("error", (error) => warn("dispatch pool idle client error (ignored)", { detail: summarizeUpstreamError(error) }));
   return pool;
+}
+
+const USAGE_PROVIDERS: ReadonlySet<string> = new Set<UsageProvider>(["helius-rpc", "helius-rest", "jupiter", "privy", "other"]);
+const USAGE_LANES: ReadonlySet<string> = new Set<RpcLane>(["send", "hot", "rest", "sched"]);
+
+/**
+ * rpc_usage in Postgres: the RpcUsageFeed (src/credit-governor.ts) every
+ * process's RpcUsageCollector flushes into on its heartbeat, and the scheduler's
+ * CreditGovernor reads. The same contract as InMemoryRpcUsageFeed, which the
+ * merge's test holds it to row for row.
+ *
+ * ONE STATEMENT A FLUSH, on the process's own dispatch pool, and never on a
+ * request's path: only the heartbeat flushes (the collector's header). A flush
+ * that fails throws, and the collector keeps its rows for the next beat.
+ *
+ * A ROW READ BACK WITH A PROVIDER OR LANE THE CODE DOES NOT NAME is skipped, not
+ * guessed at: the governor sums only the two Helius providers, and a row it
+ * cannot place must not be priced.
+ */
+export class PgRpcUsageFeed implements RpcUsageFeed {
+  constructor(private readonly pool: DispatchPool) {}
+
+  async add(rows: readonly RpcUsageRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    await this.#query(USAGE_ADD_SQL, [
+      rows.map((row) => row.bucket.toString()),
+      rows.map((row) => row.workerId),
+      rows.map((row) => row.provider),
+      rows.map((row) => row.lane),
+      rows.map((row) => row.usageClass),
+      rows.map((row) => row.calls.toString()),
+      rows.map((row) => row.errors429.toString()),
+      rows.map((row) => row.errorsOther.toString()),
+    ]);
+  }
+
+  async read(fromMs: number, toMs: number): Promise<readonly RpcUsageRow[]> {
+    const rows = await this.#query(USAGE_READ_SQL, [fromMs, toMs]);
+    return rows.flatMap((row) => {
+      const provider = String(row["provider"]);
+      const lane = String(row["lane"]);
+      if (!USAGE_PROVIDERS.has(provider) || !USAGE_LANES.has(lane)) return [];
+      return [
+        {
+          bucket: Number(row["bucket_ms"]),
+          workerId: String(row["worker_id"]),
+          provider: provider as UsageProvider,
+          lane: lane as RpcLane,
+          usageClass: String(row["class"]) as UsageClass,
+          calls: Number(row["calls"]),
+          errors429: Number(row["errors_429"]),
+          errorsOther: Number(row["errors_other"]),
+        },
+      ];
+    });
+  }
+
+  /** The 35-day retention, for the scheduler's reap: how many rows went. */
+  async prune(beforeMs: number): Promise<number> {
+    const client = await this.pool.connect();
+    let destroy = false;
+    try {
+      const result = (await client.query(USAGE_PRUNE_SQL, [beforeMs])) as { readonly rowCount?: number | null };
+      return result.rowCount ?? 0;
+    } catch (error) {
+      destroy = true;
+      throw error;
+    } finally {
+      client.release(destroy);
+    }
+  }
+
+  async #query(text: string, values: unknown[]): Promise<readonly Record<string, unknown>[]> {
+    const client = await this.pool.connect();
+    let destroy = false;
+    try {
+      return (await client.query(text, values)).rows;
+    } catch (error) {
+      destroy = true;
+      throw error;
+    } finally {
+      client.release(destroy);
+    }
+  }
 }

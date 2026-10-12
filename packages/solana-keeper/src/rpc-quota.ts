@@ -10,9 +10,12 @@
 // bucket in Postgres would ([QUEUE] §2.8, rejected).
 //
 // THE ROW'S STORE IS NOT HERE. The `worker` table and the code that reads and
-// writes it land in their own track (Q1); this file names only what it needs
-// from them — WorkerQuotaSource, one read of one row — and is handed one. Until
-// then a worker runs on the static floor, which is safe by construction.
+// writes it are the store's (Q1, src/dispatch-store.ts): the scheduler's
+// handOutQuotas writes each live worker's share and worker.quota_at, and a
+// worker's beat reads them back (beatProcess, or quotaSource as this file's
+// WorkerQuotaSource). This file names only what it needs — one read of one row
+// — and is handed it. A worker that has heard nothing runs on the static floor,
+// which is safe by construction.
 //
 // THE FLOOR IS WHAT MAKES A SILENT SCHEDULER SAFE. A worker that has heard no
 // quota for QUOTA_STALE_MS drops to (fleet − scheduler) / r_max: the share it
@@ -122,8 +125,9 @@ export function fleetQuotas(input: FleetQuotaInput): FleetQuotas {
  * `ageMs` IS THE STORE'S TO FILL, and it must be HOW LONG AGO THE SCHEDULER
  * LAST WROTE THESE QUOTAS — not the row's heartbeat_at, which the worker itself
  * writes every 10 s and which stays fresh while the scheduler is dead. The
- * table as designed carries no column for it; fleet.tick_at (the scheduler's
- * last tick) is the natural source, or a column of the store track's own.
+ * table as the ADR designed it had no column for it; the merge added
+ * worker.quota_at, which only the hand-out writes (WRITE_QUOTAS_SQL), and the
+ * beat answers clock_timestamp() − quota_at.
  *
  * AN AGE, NOT A TIMESTAMP, for the reason the ADR keeps every lease on
  * clock_timestamp() (§3.5, S-3): computed in SQL as `clock_timestamp() −
@@ -143,7 +147,7 @@ export interface WorkerQuotaRow {
   readonly ageMs: number | null;
 }
 
-/** One read of this worker's row; null when the row is not there. Implemented by the store track, injected here. */
+/** One read of this worker's row; null when the row is not there. DispatchStore.quotaSource is the real one: the beat itself. */
 export interface WorkerQuotaSource {
   readQuota(): Promise<WorkerQuotaRow | null>;
 }

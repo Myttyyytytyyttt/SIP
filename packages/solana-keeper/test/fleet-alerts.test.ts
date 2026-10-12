@@ -38,6 +38,7 @@ function worker(workerId: string, fenceRejects: number | null): FleetWorkerRow {
     leases: 0,
     rpsQuota: null,
     jupQuota: null,
+    quotaAgeMs: null,
     stats: { fenceRejects, leaseLosses: null, jobsLast10Min: null, releasedOnSigterm: null },
   };
 }

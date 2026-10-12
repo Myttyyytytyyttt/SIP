@@ -39,7 +39,7 @@ const RAW = {
     discoveryAgeMs: 30_000,
   },
   workers: [
-    { workerId: "w-alive", kind: "worker", version: "abc", startedAt: "2026-10-12T11:00:00+00:00", heartbeatAgeMs: 4_000, stoppedAt: null, slots: 2, busy: 1, rpsQuota: 16, jupQuota: null, leases: 1, stats: { fenceRejects: 0, leaseLosses: 1, jobsLast10Min: 12, privateKey: "never served" } },
+    { workerId: "w-alive", kind: "worker", version: "abc", startedAt: "2026-10-12T11:00:00+00:00", heartbeatAgeMs: 4_000, stoppedAt: null, slots: 2, busy: 1, rpsQuota: 16, jupQuota: null, quotaAgeMs: 9_000, leases: 1, stats: { fenceRejects: 0, leaseLosses: 1, jobsLast10Min: 12, privateKey: "never served" } },
     { workerId: "w-dead", kind: "worker", version: "abc", startedAt: "2026-10-12T10:00:00+00:00", heartbeatAgeMs: 180_000, stoppedAt: null, slots: 2, busy: 0, rpsQuota: 16, jupQuota: null, leases: 0, stats: {} },
   ],
   bySystem: { legacy: 2, queue: 3 },
@@ -80,6 +80,8 @@ describe("the snapshot as the statement returns it", () => {
   it("serves only the worker stats it names, marks a heartbeat past 2 minutes dead, and reads the lanes' oldest wait", () => {
     const [alive, dead] = SNAPSHOT.workers;
     expect(alive!.stats).toEqual({ fenceRejects: 0, leaseLosses: 1, jobsLast10Min: 12, releasedOnSigterm: null });
+    // The quota's age (worker.quota_at, Q1) as the statement computed it; a row never handed out reads null, not 0.
+    expect([alive!.quotaAgeMs, dead!.quotaAgeMs]).toEqual([9_000, null]);
     expect(JSON.stringify(SNAPSHOT)).not.toContain("never served");
     expect(alive!.dead).toBe(false);
     expect(dead!.dead).toBe(true);

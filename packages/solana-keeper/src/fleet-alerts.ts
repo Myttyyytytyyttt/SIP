@@ -219,9 +219,10 @@ export const PG_SATURATED_CRITICAL_STREAK = 3;
  * waitingCount), tick after tick.
  *
  * WHY IT MATTERS MORE HERE THAN TODAY. Every send now waits on a gate
- * transaction (ADR §4.4), and every replica runs on two connections
- * ([QUEUE] §2.12): a pool that stays full delays heartbeats toward the 45 s
- * lease, and gates toward their 10 s margin. One tick with a queue is a burst;
+ * transaction (ADR §4.4), and every replica runs on two connections at most (a
+ * worker's two; a scheduler's one beside its lock's, src/dispatch-store.ts): a
+ * pool that stays full delays heartbeats toward the 45 s lease, and gates toward
+ * their 10 s margin. One tick with a queue is a burst;
  * three in a row is the pool, or Supabase's, being too small.
  */
 export function pgSaturatedAlert(input: { readonly streak: number; readonly waiting: number; readonly total: number }): AlertDecision {

@@ -265,6 +265,11 @@ CREATE TABLE IF NOT EXISTS sip_solana.send_intent (
 );
 CREATE INDEX IF NOT EXISTS send_intent_open ON sip_solana.send_intent (vault_addr, fence) WHERE resolved_at IS NULL;
 CREATE INDEX IF NOT EXISTS send_intent_by_vault ON sip_solana.send_intent (vault_addr, fence);
+-- The fleet page's last hour (src/fleet-pg.ts, every 15 s on each scheduler
+-- replica): without it that read is a scan of 35 days of intents, ≈ 490k rows at
+-- N = 1,000. With it and send_intent_open, the page reads the open intents and
+-- the last hour's, and nothing older.
+CREATE INDEX IF NOT EXISTS send_intent_created ON sip_solana.send_intent (created_at);
 
 -- Every dispatcher process: the fleet view and the quota hand-out.
 CREATE TABLE IF NOT EXISTS sip_solana.worker (
@@ -277,22 +282,36 @@ CREATE TABLE IF NOT EXISTS sip_solana.worker (
   heartbeat_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   slots        smallint    NOT NULL CHECK (slots >= 0),
   busy         smallint    NOT NULL DEFAULT 0 CHECK (busy >= 0),
-  -- Written by the scheduler, read on heartbeat.
+  -- Written by the scheduler, read on heartbeat. jup_quota is Jupiter calls a
+  -- MINUTE, the pacer's unit (src/rpc-quota.ts).
   rps_quota    real,
   jup_quota    real,
+  -- When the scheduler last wrote the two quotas, by the database's clock. A
+  -- worker reads clock_timestamp() − quota_at, an age on one clock, and drops to
+  -- its floor two minutes after the SCHEDULER last wrote, never after its own
+  -- last read: heartbeat_at is the worker's own and stays fresh while the
+  -- scheduler is dead. NULL until the first hand-out.
+  quota_at     timestamptz,
   stopped_at   timestamptz,
   stats        jsonb       NOT NULL DEFAULT '{}'
 );
 
--- RPC and REST usage in 10-minute buckets by method class
--- (std | gpa | archival | send | webhook | jupiter | privy). Kept 35 days.
+-- RPC and REST usage in 10-minute buckets, by lane and bill line. Kept 35 days.
+-- Written by every process's RpcUsageCollector and read by the scheduler's
+-- credit governor (src/credit-governor.ts), through PgRpcUsageFeed
+-- (src/dispatch-store.ts), which ADDS a flush onto the row it shares a key with.
 CREATE TABLE IF NOT EXISTS sip_solana.rpc_usage (
   bucket       timestamptz NOT NULL,
   worker_id    text        NOT NULL,
   -- helius-rpc | helius-rest | jupiter | privy | other
   provider     text        NOT NULL,
-  -- send | hot | rest | sched
+  -- send | hot | rest | sched: a send is told apart by its lane.
   lane         text        NOT NULL,
+  -- The code's bill lines (CreditClass in src/rpc-usage.ts: standard,
+  -- programAccounts, programAccountsV2, archival, webSocketConfirmation,
+  -- webhookEvent, …) plus jupiter and privy; not the queue draft's
+  -- std | gpa | … vocabulary, which would need a translation that could drift.
+  -- Unchecked here so that a new bill line needs no schema change.
   class        text        NOT NULL,
   calls        bigint      NOT NULL CHECK (calls >= 0),
   errors_429   bigint      NOT NULL DEFAULT 0 CHECK (errors_429 >= 0),

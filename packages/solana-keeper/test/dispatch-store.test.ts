@@ -29,19 +29,30 @@ import {
   LANE_PRIORITY,
   LEASE_SECONDS,
   NOT_REBUILDABLE_TABLES,
+  LIVE_WORKERS_SQL,
   OPEN_INTENTS_SQL,
   OVERLAP_AUDIT_SQL,
   PLAN_FLOOR_SQL,
+  PgRpcUsageFeed,
   RECORD_SIGNATURE_SQL,
   RESOLVE_INTENT_SQL,
   SCHEDULER_POOL_MAX,
+  USAGE_ADD_SQL,
+  USAGE_PRUNE_SQL,
+  USAGE_READ_SQL,
+  WORKER_BEAT_SQL,
   WORKER_POOL_MAX,
+  WRITE_QUOTAS_SQL,
   createDispatchPool,
   dispatchConnections,
+  workerStatsJson,
   type DispatchClient,
   type DispatchPool,
   type IntentDraft,
 } from "../src/dispatch-store.js";
+import type { RpcUsageRow } from "../src/credit-governor.js";
+import { WORKER_DEAD_AFTER_MS, WORKER_STATS_KEYS } from "../src/fleet-status.js";
+import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
 
 const PACKAGE = new URL("..", import.meta.url);
 const source = (path: string): string => readFileSync(fileURLToPath(new URL(path, PACKAGE)), "utf8");
@@ -449,6 +460,12 @@ describe("the schema file's dispatcher section", () => {
     expect(ddl).toContain("created_at              timestamptz NOT NULL DEFAULT clock_timestamp()");
   });
 
+  it("worker: quota_at beside the two quotas; send_intent: an index for the fleet page's last hour", () => {
+    const worker = section.slice(section.indexOf("CREATE TABLE IF NOT EXISTS sip_solana.worker ("), section.indexOf("CREATE TABLE IF NOT EXISTS sip_solana.rpc_usage ("));
+    expect(worker).toMatch(/\n\s+rps_quota\s+real,\n\s+jup_quota\s+real,\n(\s+--.*\n)+\s+quota_at\s+timestamptz,\n/);
+    expect(section).toContain("CREATE INDEX IF NOT EXISTS send_intent_created ON sip_solana.send_intent (created_at);");
+  });
+
   it("vault_work: who acts is `system` (legacy | draining | queue), never the mode byte, and the fence starts at 0", () => {
     const ddl = section.slice(section.indexOf("CREATE TABLE IF NOT EXISTS sip_solana.vault_work ("), section.indexOf("CREATE INDEX IF NOT EXISTS vault_work_due"));
     expect(ddl).toContain("system        text        NOT NULL DEFAULT 'legacy' CHECK (system IN ('legacy', 'draining', 'queue'))");
@@ -457,13 +474,158 @@ describe("the schema file's dispatcher section", () => {
   });
 });
 
+describe("the merge's wiring, over a scripted client: the quota hand-out, worker.stats and rpc_usage", () => {
+  it("states every wiring statement on the database's clock, and the quota's age as clock_timestamp() − quota_at", () => {
+    for (const [name, text] of Object.entries({ WORKER_BEAT_SQL, LIVE_WORKERS_SQL, WRITE_QUOTAS_SQL })) {
+      expect(text, name).toContain("clock_timestamp()");
+      expect(text, name).not.toMatch(/\bnow\(\)/);
+      expect(text, name).not.toMatch(/\$\d+::timestamptz/);
+    }
+    expect(WORKER_BEAT_SQL).toContain("round(extract(epoch FROM clock_timestamp() - quota_at) * 1000) AS quota_age_ms");
+    expect(WORKER_BEAT_SQL).toContain("stats = COALESCE($3::jsonb, stats)");
+    expect(WRITE_QUOTAS_SQL).toContain("SET rps_quota = $2, jup_quota = $3, quota_at = clock_timestamp()");
+    expect(WRITE_QUOTAS_SQL).toContain("WHERE kind = 'worker' AND worker_id = ANY($1::text[])");
+    expect(LIVE_WORKERS_SQL).toContain("WHERE kind = 'worker' AND stopped_at IS NULL AND heartbeat_at > clock_timestamp() - make_interval(secs => $1::double precision)");
+  });
+
+  it("beats with the page's stats keys only, and answers the quotas as QuotaFollower reads them, age included", async () => {
+    const db = scripted(() => ({ rows: [{ rps_quota: 16, jup_quota: "30", quota_age_ms: "9000" }] }));
+    const store = new DispatchStore(db.pool, "w");
+    const row = await store.beatProcess(1, { fenceRejects: 2, leaseLosses: 0, ...({ privateKey: 7, jobsLast10Min: -1 } as object) });
+    expect(row).toEqual({ rpsQuota: 16, jupQuotaPerMinute: 30, ageMs: 9_000 });
+    expect(db.sent[0]).toEqual({ text: WORKER_BEAT_SQL, values: ["w", 1, JSON.stringify({ fenceRejects: 2, leaseLosses: 0 })] });
+    // NO STATS GIVEN: NULL, and the row keeps what it had.
+    await store.beatProcess(0);
+    expect(db.sent[1]!.values).toEqual(["w", 0, null]);
+  });
+
+  it("answers a quota never handed out as ages and quotas of null, and a missing row as null", async () => {
+    const never = scripted(() => ({ rows: [{ rps_quota: null, jup_quota: null, quota_age_ms: null }] }));
+    expect(await new DispatchStore(never.pool, "w").beatProcess(0)).toEqual({ rpsQuota: null, jupQuotaPerMinute: null, ageMs: null });
+    const gone = scripted(() => ({ rows: [] }));
+    expect(await new DispatchStore(gone.pool, "w").beatProcess(0)).toBeNull();
+  });
+
+  it("writes into worker.stats only the counters the public page names, each a whole number of zero or more", () => {
+    expect(workerStatsJson(undefined)).toBeNull();
+    expect(JSON.parse(workerStatsJson({ fenceRejects: 1, leaseLosses: 2, jobsLast10Min: 3, releasedOnSigterm: 4 })!)).toEqual({
+      fenceRejects: 1,
+      leaseLosses: 2,
+      jobsLast10Min: 3,
+      releasedOnSigterm: 4,
+    });
+    expect(Object.keys(JSON.parse(workerStatsJson({ fenceRejects: 1 })!))).toEqual(["fenceRejects"]);
+    expect(JSON.parse(workerStatsJson({ fenceRejects: 1.5, leaseLosses: Number.NaN, jobsLast10Min: -2, ...({ secret: 1 } as object) })!)).toEqual({});
+    expect([...WORKER_STATS_KEYS]).toEqual(["fenceRejects", "leaseLosses", "jobsLast10Min", "releasedOnSigterm"]);
+  });
+
+  it("is the follower's source: each read IS the beat, one statement, and the follower sets what it answered", async () => {
+    const db = scripted(() => ({ rows: [{ rps_quota: 10.5, jup_quota: 20, quota_age_ms: 1_000 }] }));
+    const store = new DispatchStore(db.pool, "w");
+    const quotas: number[] = [];
+    const tunes: number[] = [];
+    const follower = new QuotaFollower({
+      budget: { setQuota: (rps) => quotas.push(rps) > 0 },
+      pacer: { retune: (perMinute) => tunes.push(perMinute) > 0 },
+      floorRps: 4,
+      floorJupiterPerMinute: 6,
+      maxRps: 40,
+    });
+    const status = await follower.refresh(store.quotaSource(() => ({ busy: 2, stats: { jobsLast10Min: 5 } })));
+    expect(status.state).toBe("row");
+    expect(quotas).toEqual([4, 10.5]);
+    expect(tunes).toEqual([6, 20]);
+    expect(db.sent).toEqual([{ text: WORKER_BEAT_SQL, values: ["w", 2, JSON.stringify({ jobsLast10Min: 5 })] }]);
+  });
+
+  it("hands out fleetQuotas over the workers alive now, writes exactly those, and divides among all of them when more than r_max are alive", async () => {
+    const live = (ids: string[]) =>
+      scripted((text) => (text === LIVE_WORKERS_SQL ? { rows: ids.map((worker_id) => ({ worker_id })) } : { rows: ids.map((worker_id) => ({ worker_id })) }));
+    const three = live(["a", "b", "c"]);
+    const out = await new DispatchStore(three.pool, "sched").handOutQuotas({ maxWorkers: 4, jupiterPerMinute: 60 });
+    const expected = fleetQuotas({ liveWorkers: 3, maxWorkers: 4, jupiterPerMinute: 60 });
+    expect(out).toEqual({ quotas: expected, workers: ["a", "b", "c"] });
+    expect(three.sent).toEqual([
+      { text: LIVE_WORKERS_SQL, values: [WORKER_DEAD_AFTER_MS / 1000] },
+      { text: WRITE_QUOTAS_SQL, values: [["a", "b", "c"], expected.perWorkerRps, 20] },
+    ]);
+    // A DEPLOY'S OVERLAP: five alive against r_max = 2. Each gets a fifth, so the shares still sum to the budget.
+    const five = live(["a", "b", "c", "d", "e"]);
+    const overlap = await new DispatchStore(five.pool, "sched").handOutQuotas({ maxWorkers: 2, jupiterPerMinute: null });
+    expect(overlap.quotas.perWorkerRps! * 5).toBeCloseTo(overlap.quotas.fleetRps - overlap.quotas.schedulerRps, 9);
+    expect(five.sent[1]!.values).toEqual([["a", "b", "c", "d", "e"], overlap.quotas.perWorkerRps, null]);
+    // NOBODY ALIVE: the arithmetic, and no write.
+    const none = live([]);
+    expect((await new DispatchStore(none.pool, "sched").handOutQuotas({ maxWorkers: 2 })).workers).toEqual([]);
+    expect(none.sent).toHaveLength(1);
+    await expect(new DispatchStore(none.pool, "sched").handOutQuotas({ maxWorkers: 0 })).rejects.toThrow(/maxWorkers/);
+    expect(none.sent).toHaveLength(1);
+  });
+
+  it("PgRpcUsageFeed: a flush is one statement of eight arrays that ADDS onto its key; nothing for nothing", async () => {
+    expect(USAGE_ADD_SQL).toContain("GROUP BY 1, 2, 3, 4, 5");
+    expect(USAGE_ADD_SQL).toContain("ON CONFLICT (bucket, worker_id, provider, lane, class) DO UPDATE SET");
+    expect(USAGE_ADD_SQL).toContain("calls = u.calls + EXCLUDED.calls");
+    expect(USAGE_ADD_SQL).toContain("errors_429 = u.errors_429 + EXCLUDED.errors_429");
+    expect(USAGE_ADD_SQL).toContain("errors_other = u.errors_other + EXCLUDED.errors_other");
+    const db = scripted(() => ({ rows: [] }));
+    const feed = new PgRpcUsageFeed(db.pool);
+    await feed.add([]);
+    expect(db.connects).toBe(0);
+    const row: RpcUsageRow = { bucket: 1_760_000_400_000, workerId: "w", provider: "helius-rpc", lane: "send", usageClass: "standard", calls: 3, errors429: 1, errorsOther: 0 };
+    await feed.add([row, { ...row, lane: "rest", usageClass: "archival" }]);
+    expect(db.sent).toEqual([
+      {
+        text: USAGE_ADD_SQL,
+        values: [["1760000400000", "1760000400000"], ["w", "w"], ["helius-rpc", "helius-rpc"], ["send", "rest"], ["standard", "archival"], ["3", "3"], ["1", "1"], ["0", "0"]],
+      },
+    ]);
+  });
+
+  it("PgRpcUsageFeed: reads buckets back as ms, skips a provider or lane the code does not name, and destroys a failed client", async () => {
+    const db = scripted((text) =>
+      text === USAGE_READ_SQL
+        ? {
+            rows: [
+              { bucket_ms: "1760000400000", worker_id: "w", provider: "helius-rpc", lane: "hot", class: "standard", calls: "12", errors_429: "1", errors_other: "0" },
+              { bucket_ms: "1760000400000", worker_id: "w", provider: "somebody-else", lane: "hot", class: "standard", calls: "5", errors_429: "0", errors_other: "0" },
+              { bucket_ms: "1760000400000", worker_id: "w", provider: "helius-rpc", lane: "vip", class: "standard", calls: "5", errors_429: "0", errors_other: "0" },
+            ],
+          }
+        : new Error("down"),
+    );
+    const feed = new PgRpcUsageFeed(db.pool);
+    expect(await feed.read(1, 2)).toEqual([
+      { bucket: 1_760_000_400_000, workerId: "w", provider: "helius-rpc", lane: "hot", usageClass: "standard", calls: 12, errors429: 1, errorsOther: 0 },
+    ]);
+    expect(db.sent[0]).toEqual({ text: USAGE_READ_SQL, values: [1, 2] });
+    await expect(feed.prune(5)).rejects.toThrow("down");
+    expect(db.sent[1]).toEqual({ text: USAGE_PRUNE_SQL, values: [5] });
+    expect(db.releases).toEqual([false, true]);
+  });
+});
+
 describe("DARK: nothing a legacy keeper runs imports the store", () => {
+  // BY IMPORT SPECIFIER, static or dynamic, not by any mention: the fleet's and
+  // the budget's modules name this file in their comments since the merge, and a
+  // comment imports nothing. test/dispatch-dark.test.ts adds the stronger
+  // property — no entry point reaches any dispatcher module through any chain.
+  const importsStore = (text: string): boolean =>
+    /\bfrom\s+["'][^"']*\/dispatch-store(\.js)?["']|\bimport\s*\(\s*["'][^"']*\/dispatch-store(\.js)?["']|\bimport\s+["'][^"']*\/dispatch-store(\.js)?["']/.test(text);
+
+  it("recognises an import, a dynamic import and a bare import, and not a mention", () => {
+    expect(importsStore('import { DispatchStore } from "./dispatch-store.js";')).toBe(true);
+    expect(importsStore('const m = await import("../src/dispatch-store.js");')).toBe(true);
+    expect(importsStore('import "./dispatch-store.js";')).toBe(true);
+    expect(importsStore("// SCHEDULER_POOL_MAX in src/dispatch-store.ts")).toBe(false);
+  });
+
   it("is imported by no file under src/ or bin/", () => {
     const importers: string[] = [];
     for (const dir of ["src", "bin"]) {
       for (const name of readdirSync(fileURLToPath(new URL(`${dir}/`, PACKAGE)))) {
         if (!/\.(ts|mts)$/.test(name) || name === "dispatch-store.ts") continue;
-        if (/dispatch-store/.test(source(`${dir}/${name}`))) importers.push(`${dir}/${name}`);
+        if (importsStore(source(`${dir}/${name}`))) importers.push(`${dir}/${name}`);
       }
     }
     expect(importers).toEqual([]);

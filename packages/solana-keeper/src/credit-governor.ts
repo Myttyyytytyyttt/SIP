@@ -26,9 +26,11 @@
 // quiet vault up to an hour more between looks; stretching it late can cost the
 // month.
 //
-// THE STORE IS NOT HERE. `rpc_usage` and the code that writes and reads it land
-// in their own track (Q1). This file names what it needs — RpcUsageFeed — and
-// ships the in-memory implementation the tests and the local shadow use.
+// THE STORE IS NOT HERE. `rpc_usage` is the store's table (Q1), and
+// PgRpcUsageFeed (src/dispatch-store.ts) is the RpcUsageFeed over it, held to
+// InMemoryRpcUsageFeed's contract row for row by test/dispatch-wiring-pg.test.ts.
+// This file names what it needs and ships the in-memory implementation the
+// tests and the local shadow use.
 //
 // NOTHING HERE RUNS TODAY: no legacy keeper builds a collector or a governor.
 
@@ -66,7 +68,7 @@ export interface RpcUsageRow {
 }
 
 /**
- * The rows' store. Implemented by the store track over Postgres; by
+ * The rows' store: PgRpcUsageFeed over Postgres (src/dispatch-store.ts), and
  * InMemoryRpcUsageFeed here.
  *
  * `add` ADDS: each row's counts go onto the stored row with the same key
@@ -93,7 +95,7 @@ const plus = (a: RpcUsageRow, b: RpcUsageRow): RpcUsageRow => ({
   errorsOther: a.errorsOther + b.errorsOther,
 });
 
-/** rpc_usage in memory: the tests', and the local shadow's before the store track lands. */
+/** rpc_usage in memory: the tests', and the reference PgRpcUsageFeed is held to. */
 export class InMemoryRpcUsageFeed implements RpcUsageFeed {
   readonly #rows = new Map<string, RpcUsageRow>();
 

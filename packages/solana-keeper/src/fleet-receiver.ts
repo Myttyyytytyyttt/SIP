@@ -43,8 +43,9 @@
 //
 // ONE WRITE IN FLIGHT PER REPLICA. A busy trading wallet can produce several
 // deliveries a second. Each one used to be a map insertion; here it would be a
-// statement, and the scheduler's pool is two connections ([QUEUE] §2.12). So
-// deliveries that arrive while a write is in flight are merged into the next
+// statement, and the scheduler's pool is ONE connection beside its lock's pinned
+// one (SCHEDULER_POOL_MAX, src/dispatch-store.ts: ADR §3.11's 3 + 2r), shared
+// with the tick and the fleet page. So deliveries that arrive while a write is in flight are merged into the next
 // one: the bell's timestamp is the write's, at most one write later than the
 // delivery, and the due time is BELL_DELAY_MS after that — a delay the walk's
 // finality wait needs anyway.
@@ -234,9 +235,10 @@ export interface BellWrite {
 
 /**
  * Where bells are written. PgFleetStore (src/fleet-pg.ts) is the real one, over
- * the ADR's tables; the queue's store track (Q1) owns those tables, and the
- * merge step wires its pool here. Both methods may throw: the receiver turns
- * every failure into a full-pass request or a retry, and never into silence.
+ * Q1's tables in sql/sip_solana.sql and on the scheduler's pool from
+ * createDispatchPool(…, "scheduler") (src/dispatch-store.ts). Both methods may
+ * throw: the receiver turns every failure into a full-pass request or a retry,
+ * and never into silence.
  */
 export interface FleetBellStore {
   /** Maps the addresses to vaults through `keeper_link`, rings their `vault_work` rows, and marks the signatures' intents echoed. */

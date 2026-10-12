@@ -10,11 +10,10 @@
 // them at the end. Without the variable — the Docker build, a plain
 // `pnpm test` — the block is skipped and says why in its name.
 //
-// THE TABLES. sql/sip_solana.sql first, then test/fixtures/fleet-adr-tables.sql
-// for whatever the schema file does not create yet (all IF NOT EXISTS): today
-// that is the ADR's five dispatcher tables, which the store track (Q1) adds to
-// the schema file on its own branch. Once it merges, the fixture is a no-op and
-// every statement below runs against Q1's tables.
+// THE TABLES ARE THE SCHEMA FILE'S, AND ONLY ITS: sql/sip_solana.sql with Q1's
+// dispatcher section, CHECKs and indexes included. (Before the merge a fixture
+// with the ADR's DDL stood in for Q1's tables; it is gone, so a statement here
+// that Q1's tables refuse fails this file.)
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -22,7 +21,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Alert } from "../src/alerts.js";
 import { FleetAlerts, LEASE_EXPIRED_ALERT_KEY, QUEUE_LAG_ALERT_KEY, SCHEDULER_STALE_ALERT_KEY } from "../src/fleet-alerts.js";
-import { FLEET_COLUMNS, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns } from "../src/fleet-pg.js";
+import { FLEET_COLUMNS, FLEET_SNAPSHOT_SQL, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns } from "../src/fleet-pg.js";
 import { BELL_DELAY_MS, FleetReceiver, readDelivery, type FleetBellStore } from "../src/fleet-receiver.js";
 import { FleetStatusReader, samplePool } from "../src/fleet-status.js";
 
@@ -36,7 +35,6 @@ const usable = ((): boolean => {
 })();
 
 const SCHEMA_SQL = readFileSync(fileURLToPath(new URL("../sql/sip_solana.sql", import.meta.url)), "utf8");
-const ADR_TABLES_SQL = readFileSync(fileURLToPath(new URL("./fixtures/fleet-adr-tables.sql", import.meta.url)), "utf8");
 const fixtures = JSON.parse(
   readFileSync(fileURLToPath(new URL("./fixtures/helius-raw-2026-09-23.json", import.meta.url)), "utf8"),
 ) as Record<string, unknown[]>;
@@ -74,7 +72,6 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
     await admin.query(`CREATE DATABASE ${bare}`);
     db = pool(database, 4);
     await db.query(SCHEMA_SQL);
-    await db.query(ADR_TABLES_SQL);
   });
 
   afterAll(async () => {
@@ -118,7 +115,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
     ).rows[0]!;
 
   describe("the columns", () => {
-    it("are all there over the schema file and the ADR's tables, and a database without them is told which by name", async () => {
+    it("are all there over the schema file alone, and a database without them is told which by name", async () => {
       expect(await missingFleetColumns(db)).toEqual([]);
       const thin = pool(bare, 1);
       await thin.query("CREATE SCHEMA IF NOT EXISTS sip_solana; CREATE TABLE IF NOT EXISTS sip_solana.vault_work (vault_addr text PRIMARY KEY)");
@@ -184,8 +181,8 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       const store = new PgFleetStore(db);
       const intent = (signature: string) =>
         db.query(
-          `INSERT INTO sip_solana.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height, signature, state, resolved_at)
-           VALUES ($1, 'settle', 1, 'w1', 'bh', 100, $2, 'landed', clock_timestamp())`,
+          `INSERT INTO sip_solana.send_intent (vault_addr, link_addr, kind, fence, worker_id, blockhash, last_valid_block_height, signature, state, resolved_at)
+           VALUES ($1, 'L2', 'settle', 1, 'w1', 'bh', 100, $2, 'landed', clock_timestamp())`,
           [VAULT, signature],
         );
       await intent(signatureOf("keeperSettle"));
@@ -351,13 +348,13 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
            ('D1-draining',  'draining', 'new',    2, clock_timestamp() - interval '1 hour',      NULL,      0, NULL, NULL, 0, NULL, NULL)`,
       );
       await db.query(
-        `INSERT INTO sip_solana.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height, signature, state, created_at, resolved_at, echoed_at) VALUES
-           ('Q3-held',  'wrap',   4, 'w-alive', 'bh', 1, 'sig-open',     'intent', clock_timestamp() - interval '40 seconds', NULL, NULL),
-           ('Q1-bell',  'settle', 2, 'w-alive', 'bh', 1, 'sig-unechoed', 'landed', clock_timestamp() - interval '7 minutes',  clock_timestamp() - interval '6 minutes', NULL),
-           ('Q1-bell',  'settle', 3, 'w-alive', 'bh', 1, 'sig-just-landed', 'landed', clock_timestamp() - interval '2 minutes', clock_timestamp() - interval '1 minute', NULL),
-           ('Q1-bell',  'settle', 1, 'w-alive', 'bh', 1, 'sig-echoed',   'landed', clock_timestamp() - interval '9 minutes',  clock_timestamp() - interval '8 minutes', clock_timestamp() - interval '8 minutes'),
-           ('Q2-safety','invest', 5, 'w-dead',  'bh', 1, NULL,           'failed', clock_timestamp() - interval '3 minutes',  clock_timestamp() - interval '2 minutes', NULL),
-           ('Q2-safety','invest', 4, 'w-dead',  'bh', 1, 'sig-old',      'landed', clock_timestamp() - interval '3 hours',    clock_timestamp() - interval '3 hours', NULL)`,
+        `INSERT INTO sip_solana.send_intent (vault_addr, link_addr, kind, fence, worker_id, blockhash, last_valid_block_height, signature, state, created_at, resolved_at, echoed_at) VALUES
+           ('Q3-held',  NULL, 'wrap',   4, 'w-alive', 'bh', 1, 'sig-open',     'intent', clock_timestamp() - interval '40 seconds', NULL, NULL),
+           ('Q1-bell',  'L1', 'settle', 2, 'w-alive', 'bh', 1, 'sig-unechoed', 'landed', clock_timestamp() - interval '7 minutes',  clock_timestamp() - interval '6 minutes', NULL),
+           ('Q1-bell',  'L1', 'settle', 3, 'w-alive', 'bh', 1, 'sig-just-landed', 'landed', clock_timestamp() - interval '2 minutes', clock_timestamp() - interval '1 minute', NULL),
+           ('Q1-bell',  'L1', 'settle', 1, 'w-alive', 'bh', 1, 'sig-echoed',   'landed', clock_timestamp() - interval '9 minutes',  clock_timestamp() - interval '8 minutes', clock_timestamp() - interval '8 minutes'),
+           ('Q2-safety', NULL, 'invest', 5, 'w-dead',  'bh', 1, NULL,           'failed', clock_timestamp() - interval '3 minutes',  clock_timestamp() - interval '2 minutes', NULL),
+           ('Q2-safety', NULL, 'invest', 4, 'w-dead',  'bh', 1, 'sig-old',      'landed', clock_timestamp() - interval '3 hours',    clock_timestamp() - interval '3 hours', NULL)`,
       );
       await db.query(
         `INSERT INTO sip_solana.loss_carry (link_addr, epoch, settlement_nonce, frontier_slot, loss_lamports, wallet_signed_tx_count, valid_until_slot, written_by)
@@ -413,6 +410,36 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         `${SCHEDULER_STALE_ALERT_KEY}:critical`,
       ]);
       expect(alerts.status().pg?.saturatedStreak).toBe(0);
+    });
+
+    it("counts a shadow world's unresolved intents as open, its resolved ones not, however old they are", async () => {
+      // Under SIP_SOLANA_DISPATCH=shadow every intent is a 'shadow' row and stays one when resolved (Q1): only
+      // resolved_at says which are open. One opened two hours ago is outside the last hour and still open.
+      await db.query(
+        `INSERT INTO sip_solana.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height, state, created_at, resolved_at) VALUES
+           ('Q4-lapsed', 'wrap',   7, 'w-dead',  'bh', 1, 'shadow', clock_timestamp() - interval '2 hours',   NULL),
+           ('Q5-takeover', 'invest', 9, 'w-alive', 'bh', 1, 'shadow', clock_timestamp() - interval '5 minutes', NULL),
+           ('Q5-takeover', 'invest', 8, 'w-alive', 'bh', 1, 'shadow', clock_timestamp() - interval '9 minutes', clock_timestamp() - interval '8 minutes')`,
+      );
+      const { sends } = await new PgFleetStore(db).read();
+      expect(sends.open).toBe(3);
+      expect(Math.abs(sends.oldestOpenAgeMs! - 2 * 3_600_000)).toBeLessThan(5_000);
+      expect(sends.lastHour).toContainEqual({ kind: "invest", state: "shadow", count: 2 });
+    });
+
+    it("reads send_intent through the schema's indexes: the open ones and the last hour, never a scan of 35 days", async () => {
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+        // Scans are only ever a choice on ten rows; forbidden, the plan shows whether an index path exists at all.
+        await client.query("SET LOCAL enable_seqscan = off");
+        const plan = (await client.query<{ "QUERY PLAN": string }>(`EXPLAIN ${FLEET_SNAPSHOT_SQL}`, [360, 50, 300])).rows.map((row) => row["QUERY PLAN"]).join("\n");
+        expect(plan).toMatch(/Index (Only )?Scan using send_intent_(open|created)|Bitmap Index Scan on send_intent_(open|created)/);
+        expect(plan).not.toMatch(/Seq Scan on send_intent/);
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
     });
 
     it("is a read failure that says what to run over a database without the dispatcher's tables", async () => {

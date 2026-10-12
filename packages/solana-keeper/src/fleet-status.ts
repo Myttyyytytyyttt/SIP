@@ -35,10 +35,11 @@
 // verdict. Railway asks /health only at deploy time (ADR §3.11, RT-11); the
 // watchdog's self-exit is what acts on the same verdict afterwards.
 //
-// DARK. Nothing in the legacy keepers imports this file, and nothing else does
-// yet: the scheduler and worker entry points (Q2, Q3) are to construct the
-// reader and serve the view, and the store track (Q1) owns the tables the
-// snapshot is read from (src/fleet-pg.ts reads them as the ADR designs them).
+// DARK. Nothing in the legacy keepers imports this file: the scheduler and
+// worker entry points (Q2, Q3) are to construct the reader and serve the view.
+// The snapshot is read from Q1's tables (sql/sip_solana.sql, through
+// src/fleet-pg.ts), and a worker's row is written by Q1's store
+// (src/dispatch-store.ts: its stats and the quota age on every beat).
 
 import type { Redactor } from "@sip/solana-log";
 import { summarizeUpstreamError } from "@sip/solana-log";
@@ -62,8 +63,10 @@ export const FLEET_ROLE_HEALTH = {
 
 /**
  * How often the snapshot is re-read: every fifteen seconds. One statement each
- * time, on one of the replica's two connections; the scheduler's own tick runs
- * every sixty, so the page is at most a quarter of a tick behind the table.
+ * time, on the replica's pool — on a scheduler, its ONE pooled connection
+ * (SCHEDULER_POOL_MAX), which the receiver and the tick share; the scheduler's
+ * own tick runs every sixty, so the page is at most a quarter of a tick behind
+ * the table.
  */
 export const FLEET_STATUS_REFRESH_MS = 15_000;
 
@@ -124,6 +127,12 @@ export interface FleetWorkerRow {
   readonly leases: number;
   readonly rpsQuota: number | null;
   readonly jupQuota: number | null;
+  /**
+   * How long ago the scheduler wrote those two quotas (worker.quota_at), by the
+   * database's clock; null before the first hand-out. Past QUOTA_STALE_MS
+   * (src/rpc-quota.ts) the worker runs on its floor, whatever the row says.
+   */
+  readonly quotaAgeMs: number | null;
   readonly stats: WorkerStats;
 }
 
@@ -178,7 +187,11 @@ export interface FleetQueue {
 }
 
 export interface FleetSends {
-  /** Intents not yet resolved (state `intent`), and the oldest one's age. */
+  /**
+   * Intents not yet resolved (resolved_at IS NULL), and the oldest one's age.
+   * Shadow rows included: under SIP_SOLANA_DISPATCH=shadow every intent is a
+   * 'shadow' row, open until a job resolves it as `on` would.
+   */
   readonly open: number;
   readonly oldestOpenAgeMs: number | null;
   /** Landed more than five minutes ago in the last hour and never seen in a delivery: the deaf webhook's evidence (ADR §3.8 step 5). */
@@ -213,7 +226,9 @@ export interface FleetSnapshot {
 
 /**
  * Where the snapshot comes from. PgFleetStore (src/fleet-pg.ts) is the real
- * one; the store track (Q1) owns the tables and the merge step wires its pool.
+ * one, over Q1's tables and on the scheduler's pool from
+ * createDispatchPool(…, "scheduler") — the one the receiver writes through
+ * (test/dispatch-wiring-pg.test.ts runs both on it at once).
  */
 export interface FleetStatusSource {
   read(): Promise<FleetSnapshot>;
