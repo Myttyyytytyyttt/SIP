@@ -209,12 +209,28 @@ const RPC_USAGE = `${READ_MODEL_SCHEMA}.rpc_usage`;
 const KEEPER_LINK = `${READ_MODEL_SCHEMA}.keeper_link`;
 const FLEET = `${READ_MODEL_SCHEMA}.fleet`;
 
+/**
+ * How far ahead of its due time a worker's OWN last vault is taken (CLAIM's soft
+ * affinity, ADR §3.4: it keeps the in-memory walk cache warm). A HEAD START,
+ * NOT PRECEDENCE: the ADR's `COALESCE(last_holder = $1, false) DESC` put every
+ * own vault before every other of the same priority, so under a saturated queue
+ * — a full pass's backlog, or a fleet whose busy vaults come due faster than its
+ * slots turn them — a vault whose last holder is gone (released on SIGTERM, its
+ * worker replaced) or that never had one waited behind each worker's own vaults
+ * FOREVER (the P3a-1 note; Q3 checked it: test/worker-pg.test.ts). Ordered by
+ * due_at less this head start, an own vault still goes first when it came due
+ * up to five minutes after the other, and never later: no vault waits more than
+ * five minutes beyond its turn for affinity's sake. Five, so the order Q1 pinned
+ * (an own vault due 1 minute ago before another's due 5 minutes ago) holds.
+ */
+export const CLAIM_AFFINITY_SECONDS = 300;
+
 /** CLAIM (ADR §3.5): up to $2 free slots, for worker $1. */
 export const CLAIM_SQL = `WITH c AS (
   SELECT vault_addr FROM ${VAULT_WORK}
    WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp()
      AND (holder IS NULL OR lease_until < clock_timestamp())
-   ORDER BY priority, COALESCE(last_holder = $1, false) DESC, due_at
+   ORDER BY priority, due_at - CASE WHEN last_holder = $1 THEN interval '${CLAIM_AFFINITY_SECONDS} seconds' ELSE interval '0 seconds' END, due_at
    LIMIT $2 FOR UPDATE SKIP LOCKED)
 UPDATE ${VAULT_WORK} w
    SET holder = $1, fence = w.fence + 1, claimed_at = clock_timestamp(),

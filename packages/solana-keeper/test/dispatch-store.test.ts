@@ -136,10 +136,12 @@ describe("the four statements, as ADR §3.5 writes them", () => {
     }
   });
 
-  it("CLAIM: due queue vaults only, free or expired, most urgent first and its own last vaults next, SKIP LOCKED, fence + 1", () => {
+  it("CLAIM: due queue vaults only, free or expired, most urgent first, its own last vaults with a bounded head start, SKIP LOCKED, fence + 1", () => {
     expect(CLAIM_SQL).toContain("WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp()");
     expect(CLAIM_SQL).toContain("AND (holder IS NULL OR lease_until < clock_timestamp())");
-    expect(CLAIM_SQL).toContain("ORDER BY priority, COALESCE(last_holder = $1, false) DESC, due_at");
+    expect(CLAIM_SQL).toContain(
+      "ORDER BY priority, due_at - CASE WHEN last_holder = $1 THEN interval '300 seconds' ELSE interval '0 seconds' END, due_at",
+    );
     expect(CLAIM_SQL).toContain("LIMIT $2 FOR UPDATE SKIP LOCKED)");
     expect(CLAIM_SQL).toContain("SET holder = $1, fence = w.fence + 1, claimed_at = clock_timestamp()");
     expect(CLAIM_SQL).toContain("lease_until = clock_timestamp() + interval '45 seconds', attempts = w.attempts + 1");

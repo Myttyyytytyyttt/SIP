@@ -7,8 +7,9 @@
 //
 // WHAT IT KEEPS FROM THE SQL, rule for rule:
 //   * CLAIM — system 'queue', not parked, due, and free or with its lease run
-//     out; by priority, then this holder's own last vaults, then due time; fence
-//     + 1, a 45 s lease, attempts + 1;
+//     out; by priority, then due time less the affinity head start this
+//     holder's own last vaults get (CLAIM_AFFINITY_SECONDS); fence + 1, a 45 s
+//     lease, attempts + 1;
 //   * HEARTBEAT — only (vault, fence) pairs still this holder's, and none
 //     claimed more than 6 minutes ago;
 //   * GATE — the row still this holder's at this fence with more than 10 s of
@@ -32,7 +33,7 @@ import type {
   OpenIntent,
   PriorIntents,
 } from "../src/dispatch-store.js";
-import { GATE_MARGIN_SECONDS, JOB_CEILING_MINUTES, LANE_PRIORITY, LEASE_SECONDS } from "../src/dispatch-store.js";
+import { CLAIM_AFFINITY_SECONDS, GATE_MARGIN_SECONDS, JOB_CEILING_MINUTES, LANE_PRIORITY, LEASE_SECONDS } from "../src/dispatch-store.js";
 
 export interface MemoryVaultRow {
   vault: string;
@@ -154,6 +155,10 @@ export class MemoryDispatchStore {
     readonly world: DispatchWorld = "live",
   ) {}
 
+  #effectiveDue(row: MemoryVaultRow): number {
+    return row.dueAt - (row.lastHolder === this.holder ? CLAIM_AFFINITY_SECONDS * 1_000 : 0);
+  }
+
   #check(): void {
     if (this.db.down) throw new Error("connect ECONNREFUSED (the test's database is down)");
   }
@@ -163,7 +168,8 @@ export class MemoryDispatchStore {
     const now = this.db.now;
     const due = [...this.db.vaults.values()]
       .filter((row) => row.system === "queue" && row.parkedReason === null && row.dueAt <= now && (row.holder === null || (row.leaseUntil ?? 0) < now))
-      .sort((a, b) => a.priority - b.priority || Number(b.lastHolder === this.holder) - Number(a.lastHolder === this.holder) || a.dueAt - b.dueAt)
+      // CLAIM's order: priority, then due time less the affinity head start for this holder's own last vaults.
+      .sort((a, b) => a.priority - b.priority || this.#effectiveDue(a) - this.#effectiveDue(b) || a.dueAt - b.dueAt)
       .slice(0, slots);
     return due.map((row) => {
       row.holder = this.holder;

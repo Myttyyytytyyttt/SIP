@@ -181,6 +181,58 @@ describe.skipIf(!usable)("a worker job on the real store, Postgres 16 (needs KEE
     void vault;
   });
 
+  it("CLAIM under a saturated queue (a full pass's backlog): a vault whose holder is gone is not starved by the claimer's own vaults", async () => {
+    // worker-b's own five vaults come due again the moment each completes; worker-a released 'orphan' six minutes
+    // ago on SIGTERM and is gone; 'recent' it released one minute ago.
+    await db.query(
+      `INSERT INTO sip_solana.vault_work (vault_addr, system, lane, priority, due_at, last_holder)
+       SELECT 'own-' || i, 'queue', 'full', 3, clock_timestamp(), 'worker-b' FROM generate_series(1, 5) AS i`,
+    );
+    await db.query(
+      `INSERT INTO sip_solana.vault_work (vault_addr, system, lane, priority, due_at, last_holder) VALUES
+         ('orphan', 'queue', 'full', 3, clock_timestamp() - interval '6 minutes', 'worker-a'),
+         ('recent', 'queue', 'full', 3, clock_timestamp() - interval '1 minute', 'worker-a')`,
+    );
+    const b = new DispatchStore(db, "worker-b");
+    /** Ten claims of one slot each, every own vault completed due at once, as a saturated worker turns them. */
+    const tenClaims = async (claimOnce: () => Promise<string[]>): Promise<string[]> => {
+      const order: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const [vault] = await claimOnce();
+        if (vault === undefined) break;
+        order.push(vault);
+        await db.query(
+          "UPDATE sip_solana.vault_work SET holder = NULL, lease_until = NULL, last_holder = 'worker-b', due_at = clock_timestamp() WHERE vault_addr = $1 AND vault_addr LIKE 'own-%'",
+          [vault],
+        );
+      }
+      return order;
+    };
+
+    // THE ADR'S ORDER, `COALESCE(last_holder = $1, false) DESC`: every own vault first, for ever. The orphan never comes up.
+    const adrOrder = await tenClaims(async () =>
+      (
+        await db.query<{ vault_addr: string }>(
+          `SELECT vault_addr FROM sip_solana.vault_work
+            WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp() AND (holder IS NULL OR lease_until < clock_timestamp())
+            ORDER BY priority, COALESCE(last_holder = $1, false) DESC, due_at LIMIT 1`,
+          ["worker-b"],
+        )
+      ).rows.map((row) => row.vault_addr),
+    );
+    expect(adrOrder).toHaveLength(10);
+    expect(adrOrder.every((vault) => vault.startsWith("own-"))).toBe(true);
+
+    // THE STORE'S CLAIM: the six-minute orphan first — it has waited past the five-minute head start — while the
+    // one-minute one still yields to the claimer's own, inside its bound.
+    const order = await tenClaims(async () => (await b.claim(1)).map((claimed) => claimed.vault));
+    expect(order[0]).toBe("orphan");
+    expect(order.slice(1).every((vault) => vault.startsWith("own-"))).toBe(true);
+    // AND ONCE IT, TOO, HAS WAITED PAST THE BOUND, IT IS NEXT.
+    await db.query("UPDATE sip_solana.vault_work SET due_at = clock_timestamp() - interval '301 seconds' WHERE vault_addr = 'recent'");
+    expect((await b.claim(1)).map((claimed) => claimed.vault)).toEqual(["recent"]);
+  });
+
   it("takeover: an abandoned send is waited out while the finalized height has not passed it, then expired, and the successor plans above it", async () => {
     const world = new SettleWorld();
     world.trade(400_000_000);
