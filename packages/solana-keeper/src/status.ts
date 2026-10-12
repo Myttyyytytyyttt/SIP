@@ -22,7 +22,9 @@ import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
 import { SERVICE } from "./keeper-log.js";
 import type { AuthorizationKeyCheck } from "./privy-authorization-key.js";
+import type { PrivyUsageStatus } from "./privy-usage.js";
 import type { KeeperRole } from "./role-registry.js";
+import type { RpcUsageStatus } from "./rpc-usage.js";
 import type { SeatCheck } from "./seat-check.js";
 
 export interface WalletStatus {
@@ -160,6 +162,68 @@ export interface SweepPhaseMs {
    * everyone behind it waits.
    */
   readonly expensiveMs: number;
+  /**
+   * buildPrivySolanaIndex: one paginated listing of the app's wallets, between
+   * the vault read and the first turn. 0 when the sweep built none (a dry run,
+   * or nothing to turn).
+   *
+   * THE PHASE THAT WAS NOT TIMED. The profit keeper's live /status of
+   * 2026-10-11 had a fixed part of about 364 ms per sweep of which about 200 ms
+   * belonged to no phase, INFERRED to be mostly this listing (dispatcher
+   * findings, scale §1) — and it is the one phase whose cost grows with the
+   * app's wallets rather than with this keeper's links: the N × pages cliff.
+   */
+  readonly privyIndexMs: number;
+}
+
+/**
+ * One phase's recent durations: how many were ever timed, the last one, and the
+ * percentiles and maximum over the most recent ones kept (TURN_TIMES_KEPT,
+ * src/sweep-cost.ts). Nulls until the first sample, which is a different fact
+ * from "it takes 0 ms".
+ */
+export interface DurationStats {
+  readonly samples: number;
+  readonly lastMs: number | null;
+  readonly p50Ms: number | null;
+  readonly p90Ms: number | null;
+  readonly maxMs: number | null;
+}
+
+/**
+ * What one turn's pieces take, where the money moves (createTurnTimers,
+ * src/sweep-cost.ts). The ADR sizes the dispatcher on a settle wall time of
+ * about 1.5 s and a send of about 2 s, and neither was ever measured; these are
+ * the measurements.
+ */
+export interface TurnTimes {
+  /** A settle turn that SETTLED, from runSettleTick's start to its answer: probe, walk, attestation, send, confirmation and receipt. */
+  readonly settleSettledMs: DurationStats;
+  /** One settle send: Privy's signAndSendTransaction, or a local keypair's sendRawTransaction — sent, or thrown. */
+  readonly settleSubmitMs: DurationStats;
+  /** From that send's answer to a confirmed status (or the 60 s timeout): the settle's landing poll. */
+  readonly settleConfirmMs: DurationStats;
+  /** An invest turn that INVESTED, from runInvestTick's start to its answer: wrap, convert, quotes and every leg. */
+  readonly investInvestedMs: DurationStats;
+  /** One Anchor confirmTransaction: how long an invest send waits on its websocket confirmation. */
+  readonly investConfirmMs: DurationStats;
+  /** One wallet index (buildPrivySolanaIndex), built or failed. */
+  readonly privyIndexMs: DurationStats;
+}
+
+/**
+ * The `jupiter` block of /status: the invest path's Jupiter requests per minute,
+ * against the keyless tier's 30 (createJupiterCallCounter, src/sweep-cost.ts).
+ */
+export interface JupiterUsageStatus {
+  readonly callsLastMinute: number;
+  /** The busiest rolling minute in the last 24 h: the number a per-minute limit is broken by. */
+  readonly peakPerMinuteLastDay: number;
+  readonly budgetPerMinute: number;
+  readonly peakPctOfBudget: number;
+  readonly callsPerDay: number;
+  readonly observedMs: number;
+  readonly callsSinceBoot: number;
 }
 
 /**
@@ -302,6 +366,18 @@ export interface KeeperStatus {
   pendingCarries: readonly PendingCarry[];
   /** Folded in at render from the doorbell and its webhook sync, like pendingCarries. */
   doorbell: DoorbellStatus;
+  /**
+   * WHAT THIS KEEPER COSTS ITS PROVIDERS (ADR L1a), folded in at render because
+   * each is a sliding window read at the moment of the request: RPC calls per
+   * method and their Helius credits (src/rpc-usage.ts), Privy requests and
+   * signatures by mode (src/privy-usage.ts), Jupiter's per-minute budget, and
+   * the turn timers. OPTIONAL, like `role`: a page rendered without them is a
+   * page from before they existed, and every field above means what it meant.
+   */
+  rpc?: RpcUsageStatus;
+  privy?: PrivyUsageStatus;
+  jupiter?: JupiterUsageStatus;
+  turnTimes?: TurnTimes;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

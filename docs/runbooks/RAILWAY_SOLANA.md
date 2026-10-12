@@ -421,6 +421,45 @@ escritura (Privy, confirmación, recibo) se cobra como suelo y no se ejecuta. So
 `lastSweepPhaseMs` (`triageMs` es el precio de los usuarios quietos y `expensiveMs` el de los activos), `skipped` y
 `linksTriaged`. Y el límite de peticiones por segundo del plan de Helius, que solo tú puedes mirar.
 
+### 4.1 Lo que cada vigilante gasta (Helius, Privy, Jupiter)
+
+Cada vigilante cuenta en `/status` lo que pide a sus proveedores. Nada de esto cambia lo que hace: solo lo cuenta.
+
+- **`rpc`**: llamadas por método en la última barrida (`byMethodLastSweep`) y en las últimas 24 h (`byMethodPerDay`,
+  `callsPerDay`), los créditos de Helius que eso cuesta (`creditsPerDayEstimate`, y a la vez con el archivo a 1 y a 10:
+  `creditsPerDayEstimateP1` y `…P2`), los 429 y qué endpoint contestó. `observedMs` dice cuánto del día ha visto: tras
+  un despliegue empieza de cero, y la estimación sale `null` los primeros 10 minutos.
+- **`privy`**: peticiones a Privy por tipo, páginas del listado de wallets por barrida, y firmas por modo (`profit`,
+  `volume`) frente a las 50.000 gratis al mes.
+- **`jupiter`**: llamadas en el último minuto y el minuto más cargado del día, frente a las 30/min sin clave.
+- **`turnTimes`**: lo que tarda de verdad una liquidación en vivo, su envío y su confirmación, una compra, y el listado
+  de Privy (también en `lastSweepPhaseMs.privyIndexMs`).
+
+**Para saber si alguien más usa tu clave de Helius:** con `observedMs` cerca de 24 h, compara `rpc.callsPerDay` de cada
+vigilante con las peticiones de **su** clave en el panel de Helius (si `rpc.byEndpointPerDay` enseña que contestó otro
+endpoint, lo de ese endpoint no va a esa clave). Si la clave pasa del 115 % de lo que dice su vigilante, hay otro
+consumidor en esa clave.
+
+**Dos variables, las dos opcionales** (en el servicio de cada vigilante; un valor mal escrito **no arranca**, y Railway
+deja corriendo el despliegue anterior):
+
+- `SIP_SOLANA_ARCHIVAL_CREDITS` = `1` o `10`: lo que cuesta una llamada de archivo en Helius. Sin ponerla vale `1`, lo
+  que dice su página de facturación. Cuando la llamada a la Admin API diga cuánto es de verdad, pon ese número.
+- `SIP_SOLANA_CREDIT_BUDGET_DAY` = los créditos al día que le das a **ese** servicio. Sin ponerla no hay alerta. Con
+  ella, `credit-burn` se queda en el log como aviso (warn) desde el 80 % y te llega a Telegram como crítica desde el
+  100 %, y nunca antes de una hora de datos.
+
+**Si salta `credit-burn`**, en este orden:
+
+1. Mira si el timbre está sordo: `/status` → `doorbell.trusted` y `doorbell.webhook.failingSince`. Un timbre sordo
+   convierte cada barrida en una pasada completa.
+2. Estira la barrida de ese servicio: `SIP_SOLANA_SWEEP_MS` entre `120000` y `300000` baja el gasto 2–5×. A cambio,
+   cobros y compras empiezan hasta ese tiempo más tarde. Vuelve a `60000` cuando se arregle la causa.
+3. Si tienes el autoescalado de Helius con tope, mira que no esté a punto de tocarlo.
+
+El presupuesto es solo de ese servicio: los 10M del plan también los gastan el otro vigilante y la web, y eso solo lo
+ve la llamada semanal a la Admin API.
+
 ## 5. El timbre (Helius avisa quién se movió)
 
 Sin timbre, cada barrida pregunta a **todas** las wallets si hicieron algo, aunque casi ninguna haya hecho nada: unos

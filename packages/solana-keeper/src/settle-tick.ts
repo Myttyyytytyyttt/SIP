@@ -176,6 +176,55 @@ export interface SettleDeps {
    * fetches its whole window again — the anchor and the oldest prefix above it.
    */
   readonly walkCache?: WalkCache;
+  /**
+   * Told, after the fact, what each live send took and how it ended
+   * (SettleSend): /status's turn timers and the Privy signature count by mode
+   * (bin/keeper.mts). Absent, nothing is told.
+   *
+   * IT CANNOT CHANGE THE SETTLE. It is called only once the outcome it reports
+   * has happened, its return value is ignored, and a throw from it is
+   * swallowed where it is called (tellSend): every line of this function that
+   * decides what is sent, or what is reported, runs exactly as it would without
+   * it. A test holds that a throwing onSend leaves the outcome identical.
+   */
+  readonly onSend?: (send: SettleSend) => void;
+}
+
+/**
+ * One live settle send, as onSend is told it.
+ *
+ * TWO DURATIONS, BECAUSE THEY ARE TWO DIFFERENT WAITS. `submitMs` is the send
+ * itself — Privy signing and broadcasting, or the node accepting a local
+ * keypair's bytes; `confirmMs` is the landing poll after it, null when the send
+ * threw and nothing was polled. The ADR sizes the dispatcher on "a send of
+ * about 2 s" (ASSUMED, never measured), and which half of those seconds is
+ * Privy's and which is the chain's decides what could make it shorter.
+ */
+export interface SettleSend {
+  /** Which route sent it: Privy (a signature on the free-tier count) or a local keypair (localnet). */
+  readonly route: "privy" | "local-keypair";
+  /** The mode byte the attestation charged in. */
+  readonly mode: number;
+  readonly submitMs: number;
+  readonly confirmMs: number | null;
+  /**
+   * How it ended, as the landing poll saw it: confirmed and landed, confirmed
+   * with an on-chain error, no confirmed status within CONFIRM_TIMEOUT_MS, or
+   * the send itself threw. What the turn then REPORTS can differ — a send that
+   * threw and whose nonce moved is SETTLED — because that is decided after,
+   * from the link, and is the outcome's business, not this record's.
+   */
+  readonly ended: "landed" | "reverted" | "unconfirmed" | "threw";
+}
+
+/** Hands one send to onSend, if there is one, where nothing it does can reach the settle. */
+function tellSend(deps: SettleDeps, send: SettleSend): void {
+  if (deps.onSend === undefined) return;
+  try {
+    deps.onSend(send);
+  } catch {
+    // A lost report is a gap on /status. The settle's outcome is already decided.
+  }
 }
 
 /** How often a sent settle's status is asked for. */
@@ -545,6 +594,8 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // run and BELOW_RESERVE returned above, so neither records anything.
   recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null);
 
+  const route: SettleSend["route"] = walletSigner instanceof Keypair ? "local-keypair" : "privy";
+  const sentAt = Date.now();
   let signature: string;
   try {
     if (walletSigner instanceof Keypair) {
@@ -558,10 +609,19 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       signature = await walletSigner.submit(tx, { idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot) });
     }
   } catch (error) {
+    tellSend(deps, { route, mode: inputs.mode, submitMs: Date.now() - sentAt, confirmMs: null, ended: "threw" });
     return unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
   }
 
+  const submittedAt = Date.now();
   const landed = await landing(connection, signature);
+  tellSend(deps, {
+    route,
+    mode: inputs.mode,
+    submitMs: submittedAt - sentAt,
+    confirmMs: Date.now() - submittedAt,
+    ended: landed === null ? "unconfirmed" : landed.err === null ? "landed" : "reverted",
+  });
   if (landed === null) {
     const waited = `${CONFIRM_TIMEOUT_MS / 1_000} s`;
     return unconfirmed(

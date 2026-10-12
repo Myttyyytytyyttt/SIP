@@ -37,7 +37,7 @@ import { MAX_SUPPORTED_TRANSACTION_VERSION, WalkCache } from "../src/measure-win
 import { MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import { KEEPER_ROLES, rolesSettling } from "../src/role-registry.js";
 import { attestationInputs, keeperModes, type CarryBook, type LossCarry } from "../src/settle-decision.js";
-import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
+import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult, type SettleSend } from "../src/settle-tick.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
 
@@ -863,5 +863,83 @@ describe("a loss carried past a backlog's zero settle", () => {
     expect(result.detail).toBe(`settled ${PAID} lamports from 1000000000 measured over 1 txs (${PAID} expected at 2000 bps)`);
     expect(carries.get(address)?.has(stateKey(5n, EPOCH + 5)) ?? false, "the stale entry is deleted").toBe(false);
     expect(carries.size).toBe(0);
+  });
+});
+
+// WHAT A SEND TOOK, TOLD AFTER THE FACT (SettleDeps.onSend): the turn timers and
+// the Privy signature count on /status. The ADR sizes the dispatcher on a send
+// of about 2 s that nobody measured; this is the measurement, and it must not
+// be able to touch the settle it measures.
+describe("the report of each live send", () => {
+  /** Runs `deps` once with a recording onSend and returns what it was told. */
+  async function told(c: ReturnType<typeof chain>, over: Partial<SettleDeps> = {}, timers = false): Promise<{ result: SettleResult; sends: SettleSend[] }> {
+    const sends: SettleSend[] = [];
+    const run = () => runSettleTick(c.deps({ ...over, onSend: (send) => sends.push(send) }));
+    const result = timers ? await underFakeTimers(run) : await run();
+    return { result, sends };
+  }
+
+  it("tells one landed send through a local keypair, in the mode it charged, with both waits", async () => {
+    const { result, sends } = await told(chain());
+    expect(result.outcome).toBe("SETTLED");
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({ route: "local-keypair", mode: MODE_PROFIT, ended: "landed" });
+    expect(sends[0]!.submitMs).toBeGreaterThanOrEqual(0);
+    expect(sends[0]!.confirmMs).not.toBeNull();
+  });
+
+  it("tells a send through Privy as Privy's, so it is counted as a signature", async () => {
+    const c = chain();
+    const privy: SolanaWalletSubmitter = {
+      address: link.wallet,
+      submit: async (transaction) => {
+        c.sent.push(VersionedTransaction.deserialize(transaction.serialize({ requireAllSignatures: false, verifySignatures: false })));
+        return SIGNATURE;
+      },
+    };
+    const { sends } = await told(c, { walletSigner: privy });
+    expect(sends.map((send) => [send.route, send.ended])).toEqual([["privy", "landed"]]);
+  });
+
+  it("tells a send that threw as thrown, with no confirmation wait, whatever the turn then reports", async () => {
+    const c = chain({ getAccountInfoAndContext: linkRead(link.settlementNonce + 1n) });
+    const { result, sends } = await told(c, { walletSigner: throwingSubmitter(Object.assign(new Error("504 Gateway Timeout"), { status: 504 })) });
+    // The nonce moved, so the TURN is SETTLED; the SEND still threw, and that is what is told.
+    expect(result.outcome).toBe("SETTLED");
+    expect(sends).toEqual([{ route: "privy", mode: MODE_PROFIT, submitMs: expect.any(Number), confirmMs: null, ended: "threw" }]);
+  });
+
+  it("tells a send never confirmed within the timeout as unconfirmed, and one that reverted as reverted", async () => {
+    const silent = chain({
+      getSignatureStatuses: async () => ({ context: { slot: 1 }, value: [null] }),
+      getAccountInfoAndContext: linkRead(link.settlementNonce),
+    });
+    const unconfirmed = await told(silent, {}, true);
+    expect(unconfirmed.sends.map((send) => send.ended)).toEqual(["unconfirmed"]);
+    expect(unconfirmed.sends[0]!.confirmMs).toBeGreaterThanOrEqual(CONFIRM_TIMEOUT_MS);
+
+    const code = idl.errors!.find((error) => error.name === "AttestationExpired")!.code;
+    const reverted = await told(chain({ getSignatureStatuses: confirmed({ InstructionError: [1, { Custom: code }] }) }));
+    expect(reverted.sends.map((send) => send.ended)).toEqual(["reverted"]);
+  });
+
+  it("tells nothing on a dry run, which sends nothing", async () => {
+    const { sends } = await told(chain(), { live: false, attester: null, walletSigner: null });
+    expect(sends).toEqual([]);
+  });
+
+  it("CANNOT CHANGE THE SETTLE: an onSend that throws leaves the outcome and the calls exactly as without one", async () => {
+    const plain = chain();
+    const without = await runSettleTick(plain.deps());
+    const throwing = chain();
+    const withThrow = await runSettleTick(
+      throwing.deps({
+        onSend: () => {
+          throw new Error("the meter broke");
+        },
+      }),
+    );
+    expect(withThrow).toEqual(without);
+    expect(throwing.calls).toEqual(plain.calls);
   });
 });

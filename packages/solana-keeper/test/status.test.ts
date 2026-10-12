@@ -19,7 +19,11 @@ import { Doorbell } from "../src/doorbell.js";
 import { WebhookSync, createHeliusWebhookClient } from "../src/helius-webhooks.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { SERVICE } from "../src/keeper-log.js";
+import { createPrivyUsage } from "../src/privy-usage.js";
+import { endpointLabel, poolFetch } from "../src/rpc-pool.js";
+import { createRpcUsage } from "../src/rpc-usage.js";
 import { seatCheck } from "../src/seat-check.js";
+import { createJupiterCallCounter, createTurnTimers } from "../src/sweep-cost.js";
 import {
   HEALTH_STALE_FLOOR_MS,
   HOOK_MAX_BODY_BYTES,
@@ -59,6 +63,36 @@ const CREDENTIALS = [
   JSON.stringify(Array.from(keypair.secretKey)),
   Array.from(keypair.secretKey).slice(0, 16).join(","),
 ];
+
+/**
+ * The four usage blocks, from the real meters: an hour of one sweep's calls, a
+ * Privy listing page and a signature, a Jupiter build, a settle's timings. The
+ * RPC meter is fed THROUGH THE POOL over the planted endpoint, so the URL with
+ * its key went through the very code that counts — and must not come out.
+ */
+async function usageBlocks(): Promise<Pick<KeeperStatus, "rpc" | "privy" | "jupiter" | "turnTimes">> {
+  const startedAt = Date.now() - 3_600_000;
+  const rpc = createRpcUsage({ archivalCredits: 1, archivalCreditsSource: "default", budgetPerDay: 160_000, startedAt });
+  const pool = poolFetch([new Secret(RPC, "rpcUrl:0")], undefined, undefined, undefined, rpc);
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: 1 }), { status: 200 })) as typeof fetch;
+  try {
+    rpc.startSweep();
+    await pool(RPC, { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getProgramAccounts", params: [] }) });
+    await pool(RPC, { body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "getSignaturesForAddress", params: [] }) });
+    rpc.endSweep();
+  } finally {
+    globalThis.fetch = original;
+  }
+  const privy = createPrivyUsage({ startedAt });
+  privy.signature(0, true);
+  const jupiter = createJupiterCallCounter({ startedAt });
+  jupiter.count(2);
+  const timers = createTurnTimers();
+  timers.record("settleSettledMs", 1_480);
+  const now = Date.now();
+  return { rpc: rpc.report(now), privy: privy.report(now), jupiter: jupiter.report(now), turnTimes: timers.report() };
+}
 
 function setup(): { redactor: Redactor; status: KeeperStatus } {
   const redactor = new Redactor();
@@ -122,7 +156,7 @@ function setup(): { redactor: Redactor; status: KeeperStatus } {
     sweepMsP90: 41_000,
     linksDiscovered: 2,
     linksTriaged: 1,
-    lastSweepPhaseMs: { chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 },
+    lastSweepPhaseMs: { chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000, privyIndexMs: 190 },
     lastSweepWalk: { fetched: 1_204, cacheHits: 96, cacheEntries: 400 },
     // AN INDEX, NEVER A URL: the endpoints carry API keys and this page is public.
     rpcEndpointInUse: "endpoint 2/2",
@@ -214,6 +248,26 @@ describe("the /status JSON", () => {
   // simultaneous users fit — is sweepMs divided by what a user costs, and until
   // these fields existed neither side of that division was on the page: a
   // keeper skipping every sweep looked exactly like one with nothing to do.
+  it("serves what the keeper costs its providers beside everything else, and still no credential", async () => {
+    const { redactor, status } = setup();
+    const served = renderStatus({ ...status, ...(await usageBlocks()) }, redactor);
+    for (const credential of CREDENTIALS) expect(served).not.toContain(credential);
+    const parsed = JSON.parse(served) as KeeperStatus;
+    expect(parsed.rpc).toMatchObject({
+      callsLastSweep: 2,
+      byMethodLastSweep: { getProgramAccounts: 1, getSignaturesForAddress: 1 },
+      creditsLastSweep: 11,
+      budgetPerDay: 160_000,
+      byEndpointPerDay: { [endpointLabel(0, 1)]: { answered: 2, http429: 0, httpOther: 0, unreachable: 0 } },
+    });
+    expect(parsed.privy?.signaturesPerDay).toEqual({ profit: 1 });
+    expect(parsed.jupiter?.callsLastMinute).toBe(2);
+    expect(parsed.turnTimes?.settleSettledMs.lastMs).toBe(1_480);
+    // ADDITIVE: every field a reader had before is still there, meaning what it meant.
+    expect(parsed.rpcEndpointInUse).toBe("endpoint 2/2");
+    expect(parsed.jupiterCallsPerSweep).toBe(12);
+  });
+
   it("carries the sweep's cost, and names the endpoint by index rather than by URL", () => {
     const { redactor, status } = setup();
     const parsed = JSON.parse(renderStatus(status, redactor)) as KeeperStatus;
@@ -228,7 +282,7 @@ describe("the /status JSON", () => {
     expect(parsed.linksDiscovered).toBe(2);
     expect(parsed.linksTriaged).toBe(1);
     // Which lane is filling the sweep.
-    expect(parsed.lastSweepPhaseMs).toEqual({ chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000 });
+    expect(parsed.lastSweepPhaseMs).toEqual({ chainReadMs: 120, discoveryMs: 240, vaultReadMs: 68, triageMs: 520, expensiveMs: 40_000, privyIndexMs: 190 });
     expect(parsed.lastSweepWalk).toEqual({ fetched: 1_204, cacheHits: 96, cacheEntries: 400 });
     // The binding external limit, counted rather than assumed.
     expect(parsed.jupiterCallsPerSweep).toBe(12);
