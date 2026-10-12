@@ -566,6 +566,29 @@ export class SolanaReadModel {
     }
   }
 
+  /**
+   * ONE STATEMENT, ANSWERED OR THROWN — the migration's selection
+   * (src/dispatch-select.ts), and nothing else. Unlike every method above it
+   * does not turn a failure into a warning: the caller must know that it could
+   * not read whose each vault is, because then it acts on none of them. Told to
+   * the observer like the rest. Never called while SIP_SOLANA_DISPATCH is off.
+   */
+  async statement(text: string, values: readonly unknown[]): Promise<readonly Record<string, unknown>[]> {
+    if (this.#pool === null) throw new Error("no DATABASE_URL: this keeper has no database to read");
+    let client: pg.PoolClient | undefined;
+    try {
+      client = await this.#pool.connect();
+      const result = await client.query(text, [...values]);
+      this.#saw(true);
+      return result.rows as readonly Record<string, unknown>[];
+    } catch (error) {
+      this.#sawFailure(error);
+      throw error;
+    } finally {
+      client?.release();
+    }
+  }
+
   async close(): Promise<void> {
     await this.#pool?.end();
   }

@@ -30,7 +30,10 @@
 --
 -- The dispatcher's other four (keeper_link, worker, rpc_usage, fleet) are
 -- operational: keeper_link is the chain's listing, kept; the rest are counters
--- and flags. Losing them costs a full pass and some history, never money.
+-- and flags. Losing them costs a full pass and some history, never money. So is
+-- the migration's legacy_process: each legacy keeper rewrites its own row every
+-- sweep, and a handover waits for those rows (src/handover.ts), so losing them
+-- only makes the next handover wait one sweep longer.
 
 CREATE SCHEMA IF NOT EXISTS sip_solana;
 
@@ -133,10 +136,13 @@ CREATE TABLE IF NOT EXISTS sip_solana.loss_carry (
 
 -- ─── The dispatcher's tables (ADR §3.4, plan P3a Q1) ─────────────────────────
 --
--- DARK. Nothing in a legacy keeper reads or writes any of these: they belong to
--- src/dispatch-store.ts, which only the dispatcher's own entry points use, and
--- with SIP_SOLANA_DISPATCH unset no such entry point runs. Creating them changes
--- nothing for the keepers that run today.
+-- DARK. With SIP_SOLANA_DISPATCH unset nothing in a legacy keeper reads or
+-- writes any of these: they belong to src/dispatch-store.ts, which only the
+-- dispatcher's own entry points use, and with the variable unset no such entry
+-- point runs. Creating them changes nothing for the keepers that run today.
+-- With it set to shadow or on, a legacy keeper reads vault_work.system and
+-- fleet.new_vault_system and writes its own legacy_process row — one statement a
+-- sweep (src/dispatch-select.ts) — and nothing else here.
 --
 -- ADDITIVE AND IDEMPOTENT, like the rest of this file: CREATE … IF NOT EXISTS,
 -- ADD COLUMN IF NOT EXISTS, and one INSERT … ON CONFLICT DO NOTHING. Every lease
@@ -218,6 +224,21 @@ CREATE TABLE IF NOT EXISTS sip_solana.vault_work (
 );
 CREATE INDEX IF NOT EXISTS vault_work_due ON sip_solana.vault_work (priority, due_at)
   WHERE holder IS NULL AND parked_reason IS NULL AND system = 'queue';
+
+-- THE HANDOVER'S TWO COLUMNS (ADR §3.12; src/handover.ts), added by ALTER so a
+-- vault_work created before them gains them too. system_at: when `system` last
+-- changed, by the database's clock. handover_height: the block height a
+-- legacy → queue handover recorded once every legacy keeper had read the vault
+-- as not theirs — the processed height at that moment, so it is at or above the
+-- height behind any blockhash a legacy keeper could still have signed with; the
+-- vault goes to the queue only once the FINALIZED height has passed it by 150
+-- blocks, every such transaction dead or final. Kept after the move as the
+-- record of what it waited from; cleared by the next drain, rollback or release,
+-- and by a blocker that appears during the wait.
+ALTER TABLE sip_solana.vault_work
+  ADD COLUMN IF NOT EXISTS system_at timestamptz;
+ALTER TABLE sip_solana.vault_work
+  ADD COLUMN IF NOT EXISTS handover_height bigint CHECK (handover_height >= 0);
 
 -- Every transaction a worker is allowed to send: the gate's INSERT, committed
 -- before the bytes leave (ADR §3.5, §3.6). NOT REBUILDABLE (the header says why).
@@ -321,8 +342,13 @@ CREATE TABLE IF NOT EXISTS sip_solana.rpc_usage (
 
 -- One row of fleet-wide flags any replica may raise and the scheduler consumes.
 --
--- new_vault_system (plan P3a design detail 3): what a newly discovered vault is
--- inserted as. 'legacy' until the last vault moves (P3d), then 'queue'.
+-- new_vault_system (plan P3a design detail 3): who a newly discovered vault
+-- belongs to. 'legacy' until the last vault moves (P3d), then 'queue'. Under
+-- 'queue' the scheduler enrols a new vault as 'draining', never straight onto the
+-- queue, and the legacy keepers take a vault with no row for not theirs; the
+-- vault then reaches the queue through the same two-step handover as any other
+-- (src/dispatch-select.ts ENROL_VAULTS_SQL, src/handover.ts), so a legacy keeper
+-- that read the flag before it flipped can never act on a vault a worker holds.
 CREATE TABLE IF NOT EXISTS sip_solana.fleet (
   id               boolean     PRIMARY KEY DEFAULT true CHECK (id),
   scheduler_id     text,
@@ -335,3 +361,41 @@ CREATE TABLE IF NOT EXISTS sip_solana.fleet (
   new_vault_system text        NOT NULL DEFAULT 'legacy' CHECK (new_vault_system IN ('legacy', 'queue'))
 );
 INSERT INTO sip_solana.fleet (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
+-- ─── The migration: what each legacy keeper last read (ADR §3.12, RT-4) ──────
+--
+-- One row per legacy keeper PROCESS running with SIP_SOLANA_DISPATCH set, written
+-- by the very statement that reads its selection (src/dispatch-select.ts,
+-- LEGACY_SELECT_SQL): `seen` is exactly the {vault: system} map of every vault
+-- vault_work did not call 'legacy' at that read, and `absent_is` what a vault
+-- with no row was taken for. That sweep and every later one of that process
+-- leave those vaults alone; a sweep whose read FAILED acts on no vault at all.
+-- Sweeps never overlap in one process, so a row whose `seen` names a vault is
+-- proof that this process will not act on it again, and that every sweep of it
+-- that might have has ended. A handover (src/handover.ts) arms only once every
+-- row not marked gone says so.
+--
+-- carry_vaults: the vaults for which this process held a loss carry ONLY IN
+-- MEMORY at that read (SIP_SOLANA_CARRY_STORE off). A queue worker could not see
+-- it and would over-charge the next win, so no handover arms such a vault.
+--
+-- gone_at: set by an operator who has checked that the process's container no
+-- longer exists (`dispatch-handover gone`); a row that reads again clears it.
+CREATE TABLE IF NOT EXISTS sip_solana.legacy_process (
+  -- A uuid at boot.
+  process_id   text        PRIMARY KEY,
+  role         text        NOT NULL,
+  dispatch     text        NOT NULL CHECK (dispatch IN ('shadow', 'on')),
+  -- RAILWAY_DEPLOYMENT_ID and the host name, for the human who checks it is gone.
+  deployment   text,
+  host         text,
+  -- Whether the process was acting (armed and holding its claim) at that read.
+  live         boolean     NOT NULL,
+  started_at   timestamptz NOT NULL DEFAULT clock_timestamp(),
+  read_at      timestamptz NOT NULL,
+  reads        bigint      NOT NULL DEFAULT 1 CHECK (reads >= 1),
+  seen         jsonb       NOT NULL DEFAULT '{}',
+  absent_is    text        NOT NULL CHECK (absent_is IN ('legacy', 'queue')),
+  carry_vaults text[]      NOT NULL DEFAULT '{}',
+  gone_at      timestamptz
+);

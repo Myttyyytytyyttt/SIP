@@ -27,6 +27,7 @@ import type { RestBookStatus } from "./rest-book.js";
 import type { CarryStoreStatus } from "./carry-store.js";
 import type { Dependency, DependencyStatus } from "./dependency-watch.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
+import type { LegacySelectStatus } from "./dispatch-select.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
 import { SERVICE } from "./keeper-log.js";
@@ -491,6 +492,13 @@ export interface KeeperStatus {
   carryStore?: CarryStoreStatus;
   /** The rest of L1a, while any of its tokens keeps state (OpsStatus). Folded in at render. */
   ops?: OpsStatus;
+  /**
+   * The migration's selection (SIP_SOLANA_DISPATCH, src/dispatch-select.ts): the
+   * last read of vault_work, how many vaults are not the legacy keepers', and the
+   * turns the last sweep left alone and why. ABSENT WHILE THE VARIABLE IS OFF, so
+   * a keeper without it serves the page it served before the selection existed.
+   */
+  dispatch?: LegacySelectStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

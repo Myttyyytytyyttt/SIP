@@ -203,6 +203,38 @@ export function readCarryStore(raw: string | undefined): { readonly mode: CarryS
 }
 
 /**
+ * SIP_SOLANA_DISPATCH's three values (dispatcher ADR §3.12, §6.2 L4–L5; plan P3a,
+ * "migration and selection"). NOT A TOKEN, for the carry store's reason: three
+ * values, not on and off. `off` is today.
+ *
+ * ON A LEGACY KEEPER (bin/keeper.mts) `shadow` AND `on` MEAN THE SAME THING: read
+ * sip_solana.vault_work every sweep and leave alone, settle AND invest, every
+ * vault it does not name `legacy` (src/dispatch-select.ts). The two values differ
+ * on the dispatcher's own processes, where `shadow` gates and never sends; the
+ * legacy keeper honours the selection under both, so that a vault handed to the
+ * queue is never acted on twice whichever value the operator set. `off` (or
+ * unset) never even queries the table: the keeper of before, request for request.
+ */
+export const DISPATCH_MODES = ["off", "shadow", "on"] as const;
+export type DispatchMode = (typeof DISPATCH_MODES)[number];
+
+/**
+ * SIP_SOLANA_DISPATCH, read strictly: unset or blank is `off`; otherwise exactly
+ * `off`, `shadow` or `on`, as written. Anything else REFUSES TO START, by shape
+ * and never by value, as an unknown carry-store phase does: an `On` read as
+ * `off` would be a legacy keeper the owner believes is leaving the queue's
+ * vaults alone, and is not.
+ */
+export function readDispatchMode(raw: string | undefined): { readonly mode: DispatchMode } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return { mode: "off" };
+  if ((DISPATCH_MODES as readonly string[]).includes(value)) return { mode: value as DispatchMode };
+  return {
+    problem: `SIP_SOLANA_DISPATCH must be one of ${DISPATCH_MODES.join(", ")}; it holds a ${value.length}-character value.`,
+  };
+}
+
+/**
  * SIP_SOLANA_DISCOVERY_LKG_MS: how old a last-known-good link list a sweep may
  * fall back to when the listing fails (L3). 0 or unset is OFF, which is today:
  * a failed listing fails the sweep.

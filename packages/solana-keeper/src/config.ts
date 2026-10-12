@@ -43,7 +43,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
-import { readCarryStore, readCuts, readDiscoveryLkgMs, type CarryStoreMode, type CutToken } from "./cuts.js";
+import { readCarryStore, readCuts, readDiscoveryLkgMs, readDispatchMode, type CarryStoreMode, type CutToken, type DispatchMode } from "./cuts.js";
 import { readJupiterKeySettings } from "./jupiter-pacer.js";
 import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, roleCarriesLosses, type KeeperRole } from "./role-registry.js";
 import { DEFAULT_ARCHIVAL_CREDITS, type ArchivalCredits } from "./rpc-usage.js";
@@ -112,6 +112,10 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   // WHERE THE LOSS CARRIES LIVE (src/carry-store.ts): off, dual or on. Strict,
   // off when unset, and refused without DATABASE_URL or on a role with no loss to carry.
   "SIP_SOLANA_CARRY_STORE",
+  // THE MIGRATION'S SELECTION (src/dispatch-select.ts): off, shadow or on. Strict,
+  // off when unset — and off never queries vault_work — and refused without
+  // DATABASE_URL, where the selection lives.
+  "SIP_SOLANA_DISPATCH",
   ...SIGNING_SECRET_VARS,
 ]);
 
@@ -336,6 +340,12 @@ export interface KeeperConfig {
    * `on` decides from Postgres and sends nothing it cannot read or write there.
    */
   readonly carryStore: CarryStoreMode;
+  /**
+   * SIP_SOLANA_DISPATCH (src/cuts.ts, src/dispatch-select.ts): `off` is today and
+   * never reads vault_work; `shadow` and `on` read it every sweep and leave alone
+   * — settle and invest — every vault it does not name `legacy`.
+   */
+  readonly dispatch: DispatchMode;
   /** mint (base58) → Raydium CLMM pool. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly alertWebhook: Secret | null;
@@ -681,6 +691,8 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     // ONLY WHEN IT IS NOT `off`: a keeper without the variable describes itself
     // exactly as it did before the variable existed.
     ...(config.carryStore === "off" ? {} : { carryStore: config.carryStore }),
+    // THE SAME RULE: only when it is not `off`.
+    ...(config.dispatch === "off" ? {} : { dispatch: config.dispatch }),
     pools: config.pools.size,
     alertWebhook: config.alertWebhook !== null,
     alertMinSeverity: config.alertMinSeverity,
@@ -983,6 +995,20 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     );
   }
 
+  // --- the migration's selection: strict, off unless named ----------------------
+  const dispatchRead = readDispatchMode(env["SIP_SOLANA_DISPATCH"]);
+  const dispatch: DispatchMode = "mode" in dispatchRead ? dispatchRead.mode : "off";
+  if ("problem" in dispatchRead) problems.push(dispatchRead.problem);
+  // THE SELECTION LIVES IN POSTGRES (vault_work.system). Refused rather than
+  // quietly skipped: the owner who set it believes this keeper leaves the queue's
+  // vaults alone, and without a database it could not even ask which they are.
+  if (dispatch !== "off" && databaseUrl === null) {
+    problems.push(
+      `SIP_SOLANA_DISPATCH is ${dispatch}, which reads who acts on each vault from sip_solana.vault_work, but DATABASE_URL is not set to a ` +
+        "usable postgres:// URL. Set it, or unset SIP_SOLANA_DISPATCH.",
+    );
+  }
+
   // --- the doorbell: every value optional, none of them a problem ----------------
   // ONLY THE ROLE ALLOWED IT RUNS ANY OF IT (doorbellAllowed: the profit keeper).
   // The doorbell manages a Helius webhook for this service's own URL, and one per
@@ -1035,6 +1061,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     jupiterCallsPerMinute: jupiterRead.callsPerMinute,
     jupiterCallsPerMinuteSource: jupiterRead.callsPerMinuteSource,
     carryStore,
+    dispatch,
     pools,
     alertWebhook,
     alertMinSeverity,
