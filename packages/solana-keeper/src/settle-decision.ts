@@ -751,6 +751,32 @@ export const SETTLE_KEEPS_NOT_LANDING_TITLE = "A settlement keeps not landing";
 export const SETTLE_TURN_THREW_TITLE = "A settlement turn threw";
 
 /**
+ * What a RETRY waited on that is NOT the wallet's: one shared thing every wallet
+ * meets at once, which pages for itself, once (ADR §4.10 amendment 1: "RETRY by
+ * cause"). Only the loss-carry store so far (SIP_SOLANA_CARRY_STORE in `on`, a
+ * read or write it could not make: src/carry-store.ts, CARRY_STORE_ALERT_KEY).
+ * Its gate REFUSING a write is not this — that is the link's own business, and
+ * its wallet's ladder counts it.
+ */
+export type SettleWaitingOn = "carry-store";
+
+/**
+ * How many sweeps in a row this wallet's settle has come back RETRY, after this
+ * turn: one more for a RETRY, 0 for anything else — and UNCHANGED for a RETRY
+ * that waited on something shared (`waitingOn`). That turn says nothing about the
+ * wallet: it neither counts toward the wallet's page nor resets a streak the
+ * wallet had built on its own (a Privy refusal, say), which picks up where it
+ * left off once the shared thing answers.
+ *
+ * Without a carry store nothing ever sets `waitingOn`, and this is the count
+ * bin/keeper.mts always kept: +1 on RETRY, 0 otherwise.
+ */
+export function settleRetryStreak(previous: number, outcome: SettleOutcome, waitingOn?: SettleWaitingOn): number {
+  if (outcome !== "RETRY") return 0;
+  return waitingOn === undefined ? previous + 1 : previous;
+}
+
+/**
  * The outcome-to-alert rule for one wallet's settle turn, pure so a test can pin
  * it for every outcome.
  *
@@ -781,6 +807,12 @@ export function settleAlert(
   where: { readonly wallet: string; readonly vault: string },
   detail: string,
   consecutiveRetries = 0,
+  /**
+   * A RETRY that waited on something shared (SettleWaitingOn) raises and resolves
+   * NOTHING per wallet: the shared thing has its own page, and N copies of it, one
+   * per wallet, are what an operator learns to mute. Absent: today's rule.
+   */
+  waitingOn?: SettleWaitingOn,
 ): SettleAlertRule {
   const { wallet, vault } = where;
   const failed = `settle-failed:${wallet}`;
@@ -794,6 +826,7 @@ export function settleAlert(
         clear: [retry],
       };
     case "RETRY":
+      if (waitingOn !== undefined) return { fire: null, clear: [] };
       if (consecutiveRetries >= SETTLE_RETRY_CRITICAL_AFTER) {
         return {
           fire: {

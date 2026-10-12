@@ -42,6 +42,25 @@
 // settle waits for the store. An armed keeper already goes dry without its
 // database claim (read-model.ts, claimSingleton), so this adds no new dependency.
 //
+// A STORE THAT IS DOWN IS ONE PAGE, NOT ONE PER WALLET (review, 2026-10-12; ADR
+// §4.10 amendment 1). The store is one table that every PROFIT wallet's turn
+// reads, so when it cannot be used every such turn comes back RETRY at once. Fed
+// to the per-wallet ladder (settleAlert), that was N "A settlement keeps not
+// landing" criticals on the third sweep, none of them naming the store, and —
+// under dep-down — none held, because nothing tied them to the database. So:
+//   * a turn the store could not serve says so (SettleResult.waitingOn), and the
+//     per-wallet ladder neither counts nor raises it (settleRetryStreak,
+//     settleAlert in settle-decision.ts): the wallet did nothing wrong;
+//   * the cause pages ONCE, under its own key: `carry-store` warns at the first
+//     failure and, in `on`, where settles wait for it, pages critical once the
+//     store has gone CARRY_STORE_CRITICAL_AFTER_MS without one answer — a store
+//     that is not ready included, the table missing too, because in `on` that
+//     keeper does not act at all (liveBlocker);
+//   * every round trip is told to the `database` watch (CarryStoreHooks.observe,
+//     databaseAnswered), and under dep-down `carry-store` is one of the alerts a
+//     database outage explains (src/dependency-watch.ts): while dep-down:database
+//     pages, the store's own page is held, and the outage is one message.
+//
 // THE STORE SEES ONLY MODES THAT CARRY LOSSES (role-registry.ts, carriesLosses):
 // PROFIT. A VOLUME turn decides and records exactly as `off` does, in memory, and
 // the volume keeper refuses a store other than `off` at boot (config.ts): it would
@@ -68,7 +87,7 @@ import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
 import type { Alert } from "./alerts.js";
 import type { ManagedLink } from "./discovery.js";
-import { READ_MODEL_SCHEMA, sslFor } from "./read-model.js";
+import { READ_MODEL_SCHEMA, databaseAnswered, sslFor, type DatabaseObserver } from "./read-model.js";
 import { keeperModeFor } from "./role-registry.js";
 import { carryFor, recordCarry, type CarryBook, type LossCarry } from "./settle-decision.js";
 
@@ -103,8 +122,23 @@ export const CARRY_STORE_BUDGET_MS = 2_000;
  */
 export const CARRY_LOCK_CLASS = 0x5c4a7;
 
-/** The alert a store that could not be read or written raises. Warn: in `dual` the settle went on; in `on` it waited, and settleAlert escalates the RETRY. */
+/**
+ * The alert a store that could not be used raises: the ONE page for that cause
+ * (the header says why there is no per-wallet one). Warn in `dual`, where the
+ * settle went on; in `on` it warns, then pages critical (carryStoreAlert).
+ */
 export const CARRY_STORE_ALERT_KEY = "carry-store";
+
+/**
+ * How long, in `on`, the store may go without one answer before `carry-store`
+ * pages critical: two minutes. That is the third sweep at the default 60 s
+ * cadence, which is where a wallet's RETRY streak paged before the store had its
+ * own page (SETTLE_RETRY_CRITICAL_AFTER = 3): the settles that wait on the store
+ * are woken for exactly as soon as they were, once instead of once per wallet.
+ * Shorter would page a store that dropped one 2 s budget and answered the next
+ * sweep — a settle that waited one minute is not a page.
+ */
+export const CARRY_STORE_CRITICAL_AFTER_MS = 120_000;
 /** The alert a `dual` read that disagreed with memory raises, once per key: it blocks moving to `on`. */
 export const CARRY_MISMATCH_ALERT_KEY = "carry-mismatch";
 
@@ -394,8 +428,12 @@ export class PgCarryStore implements DurableCarryStore {
       }
       return { ok: true, detail: `${TABLE} is reachable and complete` };
     } catch (error) {
+      // THROWN, NOT ANSWERED AS NOT READY: a round trip that failed is the
+      // database's silence or its error, and only DurableCarries — which tells the
+      // `database` watch (CarryStoreHooks.observe) — can say which. It reports it
+      // as "could not be checked", as it always did.
       broken = true;
-      return { ok: false, detail: `${TABLE} could not be checked: ${summarizeUpstreamError(error)}` };
+      throw error;
     } finally {
       client?.release(broken);
     }
@@ -463,10 +501,26 @@ export async function gateRefusal(
 /** What one turn's read answers: the carry, or why the store could not say. */
 export type CarryRead = { readonly carry: LossCarry | null } | { readonly unavailable: string };
 
+/**
+ * What one turn's write answers: the store's own answer (written, or refused by
+ * `on`'s gate — THIS link's business, so its wallet's ladder counts it), or
+ * `unavailable`: the store could not be written at all, which is every PROFIT
+ * wallet's business at once and is paged as the store's (CARRY_STORE_ALERT_KEY),
+ * never as the wallet's.
+ */
+export type CarryTurnWriteResult = CarryWrite | { readonly kind: "unavailable"; readonly detail: string };
+
 /** The part of DurableCarries a settle turn uses (SettleDeps.carryStore). */
 export interface CarryStoreTurn {
   carryFor(book: CarryBook, link: CarryLink, mode: number): Promise<CarryRead>;
-  recordCarry(book: CarryBook, link: CarryLink, endSlot: bigint, carry: LossCarry | null, mode: number, turn: CarryTurnWrite): Promise<CarryWrite>;
+  recordCarry(
+    book: CarryBook,
+    link: CarryLink,
+    endSlot: bigint,
+    carry: LossCarry | null,
+    mode: number,
+    turn: CarryTurnWrite,
+  ): Promise<CarryTurnWriteResult>;
 }
 
 /** A `dual` read that disagreed with memory: what each said, for /status and the alert. */
@@ -506,18 +560,38 @@ export interface CarryStoreHooks {
   fire(alert: Alert): void;
   clear(key: string): void;
   warn(message: string, fields: Record<string, unknown>): void;
+  /**
+   * Told whether each round trip to the store got an answer from the database
+   * (databaseAnswered: an error Postgres itself sent is an answer; a refused or
+   * dropped connection, or this file's own budget running out, is not). For the
+   * dep-down token's `database` watch and nothing else, exactly as the read
+   * model's observer: absent, nothing is told and nothing is classified.
+   */
+  readonly observe?: DatabaseObserver;
 }
 
-/** The warn a store failure raises. */
-export function carryStoreAlert(mode: "dual" | "on", what: "read" | "write" | "seed" | "ready", detail: string): Alert {
+/**
+ * The page a store failure raises: the one alert for that cause, whichever wallet
+ * met it. A warn — and, in `on`, a CRITICAL once the store has gone
+ * CARRY_STORE_CRITICAL_AFTER_MS (`failingForMs`) without one answer, because
+ * there every PROFIT settle is waiting on it (and, while it is not ready, the
+ * keeper does not act at all). The critical breaks through the warn's dedup
+ * window (alerts.ts: an escalation is not a repeat). `dual` never pages: its
+ * settles go on from memory.
+ */
+export function carryStoreAlert(mode: "dual" | "on", what: "read" | "write" | "seed" | "ready", detail: string, failingForMs = 0): Alert {
+  const critical = mode === "on" && failingForMs >= CARRY_STORE_CRITICAL_AFTER_MS;
   return {
     key: CARRY_STORE_ALERT_KEY,
-    severity: "warn",
+    severity: critical ? "critical" : "warn",
     title: "The loss-carry store could not be used",
     detail:
       `Postgres ${what} failed: ${detail}. ` +
       (mode === "on"
-        ? "SIP_SOLANA_CARRY_STORE is on, so PROFIT settles wait (RETRY, nothing sent) until it answers."
+        ? (critical ? `It has not answered for ${Math.round(failingForMs / 1000)} s. ` : "") +
+          "SIP_SOLANA_CARRY_STORE is on, so PROFIT settles wait (RETRY, nothing sent) until it answers" +
+          (what === "ready" ? ", and this keeper does not act until it is ready (missingLiveCondition on /status)." : ".") +
+          " Each wallet's /status row says RETRY; no wallet is paged for it. See carryStore.lastProblem on /status."
         : "SIP_SOLANA_CARRY_STORE is dual: settles go on from memory, as with off, and this row was not compared."),
     context: { mode, what },
   };
@@ -560,6 +634,12 @@ export class DurableCarries implements CarryStoreTurn {
   #lastMismatch: CarryMismatch | null = null;
   #refusedAtGate = 0;
   #lastProblem: CarryStoreStatus["lastProblem"] = null;
+  /**
+   * When the store last started failing with no answer since, or null while it
+   * answers: what `carry-store`'s severity is judged on (carryStoreAlert). Any
+   * answer — a read, a write, the seed, a ready table — ends the run.
+   */
+  #failingSince: number | null = null;
 
   constructor(
     readonly mode: "dual" | "on",
@@ -578,6 +658,7 @@ export class DurableCarries implements CarryStoreTurn {
     if (!answer.ok) this.#notReady = `the loss-carry store could not be checked: ${summarizeUpstreamError(answer.error)}`;
     else this.#notReady = answer.value.ok ? null : answer.value.detail;
     if (this.#notReady !== null) this.#problem("ready", this.#notReady);
+    else this.#answered();
     return this.#notReady;
   }
 
@@ -615,6 +696,7 @@ export class DurableCarries implements CarryStoreTurn {
       this.#problem("seed", summarizeUpstreamError(answer.error));
       return;
     }
+    this.#answered();
     let loaded = 0;
     for (const row of answer.value) {
       const state = stateKey(row.epoch, row.settlementNonce, row.frontierSlot);
@@ -645,7 +727,7 @@ export class DurableCarries implements CarryStoreTurn {
       if (this.mode === "on") return { unavailable: `the loss-carry store could not be read (${detail})` };
       return { carry: this.#decided(address, state, memory) };
     }
-    this.hooks.clear(CARRY_STORE_ALERT_KEY);
+    this.#answered();
     if (this.mode === "on") {
       // THE MIRROR: what Postgres holds for this state, so /status shows it.
       if (db.value !== null) {
@@ -666,7 +748,14 @@ export class DurableCarries implements CarryStoreTurn {
     return { carry: this.#decided(address, state, memory) };
   }
 
-  async recordCarry(book: CarryBook, link: CarryLink, endSlot: bigint, carry: LossCarry | null, mode: number, turn: CarryTurnWrite): Promise<CarryWrite> {
+  async recordCarry(
+    book: CarryBook,
+    link: CarryLink,
+    endSlot: bigint,
+    carry: LossCarry | null,
+    mode: number,
+    turn: CarryTurnWrite,
+  ): Promise<CarryTurnWriteResult> {
     if (keeperModeFor(mode)?.carriesLosses !== true) {
       recordCarry(book, link, endSlot, carry);
       return { kind: "written" };
@@ -680,7 +769,7 @@ export class DurableCarries implements CarryStoreTurn {
         this.#problem("write", summarizeUpstreamError(written.error));
       } else {
         this.#written += 1;
-        this.hooks.clear(CARRY_STORE_ALERT_KEY);
+        this.#answered();
       }
       return { kind: "written" };
     }
@@ -691,9 +780,13 @@ export class DurableCarries implements CarryStoreTurn {
       this.#writeFailures += 1;
       const detail = summarizeUpstreamError(written.error);
       this.#problem("write", detail);
-      return { kind: "refused", detail: `the loss-carry store could not be written (${detail}); nothing was sent, and the next sweep tries again` };
+      // UNAVAILABLE, NOT REFUSED: the store said nothing about this link. The
+      // settle turn reports it as waiting on the store (SettleResult.waitingOn),
+      // and the store's own page is the one alert for it.
+      return { kind: "unavailable", detail: `the loss-carry store could not be written (${detail}); nothing was sent, and the next sweep tries again` };
     }
-    this.hooks.clear(CARRY_STORE_ALERT_KEY);
+    // AN ANSWER, EVEN A REFUSAL: the gate read the link's rows, so the store is up.
+    this.#answered();
     if (written.value.kind === "refused") {
       this.#refusedAtGate += 1;
       return written.value;
@@ -728,9 +821,18 @@ export class DurableCarries implements CarryStoreTurn {
   }
 
   #problem(what: "read" | "write" | "seed" | "ready", detail: string): void {
-    this.#lastProblem = { at: new Date(this.now()).toISOString(), what, detail };
+    const at = this.now();
+    this.#failingSince ??= at;
+    const failingForMs = at - this.#failingSince;
+    this.#lastProblem = { at: new Date(at).toISOString(), what, detail };
     this.#tell(() => this.hooks.warn("loss-carry store problem", { mode: this.mode, what, detail }));
-    this.#tell(() => this.hooks.fire(carryStoreAlert(this.mode, what, detail)));
+    this.#tell(() => this.hooks.fire(carryStoreAlert(this.mode, what, detail, failingForMs)));
+  }
+
+  /** The store answered: its failing run is over, and its page is resolved. */
+  #answered(): void {
+    this.#failingSince = null;
+    this.#tell(() => this.hooks.clear(CARRY_STORE_ALERT_KEY));
   }
 
   /** A hook that throws loses its report, never the settle. */
@@ -751,16 +853,38 @@ export class DurableCarries implements CarryStoreTurn {
   async #within<T>(work: Promise<T>): Promise<{ readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown }> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`no answer within ${this.budgetMs} ms`)), this.budgetMs);
+      timer = setTimeout(() => reject(new CarryStoreTimeout(this.budgetMs)), this.budgetMs);
     });
     work.catch(() => undefined);
     try {
-      return { ok: true, value: await Promise.race([work, late]) };
+      const value = await Promise.race([work, late]);
+      this.#observe(true);
+      return { ok: true, value };
     } catch (error) {
+      // THE BUDGET RUNNING OUT IS SILENCE; anything else is databaseAnswered's to say.
+      this.#observe(error instanceof CarryStoreTimeout ? false : error);
       return { ok: false, error };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Tells the `database` watch, if there is one, how a round trip ended. LAZY, as
+   * the read model's: with no observer the error is not even looked at.
+   */
+  #observe(outcome: boolean | unknown): void {
+    const observe = this.hooks.observe;
+    if (observe === undefined) return;
+    this.#tell(() => observe(typeof outcome === "boolean" ? outcome : databaseAnswered(outcome)));
+  }
+}
+
+/** The store's own budget running out: no answer from the database, in fixed words. */
+class CarryStoreTimeout extends Error {
+  constructor(budgetMs: number) {
+    super(`no answer within ${budgetMs} ms`);
+    this.name = "CarryStoreTimeout";
   }
 }
 

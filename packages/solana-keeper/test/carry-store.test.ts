@@ -13,12 +13,14 @@
 //   * a mode that carries no loss (VOLUME) never touches the store in any phase.
 
 import { PublicKey } from "@solana/web3.js";
-import { Redactor } from "@sip/solana-log";
+import { Redactor, Secret } from "@sip/solana-log";
+import pg from "pg";
 import { describe, expect, it } from "vitest";
-import type { Alert } from "../src/alerts.js";
+import { createAlerter, type Alert, type Alerter } from "../src/alerts.js";
 import {
   CARRY_MISMATCH_ALERT_KEY,
   CARRY_STORE_ALERT_KEY,
+  CARRY_STORE_CRITICAL_AFTER_MS,
   DurableCarries,
   MemoryCarryStore,
   gateRefusal,
@@ -33,8 +35,9 @@ import { ConfigError, describeConfig, loadConfig } from "../src/config.js";
 import { CARRY_STORE_MODES, readCarryStore } from "../src/cuts.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+import { DependencyWatch, depDownAlerts, explainedBy, gatedAlerter } from "../src/dependency-watch.js";
 import { roleCarriesLosses } from "../src/role-registry.js";
-import type { CarryBook, LossCarry } from "../src/settle-decision.js";
+import { settleAlert, settleRetryStreak, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { EPOCH, SettleWorld, WorldKeeper } from "./settle-world.js";
 
 const dry = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
@@ -106,11 +109,13 @@ class FaultyStore implements DurableCarryStore {
   fail = new Set<string>();
   hang = new Set<string>();
   ready_: { ok: boolean; detail: string } = { ok: true, detail: "test store" };
+  /** What a failing operation throws: a dropped connection unless a test says otherwise. */
+  failWith: (name: string) => Error = (name) => new Error(`${name} refused: connection terminated`);
 
   async #gate<T>(name: string, work: () => Promise<T>): Promise<T> {
     this.calls.push(name);
     if (this.hang.has(name)) return new Promise<T>(() => undefined);
-    if (this.fail.has(name)) throw new Error(`${name} refused: connection terminated`);
+    if (this.fail.has(name)) throw this.failWith(name);
     return work();
   }
 
@@ -207,7 +212,8 @@ describe("DurableCarries: what each phase decides from, and what it does when Po
       expect("unavailable" in read && read.unavailable, fault).toMatch(/^the loss-carry store could not be read \(/);
       const before = JSON.stringify([...book].map(([k, v]) => [k, [...v.keys()]]));
       const write = await carries.recordCarry(book, linkAt(5n, 900n), 990n, null, MODE_PROFIT, turnWrite);
-      expect(write.kind === "refused" && write.detail, fault).toMatch(/could not be written .*; nothing was sent/);
+      // UNAVAILABLE, NOT REFUSED: the store said nothing about this link.
+      expect(write.kind === "unavailable" && write.detail, fault).toMatch(/could not be written .*; nothing was sent/);
       expect(JSON.stringify([...book].map(([k, v]) => [k, [...v.keys()]])), "memory moves only after Postgres did").toBe(before);
       store[fault].clear();
     }
@@ -333,6 +339,7 @@ describe("the settle turn with each phase's store in it (test/settle-world.ts)",
     const turn = await keeper.turn({ live: true, carryStore: new DurableCarries("on", store, hooks()) });
     expect(turn.result.outcome).toBe("RETRY");
     expect(turn.result.detail).toMatch(/^the loss-carry store could not be written \(.*\); nothing was sent, and the next sweep tries again$/);
+    expect(turn.result.waitingOn, "the store's, not the wallet's").toBe("carry-store");
     expect(turn.result.carry, "it says what it would have carried").toEqual(LOSS);
     expect(world.sent).toHaveLength(0);
     expect(turn.calls).not.toContain("sendRawTransaction");
@@ -350,6 +357,7 @@ describe("the settle turn with each phase's store in it (test/settle-world.ts)",
         detail:
           "the loss-carry store could not be read (Error: carryFor refused: connection terminated): the loss this span may owe is unknown, " +
           "so nothing was attested or sent; the next sweep reads it again",
+        waitingOn: "carry-store",
       });
       for (const method of ["getLatestBlockhash", "getFeeForMessage", "getBalance", "sendRawTransaction"]) expect(turn.calls).not.toContain(method);
     }
@@ -424,5 +432,230 @@ describe("the settle turn with each phase's store in it (test/settle-world.ts)",
       /a carried loss is positive, not 0 lamports/,
     );
     expect(store.calls).toEqual([]);
+  });
+});
+
+/** An error Postgres itself sent, with its SQLSTATE: what pg throws for a missing table (42P01) or a server going away (08xxx). */
+function postgresError(message: string, code: string): Error {
+  const error = new pg.DatabaseError(message, 0, "error");
+  error.code = code;
+  return error;
+}
+
+describe("the database watch: every round trip the store makes, told as answered or not (dep-down)", () => {
+  it("an answer is an answer — a refused write and a table that is not there included; silence and a server in trouble are not", async () => {
+    const store = new FaultyStore();
+    const told: boolean[] = [];
+    const carries = new DurableCarries("on", store, { ...hooks(), observe: (answered) => told.push(answered) }, 30);
+    const book: CarryBook = new Map();
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    store.fail.add("carryFor");
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    store.failWith = () => postgresError('relation "sip_solana.loss_carry" does not exist', "42P01");
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    store.failWith = () => postgresError("terminating connection due to administrator command", "57P01");
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    store.fail.clear();
+    store.hang.add("carryFor");
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    store.hang.clear();
+    store.ready_ = { ok: false, detail: "sip_solana.loss_carry does not exist" };
+    await carries.checkReady();
+    expect(told).toEqual([true, false, true, false, false, true]);
+  });
+
+  it("is not asked at all without an observer, and a throwing one changes nothing", async () => {
+    const store = new FaultyStore();
+    store.fail.add("carryFor");
+    const quiet = new DurableCarries("on", store, hooks(), 30);
+    expect("unavailable" in (await quiet.carryFor(new Map(), linkAt(5n, 900n), MODE_PROFIT))).toBe(true);
+    const throwing = new DurableCarries("on", store, { ...hooks(), observe: () => { throw new Error("observer broke"); } }, 30);
+    expect("unavailable" in (await throwing.carryFor(new Map(), linkAt(5n, 900n), MODE_PROFIT))).toBe(true);
+  });
+});
+
+describe("carry-store: the store's one page", () => {
+  const T0 = 1_700_000_000_000;
+
+  it(`warns, and in on pages critical once it has gone ${CARRY_STORE_CRITICAL_AFTER_MS / 1000} s without an answer; any answer ends the run`, async () => {
+    let clock = T0;
+    const store = new FaultyStore();
+    store.fail.add("carryFor");
+    const h = hooks();
+    const carries = new DurableCarries("on", store, h, 30, () => clock);
+    const book: CarryBook = new Map();
+    const severities = async (): Promise<string> => {
+      await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+      return h.fired.at(-1)!.severity;
+    };
+    expect(await severities()).toBe("warn");
+    clock = T0 + CARRY_STORE_CRITICAL_AFTER_MS - 1;
+    expect(await severities()).toBe("warn");
+    clock = T0 + CARRY_STORE_CRITICAL_AFTER_MS;
+    expect(await severities()).toBe("critical");
+    expect(h.fired.at(-1)!.detail).toContain("It has not answered for 120 s.");
+    expect(h.fired.at(-1)!.detail).toContain("no wallet is paged for it");
+    // ONE ANSWER ENDS THE RUN, AND THE PAGE WITH IT; the next failure starts over at warn.
+    store.fail.clear();
+    await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT);
+    expect(h.cleared.at(-1)).toBe(CARRY_STORE_ALERT_KEY);
+    store.fail.add("carryFor");
+    clock += CARRY_STORE_CRITICAL_AFTER_MS * 10;
+    expect(await severities()).toBe("warn");
+  });
+
+  it("never pages in dual, however long Postgres stays away: its settles go on from memory", async () => {
+    let clock = T0;
+    const store = new FaultyStore();
+    store.fail.add("carryFor");
+    const h = hooks();
+    const carries = new DurableCarries("dual", store, h, 30, () => clock);
+    for (const at of [T0, T0 + 10 * CARRY_STORE_CRITICAL_AFTER_MS]) {
+      clock = at;
+      await carries.carryFor(new Map(), linkAt(5n, 900n), MODE_PROFIT);
+    }
+    expect(h.fired.map((alert) => alert.severity)).toEqual(["warn", "warn"]);
+  });
+
+  it("pages for a store that is not ready in on — the keeper does not act at all — and says so", async () => {
+    let clock = T0;
+    const store = new FaultyStore();
+    store.ready_ = { ok: false, detail: "sip_solana.loss_carry does not exist; run setup-read-model" };
+    const h = hooks();
+    const carries = new DurableCarries("on", store, h, 30, () => clock);
+    await carries.prepare(new Map());
+    clock = T0 + CARRY_STORE_CRITICAL_AFTER_MS;
+    await carries.prepare(new Map());
+    expect(h.fired.at(-1)).toMatchObject({ key: CARRY_STORE_ALERT_KEY, severity: "critical", context: { mode: "on", what: "ready" } });
+    expect(h.fired.at(-1)!.detail).toContain("this keeper does not act until it is ready");
+    // THE TABLE ARRIVES: ready, and the page is resolved.
+    store.ready_ = { ok: true, detail: "test store" };
+    await carries.prepare(new Map());
+    expect(carries.liveBlocker()).toBeNull();
+    expect(h.cleared).toContain(CARRY_STORE_ALERT_KEY);
+  });
+
+  it("is what a database outage explains, under dep-down", () => {
+    expect(explainedBy({ key: CARRY_STORE_ALERT_KEY, severity: "critical", title: "t", detail: "d" })).toEqual(["database"]);
+  });
+});
+
+describe("the settle turns a store that is down makes wait: one page, not one per wallet (ADR §4.10 amendment 1)", () => {
+  const T0 = 1_700_000_000_000;
+  const WALLETS = 5;
+  const SWEEPS = 3;
+
+  /** A real alerter at the production threshold, whose sends are captured as they leave. */
+  function box(): { readonly alerter: Alerter; readonly sent: { readonly key: string; readonly severity: string; readonly title: string }[] } {
+    const sent: { key: string; severity: string; title: string }[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/carry", "SIP_SOLANA_ALERT_WEBHOOK"),
+      minSeverity: "critical",
+      log: () => {},
+      post: async (_url, body) => {
+        const parsed = JSON.parse(body) as { key: string; severity: string; title: string };
+        sent.push({ key: parsed.key, severity: parsed.severity, title: parsed.title });
+      },
+    });
+    return { alerter, sent };
+  }
+
+  /**
+   * WALLETS PROFIT links, each with a losing backlog its turn walks, turned in dry
+   * run (the claim went with the database) by one keeper with one store in `on`,
+   * for SWEEPS sweeps a minute apart while the store fails as `breakStore` says —
+   * from boot, before its first readiness check, or after it, as `atBoot` says.
+   * Each turn's outcome goes through bin/keeper.mts's own ladder, in its order:
+   * settleRetryStreak, then settleAlert; each sweep ends with dep-down's pages.
+   */
+  async function outage(options: { readonly depDown: boolean; readonly atBoot?: boolean; readonly breakStore: (store: FaultyStore) => void }) {
+    let clock = T0;
+    const { alerter: inner, sent } = box();
+    const watch = new DependencyWatch();
+    const alerter = options.depDown ? gatedAlerter(inner, watch, () => clock) : inner;
+    const store = new FaultyStore();
+    const carries = new DurableCarries(
+      "on",
+      store,
+      {
+        fire: (alert) => alerter.fire(alert),
+        clear: (key) => alerter.clear(key),
+        warn: () => undefined,
+        // bin/keeper.mts's databaseObserver, on the test's clock.
+        ...(options.depDown
+          ? { observe: (answered: boolean) => watch.record("database", clock, answered ? { ok: true } : { ok: false, reason: "no answer from the database" }) }
+          : {}),
+      },
+      30,
+      () => clock,
+    );
+    const book: CarryBook = new Map();
+    if (options.atBoot === true) options.breakStore(store);
+    await carries.prepare(book);
+    if (options.atBoot !== true) options.breakStore(store);
+    const keepers = Array.from({ length: WALLETS }, () => {
+      const world = new SettleWorld({ settlementNonce: 4n });
+      world.losingBacklog();
+      return new WorldKeeper(world, { carries: book });
+    });
+    const streaks = new Map<string, number>();
+    const results: string[] = [];
+    for (let sweep = 1; sweep <= SWEEPS; sweep += 1) {
+      clock = T0 + sweep * 60_000;
+      await carries.prepare(book);
+      for (const keeper of keepers) {
+        const { result } = await keeper.turn({ live: false, carryStore: carries });
+        results.push(`${result.outcome}/${result.waitingOn ?? "-"}`);
+        const wallet = keeper.world.wallet.toBase58();
+        const streak = settleRetryStreak(streaks.get(wallet) ?? 0, result.outcome, result.waitingOn);
+        streaks.set(wallet, streak);
+        const rule = settleAlert(result.outcome, { wallet, vault: `Vault-${wallet}` }, result.detail, streak, result.waitingOn);
+        for (const key of rule.clear) alerter.clear(key);
+        if (rule.fire !== null) alerter.fire(rule.fire);
+      }
+      if (options.depDown) {
+        const down = depDownAlerts(watch, clock);
+        for (const key of down.clear) alerter.clear(key);
+        for (const page of down.fire) alerter.fire(page);
+      }
+    }
+    return { sent, watch, results, streaks, carries, clock };
+  }
+
+  const dropped = (store: FaultyStore): void => {
+    store.fail.add("carryFor");
+    store.fail.add("recordCarry");
+  };
+
+  it("Supabase down under dep-down: dep-down:database once, and nothing per wallet", async () => {
+    const { sent, watch, results, streaks, clock } = await outage({ depDown: true, breakStore: dropped });
+    expect(new Set(results)).toEqual(new Set(["RETRY/carry-store"]));
+    expect(results).toHaveLength(WALLETS * SWEEPS);
+    expect(sent).toEqual([{ key: "dep-down:database", severity: "critical", title: "The database is failing: the single-keeper claim and the history are at risk" }]);
+    // THE STORE'S OWN CRITICAL WAS RAISED, AND HELD: the outage is the one page.
+    expect(watch.status(clock).database.held).toBeGreaterThan(0);
+    // No wallet's ladder moved: once the store answers, each starts from where it was.
+    expect([...streaks.values()]).toEqual(Array(WALLETS).fill(0));
+  });
+
+  it("the store failing without dep-down: the store's own critical, once", async () => {
+    const { sent } = await outage({ depDown: false, breakStore: dropped });
+    expect(sent.map(({ key, severity }) => ({ key, severity }))).toEqual([{ key: CARRY_STORE_ALERT_KEY, severity: "critical" }]);
+  });
+
+  it("on set before setup-read-model: the database answers, so one carry-store critical by cause — not dep-down, not N wallets", async () => {
+    const { sent, watch, results, carries, clock } = await outage({
+      depDown: true,
+      atBoot: true,
+      breakStore: (store) => {
+        store.ready_ = { ok: false, detail: "sip_solana.loss_carry does not exist; run `pnpm --dir packages/solana-keeper setup-read-model` against this database" };
+        store.fail.add("carryFor");
+        store.failWith = () => postgresError('relation "sip_solana.loss_carry" does not exist', "42P01");
+      },
+    });
+    expect(carries.liveBlocker()).toMatch(/^SIP_SOLANA_CARRY_STORE is on and the loss-carry store is not ready: sip_solana\.loss_carry does not exist/);
+    expect(new Set(results)).toEqual(new Set(["RETRY/carry-store"]));
+    expect(sent.map(({ key, severity }) => ({ key, severity }))).toEqual([{ key: CARRY_STORE_ALERT_KEY, severity: "critical" }]);
+    expect(watch.status(clock).database.down).toBe(false);
   });
 });

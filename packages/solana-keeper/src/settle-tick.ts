@@ -60,6 +60,7 @@ import {
   type CarryBook,
   type LossCarry,
   type SettleOutcome,
+  type SettleWaitingOn,
   type VolumeBase,
 } from "./settle-decision.js";
 import { classifySettleRefusal, type SettleRefusal } from "./settle-refusal.js";
@@ -119,6 +120,14 @@ export interface SettleResult {
    * is negative. A live turn has recorded it in the book before sending.
    */
   readonly carry?: LossCarry;
+  /**
+   * Set only on a RETRY that waited on something every wallet shares, never on
+   * the wallet's own: the loss-carry store in `on` could not be read or written
+   * (src/carry-store.ts). The keeper's per-wallet ladder neither counts nor pages
+   * it (settleRetryStreak, settleAlert); the store pages once, for everyone.
+   * Never set without a carry store, so a keeper without one alerts as before.
+   */
+  readonly waitingOn?: SettleWaitingOn;
 }
 
 export interface SettleDeps {
@@ -453,6 +462,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       return {
         outcome: "RETRY",
         detail: `${read.unavailable}: the loss this span may owe is unknown, so nothing was attested or sent; the next sweep reads it again`,
+        waitingOn: "carry-store",
       };
     }
     carry = read.carry;
@@ -672,7 +682,9 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       validUntilSlot: inputs.validUntilSlot,
       nonceNow: () => readSettlementNonce(program, link.linkAddress).catch(() => null),
     });
+    // REFUSED BY THE GATE is this link's own state; UNAVAILABLE is the store's, every wallet's at once.
     if (write.kind === "refused") return { outcome: "RETRY", detail: write.detail, ...carried };
+    if (write.kind === "unavailable") return { outcome: "RETRY", detail: write.detail, waitingOn: "carry-store", ...carried };
   }
 
   const route: SettleSend["route"] = walletSigner instanceof Keypair ? "local-keypair" : "privy";

@@ -71,7 +71,13 @@ describe("without dep-down, the transport, the Privy meter and the read model ar
   });
 
   it("gives the read model an observer only under the token", () => {
-    expect(keeper).toMatch(/const readModel = SolanaReadModel\.create\(\n\s+config\.databaseUrl,\n[^\n]+\n\s+depWatch === null \? undefined : /);
+    expect(keeper).toMatch(/const databaseObserver: DatabaseObserver \| undefined =\n\s+depWatch === null \? undefined : \(answered\) => depWatch\.record\("database", /);
+    expect(keeper).toContain("const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) => log.warn(message, fields ?? {}), databaseObserver);");
+  });
+
+  it("gives the loss-carry store the same observer, only when there is one: its table is in the same database", () => {
+    const store = keeper.slice(keeper.indexOf("const carryStore: DurableCarries | null ="), keeper.indexOf("const walkCache = new WalkCache();"));
+    expect(store).toContain("...(databaseObserver === undefined ? {} : { observe: databaseObserver }),");
   });
 
   it("watches Jupiter's host through the global fetch only when dep-down or jupiter-budget asked for its answers", () => {

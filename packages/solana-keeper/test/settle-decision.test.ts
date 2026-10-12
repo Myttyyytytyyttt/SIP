@@ -47,6 +47,7 @@ import {
   recordCarry,
   reserveDecision,
   settleAlert,
+  settleRetryStreak,
   settleThrewAlert,
   type CarryBook,
   type LossCarry,
@@ -857,6 +858,22 @@ describe("the alert rule", () => {
         detail: `${run} sweeps in a row: AttestationMismatch`,
         context: { wallet: "Wallet1111", vault: "Vault1111" },
       });
+    }
+  });
+
+  it("counts a wallet's RETRYs, resets on anything else, and leaves the count alone for a RETRY that waited on the carry store", () => {
+    // TODAY'S COUNT, which is all a keeper without a carry store ever gets.
+    expect(settleRetryStreak(0, "RETRY")).toBe(1);
+    expect(settleRetryStreak(2, "RETRY")).toBe(3);
+    for (const outcome of Object.keys(table) as SettleOutcome[]) if (outcome !== "RETRY") expect(settleRetryStreak(2, outcome), outcome).toBe(0);
+    // THE STORE'S, NOT THE WALLET'S: neither counted nor a reset.
+    expect(settleRetryStreak(0, "RETRY", "carry-store")).toBe(0);
+    expect(settleRetryStreak(2, "RETRY", "carry-store")).toBe(2);
+  });
+
+  it("raises and resolves nothing per wallet for a RETRY that waited on the carry store, at any run length", () => {
+    for (const run of [0, 1, SETTLE_RETRY_CRITICAL_AFTER, 10]) {
+      expect(settleAlert("RETRY", where, "the loss-carry store could not be read", run, "carry-store"), String(run)).toEqual({ fire: null, clear: [] });
     }
   });
 

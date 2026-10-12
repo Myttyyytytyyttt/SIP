@@ -21,7 +21,8 @@
 // is built with (privyUsage's onAnswer, src/privy-usage.ts), the global fetch for
 // Jupiter's host (observeGlobalFetch: its route builder lives in
 // @sip/solana-program and takes no fetch of its own), and the read model's own
-// round trips for Postgres (databaseAnswered, src/read-model.ts) — and is DOWN once DEP_DOWN_STREAK requests in a row have
+// round trips and the loss-carry store's for the database (databaseAnswered,
+// src/read-model.ts; CarryStoreHooks.observe) — and is DOWN once DEP_DOWN_STREAK requests in a row have
 // failed over at least DEP_DOWN_MIN_MS, with no answer in between. A sweep that
 // fails because every RPC endpoint refused is the RPC down at once: that is the
 // generic sweep-failed this replaces, and it paged on the first one already.
@@ -45,14 +46,20 @@
 // FAILED settle — the program or Privy refusing a settle — is never held: it is
 // the one alert that names a defect, and an outage of something else cannot
 // have caused it. Pyth and the carry store, the ADR's other two shared
-// dependencies, are not here: Pyth is read through the RPC (src/pyth.ts), so its
-// outage IS an RPC outage, and the carry store does not exist until L2.
+// dependencies, have no entry of their own: Pyth is read through the RPC
+// (src/pyth.ts), so its outage IS an RPC outage, and the carry store
+// (SIP_SOLANA_CARRY_STORE, src/carry-store.ts) is a table in the same database —
+// its round trips are told to the `database` watch beside the read model's, and
+// its one page, `carry-store`, is what a database outage explains. The settles
+// it makes wait raise no per-wallet alert at all (settleAlert's `waitingOn`), so
+// there is nothing per wallet here to hold for it.
 //
 // IT DECIDES NOTHING ABOUT MONEY. It is told what already happened, after the
 // fact, inside a try of its own at every entry point; nothing on the settle or
 // invest path reads it. What it changes is who is woken, and for what.
 
 import { alertFamily, type Alert, type Alerter } from "./alerts.js";
+import { CARRY_STORE_ALERT_KEY } from "./carry-store.js";
 import { DISCOVERY_STALE_ALERT_KEY } from "./discovery-lkg.js";
 import { SETTLE_KEEPS_NOT_LANDING_TITLE, SETTLE_TURN_THREW_TITLE } from "./settle-decision.js";
 import { VAULT_READ_ALERT_KEY } from "./sweep-decision.js";
@@ -235,6 +242,9 @@ const EXPLAINED: Readonly<Record<string, readonly Dependency[]>> = {
   "invest-failed": ["rpc", "jupiter"],
   // "Another keeper holds the claim" — or nobody could take it, because the database is down.
   "not-acting": ["database"],
+  // The loss-carry store's one page (the PROFIT settles that wait on it page nothing
+  // of their own): a table in that same database, which cannot answer while it is down.
+  [CARRY_STORE_ALERT_KEY]: ["database"],
 };
 
 /** The dependencies whose outage would explain this alert; empty when none would. */

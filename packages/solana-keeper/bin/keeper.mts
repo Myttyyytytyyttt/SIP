@@ -106,12 +106,12 @@ import {
   type PrivyWalletEntry,
   type SolanaWalletSubmitter,
 } from "../src/privy-signer.js";
-import { SolanaReadModel } from "../src/read-model.js";
+import { SolanaReadModel, type DatabaseObserver } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { CREDIT_BURN_ALERT_KEY, countConfirmations, createRpcUsage, creditBurnAlert, heliusRestFetch } from "../src/rpc-usage.js";
 import { createPrivyUsage } from "../src/privy-usage.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
-import { activeBps, measurementStart, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
+import { activeBps, measurementStart, settleAlert, settleRetryStreak, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
 import { runSettleTick, type SettleDeps, type SettleOutcome, type SettleSend } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
 import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
@@ -444,11 +444,9 @@ const crankSender: CrankSender | null = config.cuts.has("explicit-send")
 // is a warning and never touches the settlement path. See src/read-model.ts.
 // Under dep-down, each round trip also tells the Postgres watch whether the
 // database answered (databaseAnswered, src/read-model.ts); without it, nothing.
-const readModel = SolanaReadModel.create(
-  config.databaseUrl,
-  (message, fields) => log.warn(message, fields ?? {}),
-  depWatch === null ? undefined : (answered) => depWatch.record("database", Date.now(), answered ? { ok: true } : { ok: false, reason: "no answer from the database" }),
-);
+const databaseObserver: DatabaseObserver | undefined =
+  depWatch === null ? undefined : (answered) => depWatch.record("database", Date.now(), answered ? { ok: true } : { ok: false, reason: "no answer from the database" });
+const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) => log.warn(message, fields ?? {}), databaseObserver);
 
 /**
  * WAKING SOMEONE WHEN SAVINGS STOP.
@@ -564,6 +562,9 @@ const carryStore: DurableCarries | null =
           fire: (alert) => alerter.fire(alert),
           clear: (key) => alerter.clear(key),
           warn: (message, fields) => log.warn(message, fields),
+          // UNDER dep-down, its round trips count toward the database's, as the read
+          // model's do: it is a table in the same database.
+          ...(databaseObserver === undefined ? {} : { observe: databaseObserver }),
         },
       );
 
@@ -2258,10 +2259,14 @@ async function sweep(): Promise<void> {
         // where a test pins the rule for every outcome. What it resolves is
         // cleared first, then what it raises is fired. A RETRY is counted per
         // wallet, sweep after sweep, and any other outcome resets the count.
-        const consecutiveRetries = settle.outcome === "RETRY" ? (settleRetries.get(wallet) ?? 0) + 1 : 0;
+        // A RETRY THAT WAITED ON THE LOSS-CARRY STORE (`waitingOn`, set only when
+        // SIP_SOLANA_CARRY_STORE is on) is the store's, every wallet's at once: it
+        // neither counts here nor pages per wallet, and the store pages once
+        // (src/carry-store.ts, CARRY_STORE_ALERT_KEY). Without a store, today's count.
+        const consecutiveRetries = settleRetryStreak(settleRetries.get(wallet) ?? 0, settle.outcome, settle.waitingOn);
         if (consecutiveRetries === 0) settleRetries.delete(wallet);
         else settleRetries.set(wallet, consecutiveRetries);
-        const settleAlerts = settleAlert(settle.outcome, { wallet, vault: vaultAddr }, settle.detail, consecutiveRetries);
+        const settleAlerts = settleAlert(settle.outcome, { wallet, vault: vaultAddr }, settle.detail, consecutiveRetries, settle.waitingOn);
         for (const key of settleAlerts.clear) alerter.clear(key);
         if (settleAlerts.fire !== null) alerter.fire(settleAlerts.fire);
 
