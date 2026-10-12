@@ -79,6 +79,14 @@ export interface BenchLink {
   readonly frontierSlot: number;
   /** Transactions this wallet has above its frontier: 0 for an idle user. */
   readonly txAbove: number;
+  /**
+   * A link that SETTLED ONCE AND RESTS ON IT: above its frontier sits our own
+   * settle and nothing else, the shape both of the volume keeper's settled links
+   * have in the census (disp-measure/census). Its probe sees that settle above
+   * the frontier, so the turn walks to the loop guard every sweep — the three
+   * calls the `rest-skip` cut exists to save. Never set together with txAbove.
+   */
+  readonly restsOnOwnSettle?: boolean;
 }
 
 export interface FleetShape {
@@ -135,6 +143,8 @@ export function buildFleet(shape: FleetShape): readonly BenchLink[] {
 export interface BenchTx {
   readonly signature: string;
   readonly slot: number;
+  /** Our own settle: [Ed25519SigVerify, sip-vault] signed and paid by the wallet, an external flow to the walk. */
+  readonly ownSettle?: boolean;
   /** The wallet's lamports before and after, fee included; the walk chains post to the next pre. */
   readonly pre: number;
   readonly post: number;
@@ -166,12 +176,25 @@ export function buildHistory(link: BenchLink): readonly BenchTx[] {
     balance = pre + NOTIONAL - FEE;
     out.push({ signature, slot, pre, post: balance });
   };
+  if (link.restsOnOwnSettle === true && link.txAbove > 0) {
+    throw new Error(`link ${link.index} cannot both rest on its own settle and hold ${link.txAbove} transactions above its frontier`);
+  }
   // The anchor sits BELOW the frontier: the walk stops at the first signature at
   // or below it, and reads that one for the balance the window opens on.
   step(benchSignature(`${link.index}:anchor`), link.frontierSlot - 1);
   for (let i = 0; i < link.txAbove; i++) step(benchSignature(`${link.index}:${i}`), link.frontierSlot + 1 + i);
+  // OUR OWN SETTLE, right above the frontier it set: the wallet pays its vault and
+  // the fee, and the chain still holds (each pre is the previous post).
+  if (link.restsOnOwnSettle === true) {
+    const pre = balance;
+    balance = pre - BENCH_OWN_SETTLE_LAMPORTS - FEE;
+    out.push({ signature: benchSignature(`${link.index}:own-settle`), slot: link.frontierSlot + 1, pre, post: balance, ownSettle: true });
+  }
   return out;
 }
+
+/** What a resting link's own settle paid its vault: 0.002 SOL, any positive amount would do. */
+export const BENCH_OWN_SETTLE_LAMPORTS = 2_000_000;
 
 /** The fee every synthetic transaction pays, and the fee the stub prices a settle at. */
 export const BENCH_FEE_LAMPORTS = 5_000;

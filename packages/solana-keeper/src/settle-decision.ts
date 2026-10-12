@@ -257,6 +257,12 @@ export type MeasurementDecision =
       readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY" | "UNSUPPORTED_MODE";
       readonly detail: string;
       readonly baseLamports?: bigint;
+      /**
+       * Set only by the loop guard (baseDecision): a complete window, not a cut
+       * prefix, holding nothing but our own settles. The one stop the `rest-skip`
+       * cut may remember (src/rest-book.ts); no other stop sets it.
+       */
+      readonly ownSettleOnly?: true;
     }
   | {
       readonly kind: "settle";
@@ -614,7 +620,7 @@ export async function baseDecision({
   // settle is decided below, where that transfer brings no zero settle closer.
   const others = measured.txCount - measured.settleTxCount;
   if (others === 0 && !measured.prefixCut) {
-    return { kind: "stop", outcome: "IDLE", detail: `only our own settle since slot ${from}; nothing to charge` };
+    return { kind: "stop", outcome: "IDLE", detail: `only our own settle since slot ${from}; nothing to charge`, ownSettleOnly: true };
   }
   // settle_v2 refuses a window whose end is not above its start
   // (InvalidSessionWindow). A walk that read transactions above the frontier

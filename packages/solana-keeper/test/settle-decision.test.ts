@@ -93,6 +93,7 @@ const measured = (over: Partial<WindowMeasurement> = {}): WindowMeasurement => (
   firstSlot: 300_000_600n,
   lastSlot: 300_000_900n,
   signaturesAbove: 12,
+  newestSignature: "sig-12",
   frontierReached: true,
   pagesExhausted: false,
   prefixCut: false,

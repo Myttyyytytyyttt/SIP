@@ -7,10 +7,11 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`rest-skip`, `lamports-filter`, …); they land with their own
-// code, each on its own soak, and until then naming one REFUSES TO START. A token that is accepted and does nothing is the one failure this
-// list exists to prevent: the owner reads Railway, sees `rest-skip`, and
-// believes the walk is being skipped.
+// (`lamports-filter`, …); they land with their own code, each on its own
+// soak, and until then naming one REFUSES TO START. A token that is accepted and
+// does nothing is the one failure this list exists to prevent: the owner reads
+// Railway, sees `lamports-filter`, and believes the vault reads are being
+// filtered.
 //
 // THE FIRST THREE ARE NOT ON THE MONEY PATH. Each changes how a fact is read —
 // the link list, a wallet's Privy record, when the rankings are recomputed — and
@@ -19,12 +20,24 @@
 // THE REST ARE, ONE TOKEN EACH, and the ADR's rule for them is that only one
 // soaks at a time (§6.1 rule 1): a money token changes whether, when or how a
 // buy is sent, so each has its own go gate and its rollback is removing it. They
-// are listed after the non-money three, in the order they are switched on.
+// are listed after the non-money three, in the order they are switched on
+// (the dispatcher plan §3.2: jupiter-key → rest-skip → invest-batch →
+// explicit-send).
+//
+// `rest-skip` SOAKS AS A MONEY CUT (ADR §2.3.2, RT-24) although it builds and
+// sends nothing: it decides when a settle is LOOKED FOR, so a wrong memo would
+// delay one. It cannot double one or change its amount — a memo only ever
+// returns a resting IDLE (src/rest-book.ts). The ADR's rule of one money change
+// switched on at a time applies to it.
 //
 // L3 IS NOT A TOKEN. The last-known-good link list carries a number, how old a
 // list it may fall back to, so it has a variable of its own
 // (SIP_SOLANA_DISCOVERY_LKG_MS, ADR §6.2 L3), read here beside the tokens and by
 // the same strict rule: 0 or unset is off, which is today.
+//
+// NOR IS L2. Where the loss carries live (SIP_SOLANA_CARRY_STORE, ADR §4.6) has
+// three phases, off, dual and on, and is read here by the same rule: unset is
+// off, which is today, and anything unknown refuses to start.
 
 /**
  * The cuts this build implements, in the ADR's rollout order.
@@ -46,6 +59,10 @@
  *     (today's host otherwise), paced, with the turn's calls RESERVED before its
  *     first one — a turn the budget cannot cover ends DEFERRED having moved
  *     nothing — and a backoff after a 429 (src/jupiter-pacer.ts).
+ *   * `rest-skip` (C4): a link resting on its own settle, whose probe shows the
+ *     same newest signature for the same link state as the walk that last
+ *     proved it, returns that walk's IDLE without walking again: 1 call instead
+ *     of 3 (src/rest-book.ts). Switched on after `jupiter-key` (plan §3.2).
  *   * `invest-batch` (C5 with C2 inside, ADR §2.3.3, §6.2 L1b-m3): the invest
  *     turn's at-rest reads — the policy, the vault's wSOL and USDC balances,
  *     the Clock, both Pyth feeds, the EpochSchedule — folded into the sweep's
@@ -59,7 +76,15 @@
  *     75 s after taking the claim, and a SIGTERM drain; the bytes are Anchor's
  *     (src/explicit-send.ts).
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch", "explicit-send"] as const;
+export const CUT_TOKENS = [
+  "gpa-v2",
+  "privy-address",
+  "board-timer",
+  "jupiter-key",
+  "rest-skip",
+  "invest-batch",
+  "explicit-send",
+] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 
@@ -104,6 +129,30 @@ export function readCuts(raw: string | undefined): { readonly cuts: ReadonlySet<
     cuts.add(token);
   });
   return problems.length > 0 ? { problems } : { cuts };
+}
+
+/**
+ * SIP_SOLANA_CARRY_STORE's phases, in rollout order (ADR §4.6, rollout L2):
+ * where the losses zero settles carry forward are kept. NOT A TOKEN, for L3's
+ * reason: it has three values, not on and off. `off` is today — memory, and a
+ * restart forgets a pending carry; the store itself is src/carry-store.ts.
+ */
+export const CARRY_STORE_MODES = ["off", "dual", "on"] as const;
+export type CarryStoreMode = (typeof CARRY_STORE_MODES)[number];
+
+/**
+ * SIP_SOLANA_CARRY_STORE, read strictly: unset or blank is `off`; otherwise
+ * exactly `off`, `dual` or `on`, as written. Anything else REFUSES TO START, by
+ * shape and never by value, as an unknown token does: an `On` that quietly meant
+ * memory would be an owner who believes a restart no longer forgets a loss.
+ */
+export function readCarryStore(raw: string | undefined): { readonly mode: CarryStoreMode } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return { mode: "off" };
+  if ((CARRY_STORE_MODES as readonly string[]).includes(value)) return { mode: value as CarryStoreMode };
+  return {
+    problem: `SIP_SOLANA_CARRY_STORE must be one of ${CARRY_STORE_MODES.join(", ")}; it holds a ${value.length}-character value.`,
+  };
 }
 
 /**

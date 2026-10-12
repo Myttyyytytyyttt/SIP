@@ -22,6 +22,8 @@ import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
 import type { CrankSenderStatus } from "./explicit-send.js";
 import type { JupiterPacerStatus } from "./jupiter-pacer.js";
+import type { RestBookStatus } from "./rest-book.js";
+import type { CarryStoreStatus } from "./carry-store.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
@@ -282,6 +284,14 @@ export interface CutsStatus {
    */
   readonly jupiter?: JupiterCutStatus;
   /**
+   * rest-skip: memos held, turns that returned from one, memos written and
+   * dropped. ABSENT, NOT NULL, while the cut is off — unlike privyAddressBook and
+   * board, which predate it: a keeper without the token serves exactly the page it served
+   * before the cut existed. `skips` rising while `recorded` stays put is the cut
+   * working; `invalidated` is a resting link that moved and was walked.
+   */
+  readonly restSkip?: RestBookStatus;
+  /**
    * invest-batch: batched sweeps and their requests, and what the snapshot did
    * with each invest turn — decided it (sent nothing), handed it to fresh reads,
    * or was not offered because the sweep had already moved that vault's money.
@@ -445,6 +455,15 @@ export interface KeeperStatus {
   discovery?: DiscoveryStatus;
   /** The cost cuts this process runs (src/cuts.ts). Folded in at render. */
   cuts?: CutsStatus;
+  /**
+   * The loss-carry store (SIP_SOLANA_CARRY_STORE, src/carry-store.ts): its phase,
+   * whether its table is there, the boot seed, writes and failures, and `dual`'s
+   * comparison with memory — `mismatches` 0 with `seenInBoth` above 0 is the gate
+   * to `on`. ABSENT WHILE THE STORE IS `off`, so a keeper without the variable
+   * serves the page it served before the store existed. `pendingCarries` above
+   * stays what it was: memory, which `on` keeps as a mirror of Postgres.
+   */
+  carryStore?: CarryStoreStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

@@ -32,9 +32,17 @@ describe("SIP_SOLANA_CUTS", () => {
   });
 
   it("implements the three non-money cuts of the ADR's L1b, then the money tokens built so far, in rollout order", () => {
-    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch", "explicit-send"]);
+    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "rest-skip", "invest-batch", "explicit-send"]);
     const read = readCuts("jupiter-key");
     expect("cuts" in read && [...read.cuts]).toEqual(["jupiter-key"]);
+  });
+
+  it("accepts rest-skip beside the others, and only by its exact name", () => {
+    const config = loadConfig(dry({ SIP_SOLANA_CUTS: "gpa-v2,rest-skip" }), new Redactor());
+    expect([...config.cuts]).toEqual(["gpa-v2", "rest-skip"]);
+    for (const bad of ["rest_skip", "REST-SKIP", "restskip", "rest-skip,rest-skip"]) {
+      expect(() => loadConfig(dry({ SIP_SOLANA_CUTS: bad }), new Redactor()), bad).toThrow(ConfigError);
+    }
   });
 
   it("reads a comma-separated list, spaces around tokens allowed", () => {
@@ -49,12 +57,12 @@ describe("SIP_SOLANA_CUTS", () => {
   });
 
   it("REFUSES TO START on a token this build does not implement — a money cut named early included", () => {
-    for (const bad of ["rest-skip", "lamports-filter", "JUPITER-KEY", "invest_batch", "explicit_send", "GPA-V2", "gpa_v2", "gpa-v2,", "everything"]) {
+    for (const bad of ["lamports-filter", "JUPITER-KEY", "invest_batch", "explicit_send", "rest_skip", "GPA-V2", "gpa_v2", "gpa-v2,", "everything"]) {
       const message = refusal(dry({ SIP_SOLANA_CUTS: bad }));
       expect(message, bad).toMatch(/SIP_SOLANA_CUTS entry #\d+ is not a cut this keeper implements/);
     }
     // BY POSITION AND SHAPE, NEVER BY VALUE.
-    expect(refusal(dry({ SIP_SOLANA_CUTS: "gpa-v2,rest-skip" }))).not.toContain("rest-skip");
+    expect(refusal(dry({ SIP_SOLANA_CUTS: "gpa-v2,lamports-filter" }))).not.toContain("lamports-filter");
   });
 
   it("refuses a repeated token, so removing it once is the whole rollback", () => {

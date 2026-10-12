@@ -29,6 +29,7 @@
 
 // FIRST, so every library that prints while loading prints through the redactor.
 import "../src/console-bridge.js";
+import { randomUUID } from "node:crypto";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
@@ -106,6 +107,8 @@ import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
+import { RestBook } from "../src/rest-book.js";
+import { DurableCarries, PgCarryStore, createCarryPool } from "../src/carry-store.js";
 import { KEYED_API, LITE_API, MODE_PROFIT } from "../src/program-scripts.js";
 import { measuredBase, resolvesSignerFor, roleProfile, unreachable } from "../src/role-registry.js";
 import { createVolumeBase } from "../src/volume-base.js";
@@ -437,12 +440,48 @@ const settleRetries = new Map<string, number>();
 const settleCarries: CarryBook = new Map();
 
 /**
+ * SIP_SOLANA_CARRY_STORE (src/carry-store.ts): the carries in Postgres as well
+ * (`dual`) or instead (`on`), so a restart no longer forgets one. NULL IS `off`,
+ * which is today: the book above is all there is. config.ts refuses a store
+ * without DATABASE_URL, or on a role that carries no loss, so a non-null store
+ * always has a database and a mode that uses it.
+ *
+ * ITS OWN POOL, of one connection (createCarryPool): a settle must never queue
+ * for its carry behind the read model's fire-and-forget history writes. ITS OWN
+ * WRITER ID, new every boot, so a successor tells the old container's rows from
+ * its own (on's gate).
+ */
+const carryStore: DurableCarries | null =
+  config.carryStore === "off" || config.databaseUrl === null
+    ? null
+    : new DurableCarries(
+        config.carryStore,
+        new PgCarryStore(
+          createCarryPool(config.databaseUrl, (message, fields) => log.warn(message, fields)),
+          `${profile.lockName}:${randomUUID()}`,
+        ),
+        {
+          fire: (alert) => alerter.fire(alert),
+          clear: (key) => alerter.clear(key),
+          warn: (message, fields) => log.warn(message, fields),
+        },
+      );
+
+/**
  * What the settle walks read, kept between sweeps (WalkCache, src/measure-window.ts):
  * a span that did not settle is walked again from the same frontier, and only what
  * the cache does not hold is fetched again — mostly what is new since. IN MEMORY:
  * after a restart, each window is fetched once more.
  */
 const walkCache = new WalkCache();
+
+/**
+ * The `rest-skip` cut's memos (src/rest-book.ts): which settled links rest on
+ * their own settle, so a probe that shows nothing new returns their IDLE without
+ * walking. ONLY WITH THE TOKEN; null is today, where every such link walks every
+ * sweep. IN MEMORY: after a restart each settled link walks once more.
+ */
+const restBook: RestBook | null = config.cuts.has("rest-skip") ? new RestBook() : null;
 
 /**
  * What the carry book holds, for /status. The book is keyed by LINK and an
@@ -1016,8 +1055,12 @@ if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.
  * where the last sweep's links came from, and what each cut that keeps counters
  * has done. Additive: a keeper with no cut and no L3 serves `cuts.on: []` and a
  * discovery block that says "v1, fresh", which is what it always did.
+ *
+ * AND THE LOSS-CARRY STORE'S, only when SIP_SOLANA_CARRY_STORE is dual or on:
+ * ABSENT WHILE `off`, so a keeper without the variable serves the page it served
+ * before the store existed, key for key.
  */
-function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
+function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts" | "carryStore"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
     cuts: {
@@ -1028,9 +1071,13 @@ function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
       ...(jupiterAccess === null
         ? {}
         : { jupiter: { host: new URL(jupiterAccess.baseUrl).host, keyed: jupiterAccess.apiKey !== null, ...jupiterAccess.pacer.status() } }),
+      // ABSENT, NOT NULL, WITHOUT ITS TOKEN: a keeper with no new cut serves the
+      // page it served before this one existed, key for key.
+      ...(restBook === null ? {} : { restSkip: restBook.status() }),
       ...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),
       ...(crankSender === null ? {} : { explicitSend: crankSender.status() }),
     },
+    ...(carryStore === null ? {} : { carryStore: carryStore.status() }),
   };
 }
 
@@ -1130,9 +1177,12 @@ const liveBlocker = (): string | null =>
   // UNDER THE explicit-send CUT, A DRAINING PROCESS IS NOT LIVE: after SIGTERM no
   // turn is handed a key — no settle and no buy starts — while a crank send
   // already on the wire is confirmed. Without the cut crankSender is null and
-  // this is the line it always was.
+  // this falls through to the line it always was.
   (crankSender?.draining === true ? "draining after SIGTERM: no new send starts while the last ones confirm" : null) ??
-  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName });
+  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName }) ??
+  // `on` ACTS ONLY OVER A STORE THAT IS THERE (carryStore.liveBlocker); null otherwise.
+  carryStore?.liveBlocker() ??
+  null;
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
 
@@ -1357,6 +1407,10 @@ async function sweep(): Promise<void> {
         }
       }
     }
+    // A CARRY STORE THAT WAS NOT READY, OR NOT SEEDED, IS ASKED AGAIN, every sweep
+    // until it is: an operator who runs setup-read-model, or a database that comes
+    // back, should not need a restart. Once both are done this asks nothing.
+    if (carryStore !== null) await carryStore.prepare(settleCarries);
     // For this sweep's own line and /status only. Every turn below asks
     // isLive() again before it is handed a key.
     const liveAtStart = isLive();
@@ -1650,6 +1704,8 @@ async function sweep(): Promise<void> {
     privyBook?.prune(discoveredWallets);
     // So does what the walks kept for it.
     walkCache.prune(discoveredWallets);
+    // And a memo for a link this sweep no longer discovered (rest-skip): keyed by link.
+    restBook?.prune(new Set(doorLinks.map((link) => link.managed.linkAddress.toBase58())));
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
     /**
@@ -1866,6 +1922,10 @@ async function sweep(): Promise<void> {
           settles: profile.settles,
           ...volumeTurn,
           walkCache,
+          // THE `rest-skip` CUT, only with its token (src/rest-book.ts).
+          ...(restBook === null ? {} : { restBook }),
+          // THE LOSS-CARRY STORE, only when SIP_SOLANA_CARRY_STORE is dual or on.
+          ...(carryStore === null ? {} : { carryStore }),
           // TOLD AFTER EACH SEND, never asked before one (SettleDeps.onSend).
           onSend: noteSettleSend,
         });
@@ -2363,6 +2423,15 @@ if (config.armed) {
     await claim.ensure();
     if (!claim.held) log.warn("another keeper holds the claim — running as a DRY RUN and retrying every sweep");
   }
+}
+// THE CARRY STORE BEFORE THE FIRST SWEEP: whether its table is there (in `on`,
+// the keeper does not act until it is), and every row it holds into memory, so
+// `dual` decides with what `on` wrote and /status shows the carries a deploy
+// would otherwise have dropped (src/carry-store.ts, seed).
+if (carryStore !== null) {
+  await carryStore.prepare(settleCarries);
+  const { notReady, dbOnlyAtBoot, lastProblem } = carryStore.status();
+  log.info("loss-carry store", { mode: carryStore.mode, notReady, dbOnlyAtBoot, lastProblem });
 }
 health.mode = isLive() ? "live" : "dry-run";
 health.missingLiveCondition = liveBlocker();

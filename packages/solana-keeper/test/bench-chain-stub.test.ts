@@ -32,6 +32,8 @@ import { runInvestTick } from "../src/invest-tick.js";
 import type { CarryBook } from "../src/settle-decision.js";
 import { runSettleTick } from "../src/settle-tick.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+import { WalkCache } from "../src/measure-window.js";
+import { RestBook } from "../src/rest-book.js";
 
 // THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
 // SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
@@ -499,6 +501,67 @@ describe("what a user costs the sweep, measured against the real ticks", () => {
   });
 });
 
+// THE CENSUS'S VOLUME KEEPER, ONE LINK AT A TIME (disp-measure/census, 2026-10-12):
+// 11 calls a sweep, of which each of its two settled VOLUME links paid three —
+// the probe, getSlot("finalized") and one finalized page — to stop at "only our
+// own settle". The `rest-skip` cut takes those three to one, which is the
+// census's 11 → 7. Measured here over the wire, with the volume keeper's own
+// share of the settle tick (VOLUME only) and a warm walk cache, as production
+// runs it from the second sweep on.
+describe("the rest-skip cut over the stub's wire: a link resting on its own settle", () => {
+  async function restingVolumeLink() {
+    const chain = new BenchChain({ programId, crank, skimMode: MODE_VOLUME });
+    const [fleetLink] = buildFleet({ links: 1, hotRatio: 0, hotTxCount: 0, programId, seed: 3 });
+    chain.setFleet([{ ...fleetLink!, restsOnOwnSettle: true }]);
+    const connection = stubConnection(chain);
+    const program = stubProgram(connection);
+    const links = await discoverLinks(connection, programId, accountDiscriminator("TradingLink"));
+    const vaults = await readVaults(program, links.map((link) => link.vault));
+    chain.takeCalls();
+    const walkCache = new WalkCache();
+    const turn = (restBook?: RestBook) =>
+      runSettleTick({
+        settles: [MODE_VOLUME],
+        connection,
+        program,
+        link: links[0]!,
+        vault: vaults.get(links[0]!.vault.toBase58()) ?? null,
+        attester: null,
+        walletSigner: null,
+        live: false,
+        protocolPaused: false,
+        carries: new Map() as CarryBook,
+        walkCache,
+        ...(restBook === undefined ? {} : { restBook }),
+      });
+    return { chain, turn };
+  }
+
+  it("costs the probe, getSlot and a page every warm sweep without the cut", async () => {
+    const { chain, turn } = await restingVolumeLink();
+    const first = await turn();
+    expect(first).toEqual({ outcome: "IDLE", detail: "only our own settle since slot 400000000; nothing to charge" });
+    // COLD: the anchor and our settle are fetched once.
+    expect(Object.fromEntries(chain.takeCalls())).toEqual({ getSignaturesForAddress: 2, getSlot: 1, getTransaction: 2 });
+    for (let sweep = 0; sweep < 3; sweep++) {
+      expect(await turn()).toEqual(first);
+      expect(Object.fromEntries(chain.takeCalls())).toEqual({ getSignaturesForAddress: 2, getSlot: 1 });
+    }
+  });
+
+  it("costs the probe alone once one walk has proved the rest, with the same outcome and detail", async () => {
+    const { chain, turn } = await restingVolumeLink();
+    const book = new RestBook();
+    const first = await turn(book);
+    expect(Object.fromEntries(chain.takeCalls())).toEqual({ getSignaturesForAddress: 2, getSlot: 1, getTransaction: 2 });
+    for (let sweep = 0; sweep < 3; sweep++) {
+      expect(await turn(book)).toEqual(first);
+      expect(Object.fromEntries(chain.takeCalls())).toEqual({ getSignaturesForAddress: 1 });
+    }
+    expect(book.status()).toEqual({ memos: 1, skips: 3, recorded: 1, invalidated: 0 });
+  });
+});
+
 describe("a fleet is exactly as hot as it was asked to be", () => {
   it("rounds the ratio to a whole number of links and keeps the rest idle", () => {
     const fleet = buildFleet({ links: 200, hotRatio: 0.02, hotTxCount: 12, programId, seed: 1 });
@@ -522,6 +585,16 @@ describe("a fleet is exactly as hot as it was asked to be", () => {
     expect(history.slice(1).every((tx) => tx.slot > link!.frontierSlot)).toBe(true);
     for (let i = 1; i < history.length; i++) expect(history[i]!.pre).toBe(history[i - 1]!.post);
     expect(history[history.length - 1]!.post).toBeGreaterThan(history[0]!.pre);
+  });
+
+  it("gives a link resting on its own settle the anchor and that settle alone, chained, and refuses one that is also hot", () => {
+    const [link] = buildFleet({ links: 1, hotRatio: 0, hotTxCount: 0, programId, seed: 1 });
+    const history = buildHistory({ ...link!, restsOnOwnSettle: true });
+    expect(history.map((tx) => tx.ownSettle === true)).toEqual([false, true]);
+    expect(history[1]!.slot).toBeGreaterThan(link!.frontierSlot);
+    expect(history[1]!.pre).toBe(history[0]!.post);
+    expect(history[1]!.post).toBeLessThan(history[1]!.pre);
+    expect(() => buildHistory({ ...link!, txAbove: 1, restsOnOwnSettle: true })).toThrow(/cannot both rest/);
   });
 
   it("refuses a hot ratio that is not a fraction of the fleet", () => {

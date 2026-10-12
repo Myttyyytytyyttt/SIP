@@ -225,6 +225,7 @@ describe("registry: the mode rows describe what the settle path does", () => {
       firstSlot: 300_000_600n,
       lastSlot: 300_000_900n,
       signaturesAbove: 900,
+      newestSignature: "sig-900",
       frontierReached: true,
       pagesExhausted: false,
       prefixCut: true,
