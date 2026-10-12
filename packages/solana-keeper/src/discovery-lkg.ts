@@ -34,12 +34,22 @@ import type { DiscoveryMethod, DiscoveryReport, ManagedLink } from "./discovery.
 export const DISCOVERY_STALE_ALERT_KEY = "discovery-stale";
 
 /**
- * Consecutive failed listings before it pages: 3, the streak the vault read and
- * the settle retries already use. One failed listing answered from the list is
- * weather; three in a row is an endpoint that cannot list this program, and by
- * then anybody who linked in the meantime has been invisible for three sweeps.
+ * How old the remembered list may be before a sweep that uses it pages: 10
+ * minutes, the rollout's rule for discovery-stale ([ROLLOUT] §6 row 7, ADR §6.3:
+ * warn at the first use, page when older than 10 min).
+ *
+ * BY AGE, NOT BY A STREAK OF FAILED LISTINGS. What the list costs is the links
+ * created since it was kept, and that is a matter of time, not of how many
+ * sweeps fit in it: a streak of three is three minutes at the default sweep —
+ * a page inside the very outage L3 exists to absorb quietly — and fifteen at
+ * SIP_SOLANA_SWEEP_MS=300000, where it never comes before the list expires.
+ *
+ * AT THE DEFAULT LIMIT THIS NEVER PAGES, AND THAT IS THE RULE TOO. With
+ * SIP_SOLANA_DISCOVERY_LKG_MS at its post-go 600000, a list older than 10 minutes
+ * is no longer used: the listing's own error propagates and sweep-failed pages,
+ * as it does today. Only a limit set above 10 minutes reaches this page.
  */
-export const DISCOVERY_STALE_CRITICAL_STREAK = 3;
+export const DISCOVERY_STALE_CRITICAL_AGE_MS = 10 * 60 * 1_000;
 
 /** Where a sweep's link list came from. */
 export type DiscoverySource = "fresh" | "lkg";
@@ -164,17 +174,17 @@ export class LastKnownGoodDiscovery {
 }
 
 /**
- * The alert for a sweep that ran on the last-known-good list: a warning at
- * first — it stays on the box, in the log and on /status — and critical from
- * the third failed listing in a row.
+ * The alert for a sweep that ran on the last-known-good list: a warning while
+ * the list is at most DISCOVERY_STALE_CRITICAL_AGE_MS old — it stays on the box,
+ * in the log and on /status — and critical once it is older.
  *
- * NOT CRITICAL ON THE FIRST, for vault-read's reason: the sweep that used the
- * list settled and invested everybody it knows about, from fresh reads, and one
- * refused listing from a busy provider is weather. What it cannot see is a link
- * created since the list was kept, and three sweeps of that is worth a person.
+ * NOT CRITICAL AT FIRST, for vault-read's reason: the sweep that used the list
+ * settled and invested everybody it knows about, from fresh reads, and refused
+ * listings from a busy provider are weather. What it cannot see is a link
+ * created since the list was kept, and ten minutes of that is worth a person.
  */
 export function discoveryStaleAlert(consecutiveFailures: number, lkgAgeMs: number, detail: string): Alert {
-  const critical = consecutiveFailures >= DISCOVERY_STALE_CRITICAL_STREAK;
+  const critical = lkgAgeMs > DISCOVERY_STALE_CRITICAL_AGE_MS;
   return {
     key: DISCOVERY_STALE_ALERT_KEY,
     severity: critical ? "critical" : "warn",

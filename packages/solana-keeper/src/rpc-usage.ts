@@ -58,10 +58,13 @@ export type ArchivalCredits = 1 | 10;
  *     prices side by side (creditsPerDayEstimateP1 and …P2) and the archival
  *     calls on their own, so the 10× reading is on the page whichever price is
  *     configured.
- *   * THE ONLY THING THE PRICE MOVES IS AN ESTIMATE AND AN ALERT THAT IS OFF.
- *     credit-burn fires only once the owner sets SIP_SOLANA_CREDIT_BUDGET_DAY,
- *     which is the same visit to Railway where E1's answer is set here; its
- *     message names both readings too.
+ *   * THE ONLY THING THE PRICE MOVES IS AN ESTIMATE ON /status. credit-burn
+ *     fires only once the owner sets SIP_SOLANA_CREDIT_BUDGET_DAY, and while
+ *     this default is in force it does NOT use it: it compares the HIGHER
+ *     reading against the budget (creditBurnAlert), because a budget may well
+ *     be set before E1 answers, and an early warning that assumed the cheaper
+ *     price would stay silent at twice the budget. Its message names both
+ *     readings too.
  *   * A WRONG 10 IS ALSO A WRONG NUMBER. Ten times the bill on /status is the
  *     kind of figure that gets a cut prioritised, or credits bought, for a
  *     cost that may not exist.
@@ -557,26 +560,44 @@ export const CREDIT_BURN_MIN_OBSERVED_MS = 60 * 60 * 1_000;
  * ONE KEY, TWO SEVERITIES. The alerter lets an escalation from warn to critical
  * through on the same key, so a burn that keeps rising pages without a clear
  * in between.
+ *
+ * WHILE THE ARCHIVAL PRICE IS UNSETTLED, THE DEARER READING. With
+ * SIP_SOLANA_ARCHIVAL_CREDITS unset (archivalCreditsSource "default", E1 not
+ * answered), the estimate compared is the larger of P1 and P2 — the rollout's
+ * "10 until the Admin API answers", for this alert alone. /status keeps its
+ * headline at the configured price (DEFAULT_ARCHIVAL_CREDITS says why). For
+ * both of today's keepers together the two readings are about 69k and 147k a
+ * day (ADR §2.1): a budget sized between them, set before E1 answers, would
+ * otherwise stay quiet while the bill could be twice the cheaper reading. Once
+ * the variable is set, the price it names is the one compared.
  */
 export function creditBurnAlert(rpc: RpcUsageStatus): { readonly fire: Alert | null; readonly clear: boolean } {
   const budget = rpc.budgetPerDay;
-  const estimate = rpc.creditsPerDayEstimate;
+  const unsettled = rpc.archivalCreditsSource === "default";
+  const estimate =
+    unsettled && rpc.creditsPerDayEstimate !== null
+      ? Math.max(rpc.creditsPerDayEstimate, rpc.creditsPerDayEstimateP1 ?? 0, rpc.creditsPerDayEstimateP2 ?? 0)
+      : rpc.creditsPerDayEstimate;
   if (budget === null || estimate === null || rpc.observedMs < CREDIT_BURN_MIN_OBSERVED_MS) return { fire: null, clear: false };
   if (estimate < budget * CREDIT_BURN_WARN_FRACTION) return { fire: null, clear: true };
   const critical = estimate >= budget;
   const hours = Math.round((rpc.observedMs / 3_600_000) * 10) / 10;
+  const pct = Math.round((estimate / budget) * 1_000) / 10;
   const both =
     rpc.creditsPerDayEstimateP1 === null || rpc.creditsPerDayEstimateP2 === null
       ? ""
       : ` At archival = 1 it is ${rpc.creditsPerDayEstimateP1}/day, at archival = 10 ${rpc.creditsPerDayEstimateP2}/day ` +
-        `(this keeper prices archival at ${rpc.archivalCredits}, ${rpc.archivalCreditsSource === "env" ? "as configured" : "by default: E1 not answered"}).`;
+        (unsettled
+          ? "(the price is not settled — E1 not answered — so this alert compares the higher reading; set " +
+            "SIP_SOLANA_ARCHIVAL_CREDITS once it is)."
+          : `(this keeper prices archival at ${rpc.archivalCredits}, as configured).`);
   return {
     fire: {
       key: CREDIT_BURN_ALERT_KEY,
       severity: critical ? "critical" : "warn",
       title: critical ? "This keeper is spending more Helius credits than its daily budget" : "This keeper is close to its daily Helius credit budget",
       detail:
-        `About ${estimate} credits a day against a budget of ${budget} (${rpc.projectedMonthPct ?? "?"} %), ` +
+        `About ${estimate} credits a day against a budget of ${budget} (${pct} %), ` +
         `estimated from the last ${hours} h.${both} First check /status.doorbell.trusted and the webhook's failingSince ` +
         "(a deaf doorbell makes every sweep a full pass); then raise SIP_SOLANA_SWEEP_MS on this service " +
         "(120000–300000 cuts the burn 2–5×, and settles start up to that much later). The budget is this service's " +

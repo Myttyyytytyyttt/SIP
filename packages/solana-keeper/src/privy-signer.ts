@@ -83,6 +83,45 @@ export interface SolanaWalletSubmitter {
    * signature. Refuses anything but assertSettleShape's pair, sending nothing.
    */
   submit(transaction: Transaction, options: SolanaSubmitOptions): Promise<string>;
+  /**
+   * Asks, right before a live settle is sent, whether the wallet still seats the
+   * keeper's signer as createPrivySolanaSigner requires. Resolves when it does;
+   * throws SeatWithdrawnError when it no longer does, and then nothing is sent.
+   *
+   * ONLY UNDER THE `privy-address` CUT (confirmedSubmitter,
+   * src/privy-address-book.ts), where the record a turn resolved its signer from
+   * can be 30 minutes old. Without the cut it is absent: the record is this
+   * sweep's own listing, and settle-tick.ts sends exactly as it always did.
+   */
+  readonly confirmSeat?: () => Promise<void>;
+}
+
+/**
+ * The wallet a turn resolved a signer for no longer seats that signer as the
+ * keeper requires — or is no longer a Privy wallet in this app — by Privy's own
+ * answer, read right before the send (SolanaWalletSubmitter.confirmSeat).
+ *
+ * NOT A FAILED SETTLE. It is a change made to the wallet outside the keeper —
+ * most often its owner's Remove SaverFi permission on the web, or a seat added
+ * without the keeper's policy — and the turn reports it as the NO_SIGNER the
+ * next sweep would report, never as a send Privy refuses and settleAlert pages
+ * as "A settlement failed".
+ */
+export class SeatWithdrawnError extends Error {
+  override readonly name = "SeatWithdrawnError";
+
+  constructor(
+    readonly wallet: string,
+    /** What Privy answered: no wallet at that address in this app, or a wallet whose seats no longer sign for the keeper. */
+    readonly found: "NOT_A_PRIVY_WALLET" | "NOT_SIGNABLE",
+  ) {
+    super(
+      found === "NOT_A_PRIVY_WALLET"
+        ? "Privy no longer knows this wallet in this app (asked right before the send); nothing was sent"
+        : "the wallet's seat no longer signs for the keeper — removed by its owner, or no longer bounded by the keeper's " +
+            "policy (asked right before the send); nothing was sent, and the next sweep's route says which",
+    );
+  }
 }
 
 /**

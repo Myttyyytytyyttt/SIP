@@ -10,7 +10,7 @@ import { PublicKey } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 import {
   DISCOVERY_STALE_ALERT_KEY,
-  DISCOVERY_STALE_CRITICAL_STREAK,
+  DISCOVERY_STALE_CRITICAL_AGE_MS,
   LastKnownGoodDiscovery,
   discoveryStaleAlert,
 } from "../src/discovery-lkg.js";
@@ -123,14 +123,23 @@ describe("L3 on", () => {
 });
 
 describe("discovery-stale", () => {
-  it("warns — on the box only — for the first two failed listings, and pages from the third", () => {
-    expect(DISCOVERY_STALE_CRITICAL_STREAK).toBe(3);
+  // THE ROLLOUT'S RULE ([ROLLOUT] §6 row 7, ADR §6.3): warn at the first use, page when the list is older than 10 min.
+  it("warns — on the box only — while the list is at most 10 minutes old, and pages once it is older", () => {
+    expect(DISCOVERY_STALE_CRITICAL_AGE_MS).toBe(600_000);
     expect(discoveryStaleAlert(1, 60_000, "x").severity).toBe("warn");
-    expect(discoveryStaleAlert(2, 120_000, "x").severity).toBe("warn");
-    const paged = discoveryStaleAlert(3, 180_000, "HTTP 503");
-    expect(paged).toMatchObject({ key: DISCOVERY_STALE_ALERT_KEY, severity: "critical", context: { sweeps: 3, lkgAgeMs: 180_000 } });
-    expect(paged.detail).toContain("3 listings in a row failed");
-    expect(paged.detail).toContain("180 s old");
+    expect(discoveryStaleAlert(10, DISCOVERY_STALE_CRITICAL_AGE_MS, "x").severity).toBe("warn");
+    const paged = discoveryStaleAlert(11, DISCOVERY_STALE_CRITICAL_AGE_MS + 60_000, "HTTP 503");
+    expect(paged).toMatchObject({ key: DISCOVERY_STALE_ALERT_KEY, severity: "critical", context: { sweeps: 11, lkgAgeMs: 660_000 } });
+    expect(paged.detail).toContain("11 listings in a row failed");
+    expect(paged.detail).toContain("660 s old");
     expect(paged.detail).toContain("HTTP 503");
+  });
+
+  it("does not page three minutes into an outage at the default sweep, nor wait for a streak a slow sweep never reaches", () => {
+    // 60 s sweeps, the 09-27 "overloaded" case: three failed listings on a list three minutes old stay a warning.
+    expect(discoveryStaleAlert(3, 180_000, "overloaded").severity).toBe("warn");
+    // 330 s sweeps under a limit above 10 minutes: the second failed listing runs on a list 11 minutes old, and pages.
+    // (At the post-go limit of 10 minutes such a list is not used at all: the listing's error propagates, sweep-failed.)
+    expect(discoveryStaleAlert(2, 11 * 60_000, "overloaded").severity).toBe("critical");
   });
 });

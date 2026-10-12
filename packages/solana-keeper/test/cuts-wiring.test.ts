@@ -67,9 +67,10 @@ describe("privy-address", () => {
     expect(sweepBody).toContain("const settlesThisVault = vaults === null || resolvesSignerFor(profile, vaults.get(vaultAddr)?.skimMode);");
   });
 
-  it("fails a wallet it could not ask as today's failed lookup does, and forgets one whose send failed", () => {
+  it("fails a wallet it could not ask as today's failed lookup does, and asks about the seat again before every send", () => {
     expect(sweepBody).toMatch(/if \(privyConfig !== null && lookupFailed !== undefined\) \{[\s\S]{0,200}if \(walletSigner === null\) route = "none \(privy lookup failed\)";/);
-    expect(sweepBody).toContain("walletSigner = privyBook === null ? resolution.signer : forgetOnFailure(resolution.signer, privyBook);");
+    // WITHOUT THE CUT, THE SIGNER AS IT ALWAYS WAS: no confirmSeat, so settle-tick sends with no read before it.
+    expect(sweepBody).toContain("walletSigner = privyBook === null ? resolution.signer : confirmedSubmitter(resolution.signer, privyBook);");
     expect(sweepBody).toContain("privyBook?.prune(discoveredWallets);");
   });
 });

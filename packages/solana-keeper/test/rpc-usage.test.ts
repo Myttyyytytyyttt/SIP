@@ -421,6 +421,28 @@ describe("credit-burn", () => {
     expect(page?.severity).toBe("critical");
   });
 
+  /** A meter that has watched `hours` and made `archivalPerHour` archival calls in each, under `over`'s price. */
+  function archivalBurning(over: Partial<RpcUsageOptions>, archivalPerHour: number, hours: number): ReturnType<RpcUsage["report"]> {
+    const { usage } = meter(over);
+    for (let i = 0; i < archivalPerHour * hours; i++) usage.request(JSON.stringify({ method: "getSignaturesForAddress" }));
+    return usage.report(T0 + hours * 3_600_000);
+  }
+
+  it("compares the DEARER archival reading while the price is the unsettled default, and the configured one once set", () => {
+    // 10 archival calls an hour: 240 credits a day at archival = 1, 2,400 at archival = 10.
+    const unsettled = archivalBurning({ budgetPerDay: 1_000 }, 10, 2);
+    expect(unsettled).toMatchObject({ archivalCreditsSource: "default", creditsPerDayEstimateP1: 240, creditsPerDayEstimateP2: 2_400 });
+    expect(unsettled.creditsPerDayEstimate).toBe(240); // the /status headline stays at the default price
+    const page = creditBurnAlert(unsettled).fire;
+    expect(page).toMatchObject({ key: CREDIT_BURN_ALERT_KEY, severity: "critical" });
+    expect(page?.detail).toContain("About 2400 credits a day against a budget of 1000 (240 %)");
+    expect(page?.detail).toContain("compares the higher reading");
+
+    // E1 ANSWERED 1, AND THE OWNER SAID SO: 24 % of the budget, cleared.
+    const settled = archivalBurning({ budgetPerDay: 1_000, archivalCredits: 1, archivalCreditsSource: "env" }, 10, 2);
+    expect(creditBurnAlert(settled)).toEqual({ fire: null, clear: true });
+  });
+
   it("names both readings of the archival price and the levers, in its detail", () => {
     const detail = creditBurnAlert(burning(2_000, 100, 2)).fire?.detail ?? "";
     expect(detail).toContain("archival = 1");

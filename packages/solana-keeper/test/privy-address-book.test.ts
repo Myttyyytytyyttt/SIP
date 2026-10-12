@@ -13,11 +13,12 @@ import {
   PRIVY_SIGNABLE_RECHECK_MS,
   PRIVY_UNSIGNABLE_RECHECK_MS,
   PrivyAddressBook,
-  forgetOnFailure,
+  confirmedSubmitter,
 } from "../src/privy-address-book.js";
 import type { SignerSeat } from "../src/privy-policy.js";
 import {
   PRIVY_API_URL,
+  SeatWithdrawnError,
   createPrivySolanaSigner,
   privyAddressSource,
   seatsSignable,
@@ -168,17 +169,16 @@ describe("the book, sweep after sweep", () => {
         throw Object.assign(new Error("policy refused"), { status: 400 });
       },
     };
-    const guarded = forgetOnFailure(refusing, book);
+    const guarded = confirmedSubmitter(refusing, book);
     await expect(guarded.submit(new Transaction(), { idempotencyKey: "k" })).rejects.toThrow("policy refused");
     expect(book.status().forgotten).toBe(1);
     await book.prepare([wallet.toBase58()], 1_000);
     expect(privy.asked.lookups).toEqual([wallet.toBase58()]);
 
-    const fine = forgetOnFailure({ address: wallet, submit: async () => "sig" }, book);
+    const fine = confirmedSubmitter({ address: wallet, submit: async () => "sig" }, book);
     await expect(fine.submit(new Transaction(), { idempotencyKey: "k" })).resolves.toBe("sig");
     expect(book.status().forgotten).toBe(1);
   });
-
   it("keeps only the wallets the sweep discovered", async () => {
     const linked = address();
     const app = new Map([[linked, entry("l")]]);
@@ -188,6 +188,89 @@ describe("the book, sweep after sweep", () => {
     expect(book.status().entries).toBe(11);
     book.prune(new Set([linked]));
     expect(book.status().entries).toBe(1);
+  });
+});
+
+describe("the seat, asked again right before a send (confirmedSubmitter)", () => {
+  /** A wallet the book warmed as bounded at 0, and a submitter that records whether it was ever reached. */
+  async function warmed() {
+    const wallet = Keypair.generate().publicKey;
+    const app = new Map([[wallet.toBase58(), entry("w", bounded)]]);
+    const privy = fakePrivy(app);
+    const book = new PrivyAddressBook(privy.source, { signable });
+    await book.prepare([wallet.toBase58()], 0);
+    expect(privy.asked.lookups).toEqual([]);
+    const reached: string[] = [];
+    // WHAT PRIVY ANSWERS A SEND THROUGH A SEAT THAT IS GONE: refused, with no program error in it.
+    const inner: SolanaWalletSubmitter = {
+      address: wallet,
+      submit: async () => {
+        reached.push("submit");
+        throw Object.assign(new Error("403 signer is not on this wallet"), { status: 403 });
+      },
+    };
+    return { wallet, app, privy, book, reached, signer: confirmedSubmitter(inner, book, () => 10 * 60_000) };
+  }
+
+  it("lets the send go when the seat is still there, asking Privy once by address", async () => {
+    const { wallet, privy, book, signer } = await warmed();
+    await expect(signer.confirmSeat!()).resolves.toBeUndefined();
+    expect(privy.asked.lookups).toEqual([wallet.toBase58()]);
+    expect(privy.asked.listings).toBe(1);
+    expect(book.status()).toMatchObject({ lookups: 1, withdrawnAtSend: 0 });
+  });
+
+  // THE MAJOR FINDING: the book served this record for 30 minutes after its owner pressed Remove SaverFi
+  // permission, and the first notice was the send itself — FAILED, paged critical, latched.
+  it("stops the send of a wallet whose owner removed the keeper's seat since the book last asked", async () => {
+    const { wallet, app, book, reached, signer } = await warmed();
+    app.set(wallet.toBase58(), entry("w", [])); // removeSigners, from the web
+    const error = await signer.confirmSeat!().catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(SeatWithdrawnError);
+    expect(error).toMatchObject({ wallet: wallet.toBase58(), found: "NOT_SIGNABLE" });
+    expect(reached).toEqual([]);
+    expect(book.status().withdrawnAtSend).toBe(1);
+    // THE ANSWER IS KEPT: the next sweep resolves the wallet from it, unsignable, with no request of its own.
+    const next = await book.prepare([wallet.toBase58()], 10 * 60_000 + 1_000);
+    expect(signable(next.index.get(wallet.toBase58())!)).toBe(false);
+  });
+
+  it("stops the send of a wallet Privy no longer knows, as NOT_A_PRIVY_WALLET", async () => {
+    const { wallet, app, reached, signer } = await warmed();
+    app.delete(wallet.toBase58()); // archived: 404
+    await expect(signer.confirmSeat!()).rejects.toMatchObject({ name: "SeatWithdrawnError", found: "NOT_A_PRIVY_WALLET" });
+    expect(reached).toEqual([]);
+  });
+
+  // THE MINOR FINDING: a second keeper seat added WITHOUT the policy makes the wallet NOT_BOUNDED. Privy does not
+  // refuse a send through it, so nothing used to make the book ask, and seat-unbounded paged up to 30 minutes late.
+  it("stops the send through a seat that lost its bound, and the next sweep resolves SEAT_NOT_BOUNDED, which pages", async () => {
+    const { wallet, app, book, reached, signer } = await warmed();
+    app.set(wallet.toBase58(), entry("w", [...bounded, { signerId: SIGNER_ID, overridePolicyIds: [] }]));
+    await expect(signer.confirmSeat!()).rejects.toBeInstanceOf(SeatWithdrawnError);
+    expect(reached).toEqual([]);
+    const config: PrivySolanaConfig = {
+      appId: "app",
+      appSecret: new Secret("privy-app-secret-NeverSent-0011", "privyAppSecret"),
+      authorizationKey: new Secret("unused", "privyAuthorizationKey"),
+      fetch: async () => {
+        throw new Error("no request may leave a resolution handed an index");
+      },
+    };
+    // ONE SWEEP LATER, long before the 30-minute recheck: the book serves what the send just read.
+    const next = await book.prepare([wallet.toBase58()], 10 * 60_000 + 60_000);
+    const resolution = await createPrivySolanaSigner(config, wallet, SIGNER_ID, next.index, POLICY_ID);
+    expect(resolution.outcome).toBe("SEAT_NOT_BOUNDED"); // keeper.mts fires seat-unbounded:<wallet> on exactly this
+  });
+
+  it("lets the send go when Privy cannot be asked, and drops the record so the next sweep asks again", async () => {
+    const { wallet, privy, book, signer } = await warmed();
+    privy.failLookup(() => true);
+    await expect(signer.confirmSeat!()).resolves.toBeUndefined();
+    expect(book.status()).toMatchObject({ lookupFailures: 1, withdrawnAtSend: 0, entries: 0 });
+    privy.failLookup(null);
+    await book.prepare([wallet.toBase58()], 10 * 60_000 + 1_000);
+    expect(privy.asked.lookups).toEqual([wallet.toBase58(), wallet.toBase58()]);
   });
 });
 

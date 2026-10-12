@@ -25,22 +25,42 @@
 //   * SIGNABLE every PRIVY_SIGNABLE_RECHECK_MS (30 minutes), each on its own
 //     phase so a thousand wallets warmed in one sweep are not all due in one
 //     later sweep (the post-boot stagger of ADR RT-19). A signable record goes
-//     stale only by its owner REMOVING or UNBOUNDING the seat. Privy enforces
-//     the wallet's policy on every send whatever this book says, so the keeper
-//     cannot sign anything it could not sign before; what waits up to 30 minutes
-//     is the keeper NOTICING — the "none (signer not granted)" route and, for a
-//     seat that loses its policy, the seat-unbounded page. That is the trade.
+//     stale only by its owner REMOVING or UNBOUNDING the seat.
+//   * AND RIGHT BEFORE EVERY SEND (confirmedSubmitter). A record served from the
+//     book can be 30 minutes old, and a send on it used to be the keeper's first
+//     notice of a removed seat: Privy refused it, the turn was FAILED, and
+//     settleAlert paged "A settlement failed" — critical, and standing until a
+//     settle landed again — for an owner pressing Remove SaverFi permission on
+//     the web. Without the cut the same press is a NO_SIGNER warning at the next
+//     sweep. So a live settle asks Privy about its wallet once more before it
+//     leaves: a seat gone or unbounded since is that same NO_SIGNER, nothing is
+//     sent, and the answer is kept, so the next sweep resolves the wallet from it
+//     — a seat that lost its policy is SEAT_NOT_BOUNDED there and pages
+//     seat-unbounded, a sweep after the send it stopped.
+//     ONE READ PER SEND, NOT PER SWEEP. A link settles well under once a day
+//     (0.22–0.8 measured, disp-measure RECHECK D3), each settle one send plus
+//     its retries. Reading every turned wallet's seats every sweep — what
+//     caching the wallet id alone would mean — is N reads a sweep, and at N ≤ 50
+//     the safety lane alone turns every link every sweep (SAFETY_MIN_PER_SWEEP,
+//     src/doorbell.ts): more requests than today's one listing page, against the
+//     2,880 list requests a day the cut is meant to save (COST_MODEL §7).
 //   * AND AT ONCE AFTER A FAILED SEND. A submit Privy refuses forgets the
-//     wallet's record (forgetOnFailure), so the next turn asks again: a seat
-//     that went away is discovered by the first send that needed it, not 30
-//     minutes later.
+//     wallet's record, so the next turn asks again.
+//
+// WHAT STILL WAITS UP TO 30 MINUTES is the keeper noticing a change on a wallet
+// it sends nothing for: the route /status shows and, for a seat that loses its
+// policy, the seat-unbounded page. Nothing is signed for such a wallet in that
+// time — nothing is sent without asking first — and Privy enforces the wallet's
+// policy on every send whatever this book says. That is the trade.
 //
 // A FAILED LOOKUP FAILS THAT WALLET'S RESOLUTION, as a failed listing and a
 // failed full scan do today: the route reads "none (privy lookup failed)" and
 // the wallet is not signed for this sweep. An expired record is NOT served in
 // its place: an answer the book could not refresh is not one it may vouch for.
+// (The read right before a send is the exception, and confirmedSubmitter says
+// why: the record it would replace is one the sweep already resolved from.)
 
-import type { PrivyAddressSource, PrivyWalletEntry, SolanaWalletSubmitter } from "./privy-signer.js";
+import { SeatWithdrawnError, type PrivyAddressSource, type PrivyWalletEntry, type SolanaWalletSubmitter } from "./privy-signer.js";
 
 /** A signable record is asked again after this long: 30 minutes, the doorbell's own safety bound. */
 export const PRIVY_SIGNABLE_RECHECK_MS = 30 * 60 * 1_000;
@@ -83,6 +103,12 @@ export interface PrivyAddressBookStatus {
   readonly cacheHits: number;
   /** Records dropped after a failed send. */
   readonly forgotten: number;
+  /**
+   * Sends stopped because the read right before them found the seat gone or
+   * unbounded: each one a turn reported NO_SIGNER instead of a refused send.
+   * Above 0 means a record the book served was stale when it was used.
+   */
+  readonly withdrawnAtSend: number;
   readonly entries: number;
 }
 
@@ -118,6 +144,7 @@ export class PrivyAddressBook {
   private lookupFailures = 0;
   private cacheHits = 0;
   private forgotten = 0;
+  private withdrawnAtSend = 0;
   private readonly signableRecheckMs: number;
   private readonly unsignableRecheckMs: number;
   private readonly concurrency: number;
@@ -131,8 +158,33 @@ export class PrivyAddressBook {
     this.concurrency = Math.max(1, options.concurrency ?? PRIVY_LOOKUP_CONCURRENCY);
   }
 
+  /** Whether a record would resolve to a signer: the options' rule, and never for an address that is not a Privy wallet. */
+  signable(entry: PrivyWalletEntry | null): boolean {
+    return entry !== null && this.options.signable(entry);
+  }
+
   private recheckFor(entry: PrivyWalletEntry | null): number {
-    return entry !== null && this.options.signable(entry) ? this.signableRecheckMs : this.unsignableRecheckMs;
+    return this.signable(entry) ? this.signableRecheckMs : this.unsignableRecheckMs;
+  }
+
+  /**
+   * Asks Privy about ONE wallet now, by address, and keeps the answer as the
+   * book keeps any lookup's: prepare's due records, and the read a send makes
+   * right before it leaves (confirmedSubmitter). THROWS WHAT THE LOOKUP THREW,
+   * after dropping the record it held — an answer the book could not refresh is
+   * not one it vouches for again.
+   */
+  async refresh(address: string, now: number): Promise<PrivyWalletEntry | null> {
+    this.lookups += 1;
+    try {
+      const entry = await this.source.byAddress(address);
+      this.held.set(address, { entry, dueAt: now + this.recheckFor(entry) });
+      return entry;
+    } catch (error) {
+      this.lookupFailures += 1;
+      this.held.delete(address);
+      throw error;
+    }
   }
 
   /**
@@ -182,15 +234,11 @@ export class PrivyAddressBook {
       while (next < due.length) {
         const address = due[next]!;
         next += 1;
-        this.lookups += 1;
         try {
-          const entry = await this.source.byAddress(address);
-          this.held.set(address, { entry, dueAt: now + this.recheckFor(entry) });
+          await this.refresh(address, now);
         } catch (error) {
-          this.lookupFailures += 1;
-          // NOT SERVED STALE: the record it held is dropped with the failure,
-          // so the next sweep asks again rather than trusting an old answer.
-          this.held.delete(address);
+          // NOT SERVED STALE: refresh dropped the record it held with the
+          // failure, so the next sweep asks again rather than trusting an old answer.
           failed.set(address, reasonOf(error));
         }
       }
@@ -210,6 +258,11 @@ export class PrivyAddressBook {
     if (this.held.delete(address)) this.forgotten += 1;
   }
 
+  /** One send stopped by the read right before it (confirmedSubmitter): counted for /status. */
+  noteWithdrawnAtSend(): void {
+    this.withdrawnAtSend += 1;
+  }
+
   /**
    * Keeps only the records of `wallets` — the ones this sweep discovered. A
    * warm-up keeps every wallet in the app; nobody unlinked is worth a row.
@@ -227,28 +280,58 @@ export class PrivyAddressBook {
       lookupFailures: this.lookupFailures,
       cacheHits: this.cacheHits,
       forgotten: this.forgotten,
+      withdrawnAtSend: this.withdrawnAtSend,
       entries: this.held.size,
     };
   }
 }
 
 /**
- * The same submitter, except that a send that throws first forgets the
- * wallet's record in `book`.
+ * The same submitter, with the book's two checks around a send: the wallet's
+ * seat is asked about right before it (confirmSeat), and a send that throws
+ * forgets the wallet's record.
+ *
+ * CONFIRMSEAT, called by settle-tick.ts once a live settle is built and shape-
+ * checked, before the carry is recorded and before anything leaves. One read by
+ * address (PrivyAddressBook.refresh), whose answer the book keeps:
+ *   * STILL SIGNABLE — resolves, and the send goes as it always did;
+ *   * GONE OR UNBOUNDED, or no longer a Privy wallet — throws SeatWithdrawnError,
+ *     which the turn reports NO_SIGNER: nothing sent, nothing paged critical;
+ *   * COULD NOT ASK — resolves, and the send goes on the record the sweep
+ *     resolved, as every send went before this read existed. Privy enforces the
+ *     wallet's policy on it all the same, and the record is dropped, so the next
+ *     sweep asks again. A Privy that cannot answer a read does not also stop a
+ *     settle it may still accept: that would be a new way for money not to move,
+ *     and a NO_SIGNER the cut-off keeper would never have reported.
  *
  * NOTHING ELSE CHANGES: the shape check, the idempotency key and the one
- * attempt are the signer's own, and the error propagates untouched to the settle
- * turn that will report it. What this adds is that the NEXT turn asks Privy
- * about the wallet again instead of trusting a record up to 30 minutes old.
+ * attempt are the signer's own, and a send's error propagates untouched to the
+ * settle turn that will report it.
  */
-export function forgetOnFailure(signer: SolanaWalletSubmitter, book: PrivyAddressBook): SolanaWalletSubmitter {
+export function confirmedSubmitter(
+  signer: SolanaWalletSubmitter,
+  book: PrivyAddressBook,
+  clock: () => number = () => Date.now(),
+): SolanaWalletSubmitter {
+  const address = signer.address.toBase58();
   return {
     address: signer.address,
+    async confirmSeat() {
+      let entry: PrivyWalletEntry | null;
+      try {
+        entry = await book.refresh(address, clock());
+      } catch {
+        return;
+      }
+      if (book.signable(entry)) return;
+      book.noteWithdrawnAtSend();
+      throw new SeatWithdrawnError(address, entry === null ? "NOT_A_PRIVY_WALLET" : "NOT_SIGNABLE");
+    },
     async submit(transaction, options) {
       try {
         return await signer.submit(transaction, options);
       } catch (error) {
-        book.forget(signer.address.toBase58());
+        book.forget(address);
         throw error;
       }
     },

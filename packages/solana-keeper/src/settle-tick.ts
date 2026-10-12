@@ -43,7 +43,7 @@ import { idl } from "./idl.js";
 import { connectionReader, measureSince, readTransaction, type WalkCache } from "./measure-window.js";
 import type { VolumeProbe } from "./measure-volume.js";
 import { method } from "./methods.js";
-import { assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
+import { SeatWithdrawnError, assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
 import {
   attestationInputs,
@@ -582,6 +582,23 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     assertSettleShape(tx, program.programId, link.wallet);
   } catch (error) {
     return { outcome: "FAILED", detail: error instanceof Error ? error.message : String(error), ...carried };
+  }
+
+  // THE SEAT IS ASKED ABOUT BEFORE THE SEND, when the signer can be asked
+  // (SolanaWalletSubmitter.confirmSeat: only under the `privy-address` cut, whose
+  // records can be 30 minutes old). A seat its owner removed or unbounded since
+  // is the NO_SIGNER the next sweep would report — not a send Privy refuses,
+  // which is FAILED and pages "A settlement failed" for the owner's own press of
+  // Remove SaverFi permission. Nothing is recorded and nothing is told: nothing
+  // leaves. Any other throw is a defect in the check and propagates, as a turn
+  // that threw.
+  if (!(walletSigner instanceof Keypair) && walletSigner.confirmSeat !== undefined) {
+    try {
+      await walletSigner.confirmSeat();
+    } catch (error) {
+      if (!(error instanceof SeatWithdrawnError)) throw error;
+      return { outcome: "NO_SIGNER", detail: `${noSignerDetail(link.wallet)}. ${error.message}`, ...carried };
+    }
   }
 
   // THE CARRY IS RECORDED BEFORE THE SEND, NEVER AFTER IT. A send can throw, or go

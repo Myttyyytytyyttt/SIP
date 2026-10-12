@@ -79,7 +79,7 @@ import {
   unreadableKeyVerdict,
   type AuthorizationKeyVerdict,
 } from "../src/privy-authorization-key.js";
-import { PrivyAddressBook, forgetOnFailure } from "../src/privy-address-book.js";
+import { PrivyAddressBook, confirmedSubmitter } from "../src/privy-address-book.js";
 import {
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
@@ -1335,8 +1335,8 @@ async function sweep(): Promise<void> {
           consecutiveFailures: found.consecutiveFailures,
           detail,
         });
-        // WARN, THEN CRITICAL FROM THE THIRD IN A ROW: an escalation breaks
-        // through the alerter's dedupe on its own (src/alerts.ts).
+        // WARN, THEN CRITICAL ONCE THE LIST IS OLDER THAN 10 MINUTES: an
+        // escalation breaks through the alerter's dedupe on its own (src/alerts.ts).
         alerter.fire(discoveryStaleAlert(found.consecutiveFailures, found.lkgAgeMs ?? 0, detail));
       } else {
         alerter.clear(DISCOVERY_STALE_ALERT_KEY);
@@ -1659,9 +1659,10 @@ async function sweep(): Promise<void> {
                 alerter.clear(`seat-unbounded:${wallet}`);
               }
               if (resolution.outcome === "SIGNER") {
-                // A SEND PRIVY REFUSES MAKES THE BOOK ASK AGAIN next turn
-                // (privy-address); without the cut, the signer as it always was.
-                walletSigner = privyBook === null ? resolution.signer : forgetOnFailure(resolution.signer, privyBook);
+                // UNDER privy-address THE SEAT IS ASKED ABOUT AGAIN RIGHT BEFORE A
+                // SEND, and a send Privy refuses makes the book ask again next turn
+                // (confirmedSubmitter); without the cut, the signer as it always was.
+                walletSigner = privyBook === null ? resolution.signer : confirmedSubmitter(resolution.signer, privyBook);
                 route = "privy";
               } else if (walletSigner === null) {
                 // EVERY REASON STARTS WITH "none": the signing summary below

@@ -32,11 +32,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { VaultState } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
+import { PrivyAddressBook, confirmedSubmitter } from "../src/privy-address-book.js";
+import type { SignerSeat } from "../src/privy-policy.js";
+import { assertSettleShape, seatsSignable, type PrivyWalletEntry, type SolanaWalletSubmitter } from "../src/privy-signer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION, WalkCache } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
 import { KEEPER_ROLES, rolesSettling } from "../src/role-registry.js";
-import { attestationInputs, keeperModes, type CarryBook, type LossCarry } from "../src/settle-decision.js";
+import { attestationInputs, keeperModes, settleAlert, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult, type SettleSend } from "../src/settle-tick.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
@@ -671,6 +673,65 @@ describe("a send that threw, or never confirmed", () => {
     expect(result).toMatchObject({ outcome: "SETTLED", settledLamports: BigInt(PAID), signature: SIGNATURE });
     expect(polls).toBe(4);
     expect(c.calls).not.toContain("getAccountInfoAndContext");
+  });
+});
+
+describe("under the privy-address cut, the seat asked again before the send", () => {
+  // THE BOOK SERVES A SIGNABLE RECORD FOR UP TO 30 MINUTES (src/privy-address-book.ts). Its owner pressing Remove
+  // SaverFi permission in that time used to reach the keeper as this send, refused: FAILED, "A settlement failed"
+  // paged critical and standing until a settle lands again — where the cut-off keeper says NO_SIGNER, a warning.
+  const SIGNER_ID = "keeperQuorum000000000001";
+  const POLICY_ID = "keeperPolicy00000000001";
+  const bounded: readonly SignerSeat[] = [{ signerId: SIGNER_ID, overridePolicyIds: [POLICY_ID] }];
+
+  /** The book, warmed with this test's wallet seated and bounded; `app` is what Privy answers from then on. */
+  async function warmedBook() {
+    const app = new Map<string, PrivyWalletEntry>([[link.wallet.toBase58(), { walletId: "w", seats: bounded }]]);
+    const book = new PrivyAddressBook(
+      { listAll: async () => new Map(app), byAddress: async (address) => app.get(address) ?? null },
+      { signable: (entry) => seatsSignable(entry.seats, SIGNER_ID, POLICY_ID) },
+    );
+    await book.prepare([link.wallet.toBase58()], 0);
+    return { app, book };
+  }
+
+  /** Privy's answer to a send through a seat that is not there: a 403 with no program error in it. */
+  const refusedBySeat = (reached: string[]): SolanaWalletSubmitter => ({
+    address: link.wallet,
+    submit: async () => {
+      reached.push("submit");
+      throw Object.assign(new Error("403 the signer is not on this wallet"), { status: 403 });
+    },
+  });
+
+  it("is NO_SIGNER, a warning, when the owner removed the seat since the book asked: nothing sent, nothing paged critical", async () => {
+    const { app, book } = await warmedBook();
+    app.set(link.wallet.toBase58(), { walletId: "w", seats: [] }); // removeSigners, from the web
+    const reached: string[] = [];
+    const sends: SettleSend[] = [];
+    const carries: CarryBook = new Map();
+    const c = chain({ getAccountInfoAndContext: linkRead(link.settlementNonce) });
+    const result = await runSettleTick(
+      c.deps({ carries, walletSigner: confirmedSubmitter(refusedBySeat(reached), book), onSend: (send) => sends.push(send) }),
+    );
+    expect(result.outcome).toBe("NO_SIGNER");
+    expect(result.detail).toContain("asked right before the send");
+    expect(reached).toEqual([]);
+    expect(sends).toEqual([]);
+    expect(carries.size).toBe(0);
+    const rule = settleAlert(result.outcome, { wallet: link.wallet.toBase58(), vault: link.vault.toBase58() }, result.detail);
+    expect(rule.fire).toMatchObject({ key: `no-signer:${link.wallet.toBase58()}`, severity: "warn" });
+    expect(book.status().withdrawnAtSend).toBe(1);
+  });
+
+  it("still sends, and a refusal with the seat in place is still FAILED: a defect Privy states is not dressed as the owner's", async () => {
+    const { book } = await warmedBook();
+    const reached: string[] = [];
+    const c = chain({ getAccountInfoAndContext: linkRead(link.settlementNonce) });
+    const result = await runSettleTick(c.deps({ walletSigner: confirmedSubmitter(refusedBySeat(reached), book) }));
+    expect(reached).toEqual(["submit"]);
+    expect(result.outcome).toBe("FAILED");
+    expect(book.status()).toMatchObject({ lookups: 1, forgotten: 1, withdrawnAtSend: 0 });
   });
 });
 

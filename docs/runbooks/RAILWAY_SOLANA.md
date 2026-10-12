@@ -445,6 +445,8 @@ deja corriendo el despliegue anterior):
 
 - `SIP_SOLANA_ARCHIVAL_CREDITS` = `1` o `10`: lo que cuesta una llamada de archivo en Helius. Sin ponerla vale `1`, lo
   que dice su página de facturación. Cuando la llamada a la Admin API diga cuánto es de verdad, pon ese número.
+  Mientras no la pongas, `credit-burn` compara tu presupuesto con la cuenta **más cara** (archivo a 10), para no quedarse
+  callada si el precio real es 10; `/status` sigue mostrando la cuenta a 1 y las dos lecturas al lado.
 - `SIP_SOLANA_CREDIT_BUDGET_DAY` = los créditos al día que le das a **ese** servicio. Sin ponerla no hay alerta. Con
   ella, `credit-burn` se queda en el log como aviso (warn) desde el 80 % y te llega a Telegram como crítica desde el
   100 %, y nunca antes de una hora de datos.
@@ -615,7 +617,7 @@ arrancar** (Railway deja funcionando el despliegue anterior). **Volver atrás = 
 | nombre | qué cambia | qué mirar en `/status` |
 |---|---|---|
 | `gpa-v2` | Buscar los vínculos con `getProgramAccountsV2` de Helius (1 crédito por página en vez de 10). Si el endpoint no lo entiende, en la misma barrida vuelve a la llamada de siempre | `discovery.method` = `"v2"`; si dice `"v1-fallback"`, `discovery.fallbackReason` dice por qué. `linksDiscovered` igual que antes |
-| `privy-address` | Leer el registro de Privy de cada wallet **por su dirección** y guardarlo, en vez de listar todas las wallets de la app en cada barrida. Una wallet que aún no se puede firmar se vuelve a mirar cada minuto (lo que arregla el dueño desde la web se ve igual de rápido); una que sí, cada 30 min, o enseguida si Privy rechaza un envío | `cuts.privyAddressBook.listPages` no sube después de la primera barrida; `signing.wallets.signable` igual que antes |
+| `privy-address` | Leer el registro de Privy de cada wallet **por su dirección** y guardarlo, en vez de listar todas las wallets de la app en cada barrida. Una wallet que aún no se puede firmar se vuelve a mirar cada minuto (lo que arregla el dueño desde la web se ve igual de rápido); una que sí, cada 30 min, o enseguida si Privy rechaza un envío. **Justo antes de cada cobro se vuelve a preguntar**: si el dueño quitó el permiso en ese rato, el turno dice `NO_SIGNER` (aviso) y no se envía nada, en vez de un cobro fallido que llega a Telegram como crítico | `cuts.privyAddressBook.listPages` no sube después de la primera barrida; `signing.wallets.signable` igual que antes; `cuts.privyAddressBook.withdrawnAtSend` cuenta los cobros parados así |
 | `board-timer` | El ranking se recalcula como mucho cada 15 s después de un cobro, uno a la vez, en vez de una vez por cobro | `cuts.board.refreshes`; un cobro nuevo sale en `/leaderboard` en ≤ 15 s |
 
 `SIP_SOLANA_DISCOVERY_LKG_MS` (0 = apagado; el valor previsto es `600000`, 10 minutos; como mucho `3600000`): si la
@@ -624,8 +626,9 @@ leer **cada vínculo de la cadena en ese momento** (el nonce y la frontera que f
 
 - `/status` → `discovery.source` = `"lkg"` y `discovery.lkgUses` > 0 quieren decir que pasó. Un vínculo creado durante
   el fallo no se ve hasta que la búsqueda vuelva a funcionar.
-- Alerta `discovery-stale`: aviso en el registro las dos primeras veces seguidas, **Telegram a la tercera**. Pasado el
-  límite de edad, la barrida falla como siempre (`sweep-failed`).
+- Alerta `discovery-stale`: aviso en el registro mientras la lista guardada tenga 10 minutos o menos; **Telegram si
+  tiene más**. Con el valor previsto (`600000`) eso no llega a pasar: pasado el límite de edad la lista ya no se usa y
+  la barrida falla como siempre (`sweep-failed`, que sí llega a Telegram).
 - Al arrancar siempre hace falta una búsqueda buena: no hay lista guardada entre reinicios.
 - Volver atrás: `0` o borrar la variable.
 
