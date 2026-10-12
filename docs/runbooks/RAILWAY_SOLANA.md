@@ -712,9 +712,11 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
 > **Nada de esta sección está en `main` ni en Railway.** Vive en la rama `scale-dispatcher`, que nunca se ha subido.
 > Llega a producción solo cuando tú decidas el merge (decisión O4 del plan `PLAN_DISPATCHER_FIRST.md`), con todas las
 > variables nuevas apagadas. Hasta entonces, **no crees estos servicios ni pongas estas variables**: se describen aquí
-> para que el día que toque estén escritos de antemano. Al escribir esto (12-oct) la rama todavía no tiene los puntos de
-> entrada del `scheduler` ni del `worker` (`bin/scheduler.mts`, `bin/worker.mts`); lo que sí tiene es lo de 10.3 a 10.5:
-> los vigilantes de siempre leyendo quién actúa sobre cada vault, y el comando del traspaso. Diseño: ADR del dispatcher,
+> para que el día que toque estén escritos de antemano. Desde el 13-oct la rama tiene los dos puntos de entrada
+> (`bin/scheduler.mts`, `bin/worker.mts`), a oscuras: el `CMD` del Dockerfile sigue siendo `bin/keeper.mts`, y con
+> `SIP_SOLANA_DISPATCH` sin poner (u `off`) cualquiera de los dos lo dice y sale con 0 sin abrir una conexión. El ciclo
+> entero en sombra (los dos servicios, el traspaso, un worker muerto a mitad de trabajo y otro que lo releva) lo prueba
+> `test/dispatcher-e2e.test.ts` contra el stub de cadena del bench y un Postgres desechable. Diseño: ADR del dispatcher,
 > §2.4, §3.8–§3.12 y §6.
 
 ### 10.1 Los dos servicios nuevos
@@ -728,6 +730,31 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   del vigilante (que copia `packages/solana-keeper` entero, así que los archivos nuevos van dentro), *Restart On
   Failure*, y **`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` en todos** (decisión 6: sin eso Railway mata el contenedor al
   instante de avisarle y cada despliegue es una toma de control con espera, ADR §3.11).
+- **El comando de arranque** (*Settings → Deploy → Custom Start Command*; la imagen arranca en
+  `packages/solana-keeper`): `node_modules/.bin/tsx bin/scheduler.mts` en `keeper-scheduler` y
+  `node_modules/.bin/tsx bin/worker.mts` en `keeper-worker`. Sin él, la imagen arranca el vigilante de siempre.
+- **`keeper-worker` no abre ningún puerto** (ni `/status` ni `/health`): no le pongas *Healthcheck Path*. Su estado lo
+  enseña el `/status` de la flota, que sirve el scheduler desde Postgres. Tampoco manda alertas todavía: las de la flota
+  son del scheduler.
+- **Sus variables**, además de las compartidas (`DATABASE_URL`, `SIP_SOLANA_RPC_URLS`, `SIP_SOLANA_PROGRAM_ID` y, en el
+  scheduler, el Telegram). Todas estrictas: un valor que no sea exactamente uno de los aceptados **no arranca**.
+
+  | variable | dónde | valor | sin ponerla |
+  |---|---|---|---|
+  | `SIP_SOLANA_DISPATCH` | los dos | `off`, `shadow` u `on` | `off`: sale con 0 |
+  | `SIP_SOLANA_SWEEP_MS` | scheduler | el tick, en ms (≥ 5000) | 60000 |
+  | `SIP_SOLANA_PLAN_RPS` | los dos, **el mismo valor** | peticiones por segundo del plan de Helius (1–10000) | 50 (Developer) |
+  | `SIP_SOLANA_WORKERS_MAX` | los dos, **el mismo valor** | cuántas réplicas de worker puede haber como mucho (1–64) | 2 |
+  | `SIP_SOLANA_WORKER_SLOTS` | worker | trabajos a la vez por réplica (1–8) | 2 |
+  | `SIP_SOLANA_PLAN_CREDITS_MONTH` | scheduler | créditos del plan al mes | 10 000 000 |
+  | `SIP_SOLANA_ARCHIVAL_CREDITS` | scheduler | `1` o `10`: lo que cuesta una llamada de archivo (4.1) | `1` |
+  | `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` | scheduler, y el worker con `jupiter-key` | las llamadas a Jupiter por minuto de la organización, que el scheduler reparte | 30 (sin clave) |
+  | `SIP_SOLANA_CUTS` | los dos | los que actúan en el scheduler: `gpa-v2`, `lamports-filter`; en el worker: `rest-skip`, `invest-batch`, `jupiter-key` | ninguno |
+
+  **El scheduler no arranca** si tiene `SIP_SOLANA_BROADCAST`, `SIP_SOLANA_ALLOW_BROADCAST`, cualquier secreto de firma,
+  `SIP_SOLANA_JUPITER_API_KEY` o `SIP_SOLANA_ROLE`: es la réplica pública y no lleva ninguna llave. **Un worker en
+  `shadow` no arranca armado**, y **uno en `on` no arranca sin armar** (`SIP_SOLANA_BROADCAST=1` y la frase exacta de
+  `SIP_SOLANA_ALLOW_BROADCAST`).
 - **`/health` solo lo mira Railway al desplegar.** Un proceso colgado se reinicia porque **sale solo** con código de error
   (ADR §3.11), no porque Railway lo vigile.
 - **`SIP_SOLANA_DISPATCH`** (`off`, `shadow` u `on`; un valor distinto **no arranca**): en `shadow` los workers pasan por
@@ -834,11 +861,10 @@ Primero lo de 4.1 (el timbre sordo es la causa conocida de las pasadas completas
   **Nunca frena un envío, un timbre ni un vault con trabajo**: solo mira menos a menudo a los que están quietos.
 - **El presupuesto de peticiones**: la flota usa el 80 % de las peticiones por segundo del plan (40 de las 50 de
   Developer); el scheduler se queda 8 y el resto se reparte entre los workers vivos.
-- **Lo que tú puedes mover**: los recortes en los workers (`rest-skip`, `invest-batch`, y `lamports-filter` cuando exista),
+- **Lo que tú puedes mover**: los recortes (en los workers `rest-skip` e `invest-batch`; en el scheduler `lamports-filter`),
   **de uno en uno**;
   el precio real de la llamada de archivo cuando lo diga la Admin API (decisión O8); y el tope del autoescalado de Helius.
-  Los nombres de las variables del scheduler para el plan (peticiones por segundo, créditos del mes, precio de archivo)
-  los fija su punto de entrada, que aún no existe en esta rama: se añadirán aquí con él.
+  En el scheduler son `SIP_SOLANA_PLAN_RPS`, `SIP_SOLANA_PLAN_CREDITS_MONTH` y `SIP_SOLANA_ARCHIVAL_CREDITS` (10.1).
 
 ## Si algo falla
 
