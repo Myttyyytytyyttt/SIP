@@ -598,10 +598,48 @@ export async function readDestinationTransferFee(
 }
 
 // ---------------------------------------------------------------------------
-// The keyless endpoints.
+// The keyless endpoints — and, for a caller that says so, the keyed one.
 // ---------------------------------------------------------------------------
 
-const LITE_API = "https://lite-api.jup.ag/swap/v1";
+/**
+ * Where every quote and every /swap-instructions went before anyone asked, and
+ * where they still go when nobody does: the keyless host, which Jupiter is
+ * phasing out with no date given ("the rate limit on lite-api.jup.ag will be
+ * reduced progressively until it is fully retired", developers.jup.ag/docs/
+ * portal/migration, read 2026-10-12).
+ */
+export const LITE_API = "https://lite-api.jup.ag/swap/v1";
+
+/**
+ * The keyed host: the same paths under api.jup.ag, the key in an `x-api-key`
+ * header (developers.jup.ag/docs/api-reference/swap/quote and
+ * /swap-instructions, read 2026-10-12: server `https://api.jup.ag/swap/v1`,
+ * security scheme `ApiKeyAuth`, `in: header`, `name: x-api-key`). The same
+ * host answers WITHOUT a key at 0.5 requests a second, which is how the
+ * unpaced turn in the keeper's replay fixture met its 429 on call 6.
+ */
+export const KEYED_API = "https://api.jup.ag/swap/v1";
+
+/**
+ * Which Jupiter host a call goes to, and through what.
+ *
+ * OPTIONAL EVERYWHERE, AND ABSENT IS YESTERDAY. Every function below that takes
+ * one behaves byte for byte as it did before this existed when it is left out:
+ * LITE_API, the global fetch, no header. The keeper passes one only under its
+ * `jupiter-key` cut, where `fetch` is a wrapper that adds the key and paces the
+ * call (solana-keeper/src/jupiter-pacer.ts); the scripts never pass one.
+ *
+ * THE KEY NEVER TRAVELS IN THE URL. A refused call's error quotes the URL it
+ * asked (getJson), and errors are logged; a key in a query string would be in
+ * every one of those lines. The wrapper puts it in a header, which nothing here
+ * ever prints.
+ */
+export interface JupiterApi {
+  /** The swap API's base, with no trailing slash: LITE_API or KEYED_API. */
+  readonly baseUrl: string;
+  /** Called exactly where the global fetch was. Looked up at call time, never captured at load. */
+  readonly fetch?: (url: string, init: RequestInit) => Promise<Response>;
+}
 
 export interface JupiterQuote {
   readonly inputMint: string;
@@ -683,8 +721,9 @@ export interface JupiterSwapInstructions {
   readonly addressLookupTableAddresses?: readonly string[] | null;
 }
 
-async function getJson(url: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(25_000) });
+async function getJson(url: string, init?: RequestInit, api?: JupiterApi): Promise<unknown> {
+  const options = { ...init, signal: AbortSignal.timeout(25_000) };
+  const response = api?.fetch === undefined ? await fetch(url, options) : await api.fetch(url, options);
   const text = await response.text();
   if (!response.ok) throw new Error(`${url} answered ${response.status}: ${text.slice(0, 400)}`);
   return JSON.parse(text) as unknown;
@@ -718,7 +757,7 @@ export async function fetchJupiterQuote(params: {
    * AMM, instead of re-quoting until Jupiter happens to pick one.
    */
   readonly dexes?: readonly string[];
-}): Promise<JupiterQuote> {
+}, api?: JupiterApi): Promise<JupiterQuote> {
   const query = new URLSearchParams({
     inputMint: params.inputMint.toBase58(),
     outputMint: params.outputMint.toBase58(),
@@ -735,14 +774,14 @@ export async function fetchJupiterQuote(params: {
       : {}),
     ...(params.dexes !== undefined && params.dexes.length > 0 ? { dexes: params.dexes.join(",") } : {}),
   });
-  return (await getJson(`${LITE_API}/quote?${query.toString()}`)) as JupiterQuote;
+  return (await getJson(`${api?.baseUrl ?? LITE_API}/quote?${query.toString()}`, undefined, api)) as JupiterQuote;
 }
 
 export async function fetchJupiterSwapInstructions(params: {
   readonly quote: JupiterQuote;
   readonly vault: PublicKey;
   readonly vaultTarget: PublicKey;
-}): Promise<JupiterSwapInstructions> {
+}, api?: JupiterApi): Promise<JupiterSwapInstructions> {
   const body = {
     quoteResponse: params.quote,
     userPublicKey: params.vault.toBase58(),
@@ -776,11 +815,15 @@ export async function fetchJupiterSwapInstructions(params: {
     dynamicComputeUnitLimit: false,
     asLegacyTransaction: false,
   };
-  return (await getJson(`${LITE_API}/swap-instructions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  })) as JupiterSwapInstructions;
+  return (await getJson(
+    `${api?.baseUrl ?? LITE_API}/swap-instructions`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+    api,
+  )) as JupiterSwapInstructions;
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,6 +1934,12 @@ export interface BuildJupiterRouteParams {
    * this is the only bound in this file on what the route costs.
    */
   readonly ownerFloorRateWad?: bigint;
+  /**
+   * Which host the quote and the /swap-instructions go to, and through what
+   * (JupiterApi). Absent is LITE_API through the global fetch, exactly as
+   * before it existed.
+   */
+  readonly api?: JupiterApi;
 }
 
 /**
@@ -1939,7 +1988,7 @@ export async function buildJupiterRoute(
     ...(params.onlyDirectRoutes === true ? { onlyDirectRoutes: true } : {}),
     ...(params.excludeDexes === undefined ? {} : { excludeDexes: params.excludeDexes }),
     ...(params.dexes === undefined ? {} : { dexes: params.dexes }),
-  });
+  }, params.api);
   const quotedAtMs = Date.now();
   // BEFORE THE QUOTE IS USED FOR ANYTHING — including being posted straight
   // back to /swap-instructions, which is what turns a drifted quote into an
@@ -1950,7 +1999,7 @@ export async function buildJupiterRoute(
     quote,
     vault: params.vault,
     vaultTarget: params.vaultTarget,
-  });
+  }, params.api);
 
   const fee = await feeRead;
   const vaultOwnedTokenAccounts = await findVaultOwnedTokenAccounts(

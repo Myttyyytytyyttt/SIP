@@ -1,0 +1,19 @@
+{"ts":1791760456276,"kind":"policy","legs":[{"mint":"XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W","weightBps":5000},{"mint":"Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw","weightBps":5000}],"inMint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","maxPerCall":"149000000","minInvestment":"500000","enabled":true}
+{"ts":1791760456377,"kind":"admission","admit":true,"fees":[["XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W","0"],["Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw","100"]]}
+{"ts":1791760456485,"kind":"jupiter","phase":"gate-leg0","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":200,"ms":104,"rl":"4"}
+{"ts":1791760456548,"kind":"jupiter","phase":"gate-leg0","host":"api.jup.ag","path":"/swap/v1/swap-instructions","method":"POST","status":200,"ms":63,"rl":"3"}
+{"ts":1791760456757,"kind":"jupiter","phase":"gate-leg0","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":200,"ms":62,"rl":"2"}
+{"ts":1791760456928,"kind":"step","phase":"gate-leg0","outcome":"ok","keeperCounted":3,"ms":549}
+{"ts":1791760456978,"kind":"jupiter","phase":"gate-leg1","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":200,"ms":49,"rl":"1"}
+{"ts":1791760457026,"kind":"jupiter","phase":"gate-leg1","host":"api.jup.ag","path":"/swap/v1/swap-instructions","method":"POST","status":200,"ms":47,"rl":"0"}
+{"ts":1791760457131,"kind":"jupiter","phase":"gate-leg1","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":429,"ms":45,"rl":"0"}
+{"ts":1791760457256,"kind":"step","phase":"gate-leg1","outcome":"ok","keeperCounted":3,"ms":328}
+{"ts":1791760457299,"kind":"jupiter","phase":"gate-convert","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":429,"ms":42,"rl":"0"}
+{"ts":1791760457300,"kind":"step","phase":"gate-convert","outcome":"Error","detail":"https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=50000000&slippageBps=200&swapMode=ExactIn&restrictIntermediateTokens=true answered 429: {\"code\":429,\"message\":\"[API Gateway] Too many requests\"}","keeperCounted":2,"ms":44}
+{"ts":1791760457345,"kind":"jupiter","phase":"send-convert","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":429,"ms":44,"rl":"0"}
+{"ts":1791760457345,"kind":"step","phase":"send-convert","outcome":"Error","detail":"https://lite-api.jup.ag/swap/v1/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=50000000&slippageBps=200&swapMode=ExactIn&restrictIntermediateTokens=true answered 429: {\"code\":429,\"message\":\"[API Gateway] Too many requests\"}","keeperCounted":2,"ms":45}
+{"ts":1791760457391,"kind":"jupiter","phase":"send-leg0","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":429,"ms":45,"rl":"0"}
+{"ts":1791760457391,"kind":"step","phase":"send-leg0","outcome":"Error","detail":"https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W&amount=5000000&slippageBps=200&swapMode=ExactIn&restrictIntermediateTokens=true answered 429: {\"code\":429,\"message\":\"[API Gateway] Too many requests\"}","keeperCounted":2,"ms":46}
+{"ts":1791760457435,"kind":"jupiter","phase":"send-leg1","host":"api.jup.ag","path":"/swap/v1/quote","method":"GET","status":429,"ms":43,"rl":"0"}
+{"ts":1791760457435,"kind":"step","phase":"send-leg1","outcome":"Error","detail":"https://lite-api.jup.ag/swap/v1/quote?inputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&outputMint=Pren1FvFX6J3E4kXhJuCiAD5aDmGEb7qJRncwA8Lkhw&amount=5000000&slippageBps=200&swapMode=ExactIn&restrictIntermediateTokens=true answered 429: {\"code\":429,\"message\":\"[API Gateway] Too many requests\"}","keeperCounted":2,"ms":44}
+{"ts":1791760457436,"kind":"done","totalMs":1057,"keeperCountedTotal":14}

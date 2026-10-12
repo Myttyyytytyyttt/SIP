@@ -94,6 +94,12 @@ export function foldInvestTurn(
     if (previous === undefined) return turn;
     if (previous.outcome === "FAILED") return previous;
     if (turn.outcome === "FAILED") return turn;
+    // DEFERRED IS WEAKER THAN EVERYTHING: it attempted nothing (jupiter-pacer.ts),
+    // so any turn that did — a REFUSED one included — says more about the vault,
+    // and a deferral never overwrites one that did. Asked BEFORE the REFUSED rule,
+    // which would otherwise let a later deferral replace a refusal.
+    if (turn.outcome === "DEFERRED") return previous;
+    if (previous.outcome === "DEFERRED") return turn;
     if (previous.outcome === "REFUSED" && turn.outcome !== "REFUSED") return turn;
     return previous;
   })();

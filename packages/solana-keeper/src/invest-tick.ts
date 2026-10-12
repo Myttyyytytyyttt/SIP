@@ -35,6 +35,7 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import {
+  type AccountInfo,
   type AccountMeta,
   type AddressLookupTableAccount,
   ComputeBudgetProgram,
@@ -57,7 +58,7 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { decodeVault, readInvestmentPolicy, type InvestmentPolicyState } from "./accounts.js";
+import { decodeInvestmentPolicy, decodeVault, readInvestmentPolicy, type InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import { BN } from "./anchor-interop.js";
 import {
@@ -93,6 +94,9 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
+import type { CrankSender } from "./explicit-send.js";
+import { type InvestSnapshot, cachedRentFloor } from "./invest-snapshot.js";
+import { type JupiterAccess, type JupiterReservation, buyingTurnJupiterCalls, jupiterApiForTurn } from "./jupiter-pacer.js";
 import { method, type MethodCall } from "./methods.js";
 // FOUR NAMES LEFT WITH THE RAYDIUM ARM. raydiumLegVenue, raydiumSides,
 // readRouteAccounts and vaultOwnedAmong were imported here for the pool-reading
@@ -105,7 +109,15 @@ import { method, type MethodCall } from "./methods.js";
 // with it; it only stopped being called from here.
 import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
 import type { TransferFeeTerms } from "./min-out.js";
-import { JupiterRouteRefusal, type JupiterRoute, type LandingEpoch, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
+import {
+  JupiterRouteRefusal,
+  type JupiterApi,
+  type JupiterRoute,
+  type LandingEpoch,
+  investAmountIn,
+  investMinOut,
+  verifyRouteFresh,
+} from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -273,8 +285,18 @@ export function investCall(
   });
 }
 
-/** PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke. */
-export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED";
+/**
+ * PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke.
+ *
+ * DEFERRED IS NOT. It is a buying turn that did not START — nothing quoted,
+ * wrapped or sent — because something outside the vault said "not now": the
+ * Jupiter budget under the `jupiter-key` cut (src/jupiter-pacer.ts). It is busy,
+ * never resting (doorbell.ts investRests), so the next sweep turns the vault
+ * again; it neither counts toward nor ends a FAILED streak (investFailedStreak),
+ * because nothing was attempted. ONLY A CUT PRODUCES IT: with SIP_SOLANA_CUTS
+ * empty no turn can end here.
+ */
+export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED" | "DEFERRED";
 
 export interface InvestPurchase {
   readonly target: string;
@@ -321,6 +343,14 @@ export interface InvestResult {
    * legAdmissionDecision alone, exactly as before.
    */
   readonly feeWarnings?: readonly Alert[];
+  /**
+   * UNDER THE `invest-batch` CUT ONLY: where this turn's at-rest reads came
+   * from. "snapshot" — the sweep's batch decided it, and it sent nothing;
+   * "fresh" — the snapshot said it would act (or could not say), so the turn
+   * was run again on today's fresh reads, and THAT is the answer above. Absent
+   * whenever no snapshot was handed in: today's turn, which says nothing new.
+   */
+  readonly reads?: "snapshot" | "fresh";
 }
 
 export interface InvestDeps {
@@ -338,6 +368,41 @@ export interface InvestDeps {
   readonly live: boolean;
   /** The protocol's emergency switch, from the ProtocolConfig this sweep read. */
   readonly protocolPaused: boolean;
+  /**
+   * THE `jupiter-key` CUT (src/jupiter-pacer.ts): the host, the key and the
+   * process's pacer. ABSENT IS TODAY — lite-api.jup.ag, keyless, unpaced — and
+   * bin/keeper.mts passes it only while SIP_SOLANA_CUTS names the token.
+   *
+   * PRESENT, A BUYING TURN RESERVES EVERY JUPITER CALL IT CAN MAKE before its
+   * first one, at the point below where nothing has been asked of Jupiter yet,
+   * and ends DEFERRED, having moved nothing, when the budget cannot cover it.
+   */
+  readonly jupiter?: JupiterAccess;
+  /**
+   * THE `invest-batch` CUT (src/invest-snapshot.ts): this vault's at-rest state
+   * from the sweep's one batch read. ABSENT IS TODAY — the policy, the vault and
+   * its sysvars, the rent floor and both balances read by this turn itself.
+   *
+   * PRESENT, IT MAY ONLY DECIDE A TURN THAT SENDS NOTHING. The turn runs on it
+   * up to its first live act; if it gets that far, or ends anywhere the snapshot
+   * may not decide (SNAPSHOT_MAY_DECIDE), runInvestTick throws that answer away
+   * and runs the whole turn again without it. bin/keeper.mts hands none to a
+   * vault that settled or sent anything earlier in the sweep.
+   */
+  readonly snapshot?: InvestSnapshot;
+  /**
+   * THE `explicit-send` CUT (src/explicit-send.ts, L1d): the crank's sends in an
+   * order the keeper owns — blockhash, build, sign, ASK, send, poll — instead of
+   * Anchor's `.rpc()` and `provider.sendAndConfirm`. ABSENT IS TODAY, byte for
+   * byte and request for request.
+   *
+   * PRESENT, the turn also asks it once before anything of the acting half: a
+   * keeper in its takeover quiet period, or draining after SIGTERM, ends the
+   * turn DEFERRED having quoted, wrapped and sent nothing. Each send then asks
+   * again — live, quiet, draining — after signing and before sending, so a claim
+   * lost after the wrap sends no convert and no leg.
+   */
+  readonly sender?: CrankSender;
 }
 
 /** What a turn learns on its way through, whichever way it then ends. */
@@ -374,6 +439,13 @@ interface TurnFindings {
    * reads.
    */
   feeWarnings?: readonly Alert[];
+  /**
+   * The Jupiter calls this turn reserved under the `jupiter-key` cut, once it
+   * did. A FINDING, NOT A LOCAL, for the same reason the rest are: the turn has
+   * a dozen ways out below the reservation, and runInvestTick releases it once,
+   * in a `finally`, whichever of them it took — or whatever it threw.
+   */
+  reservation?: JupiterReservation;
 }
 
 /**
@@ -382,8 +454,31 @@ interface TurnFindings {
  * findings are written once, here, rather than in each of them.
  */
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
-  const found: TurnFindings = {};
-  const result = await investTurn(deps, found);
+  let found: TurnFindings = {};
+  let result: InvestResult;
+  let reads: InvestResult["reads"];
+  try {
+    let answer = await investTurn(deps, found);
+    if (deps.snapshot !== undefined) {
+      if (answer !== NEEDS_FRESH_READS && snapshotMayDecide(answer, deps.live)) {
+        reads = "snapshot";
+      } else {
+        // THE SNAPSHOT'S ANSWER IS THROWN AWAY, findings and all, and the turn
+        // is run again exactly as it runs without the cut: every read fresh,
+        // every byte of every transaction built from what is on chain now. The
+        // snapshot pass cannot have reserved Jupiter calls or sent anything: it
+        // stops at NEEDS_FRESH_READS before the first of either.
+        reads = "fresh";
+        found = {};
+        answer = await investTurn({ ...deps, snapshot: undefined }, found);
+      }
+    }
+    if (answer === NEEDS_FRESH_READS) throw new Error("an invest turn with no snapshot asked for fresh reads: it already had them");
+    result = answer;
+  } finally {
+    // WHAT THE TURN DID NOT SPEND GOES BACK, on every way out, a throw included.
+    found.reservation?.release();
+  }
   // In order, and they cannot both be set: a turn with conversion off never
   // reaches the convert that writes `converted`.
   const notes = [found.conversionOff, found.converted].filter((note): note is string => note !== undefined);
@@ -392,13 +487,89 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     ...(notes.length === 0 ? {} : { detail: `${notes.join("; ")}; ${result.detail}` }),
     ...(found.wrap === undefined ? {} : { wrap: found.wrap }),
     ...(found.feeWarnings === undefined ? {} : { feeWarnings: found.feeWarnings }),
+    ...(reads === undefined ? {} : { reads }),
   };
 }
 
-async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult> {
-  const { connection, program, vault } = deps;
+/**
+ * What the at-rest half of a turn returns when it ran on the sweep's snapshot
+ * and got as far as its first live act: "read again, fresh, and do it then".
+ */
+const NEEDS_FRESH_READS = Symbol("needs fresh reads");
 
-  const policy = await readInvestmentPolicy(program, vault);
+/**
+ * The outcomes a snapshot may decide: the ones today's turn reaches BEFORE its
+ * first live act, and which therefore send nothing — NO_POLICY; the disabled,
+ * capped and below-minimum IDLEs; either PAUSED; the in-mint REFUSED; and a DRY
+ * RUN's INVESTED, which only says what would be done. Every FAILED is re-read
+ * fresh too: a missing vault or an unreadable Clock is today's verdict to give,
+ * from today's reads.
+ */
+const SNAPSHOT_MAY_DECIDE: ReadonlySet<InvestOutcome> = new Set(["NO_POLICY", "IDLE", "PAUSED", "REFUSED", "INVESTED"]);
+
+function snapshotMayDecide(result: InvestResult, live: boolean): boolean {
+  if (!SNAPSHOT_MAY_DECIDE.has(result.outcome)) return false;
+  // Belt and braces: the only INVESTED before the first live act is a dry run's.
+  return result.outcome !== "INVESTED" || !live;
+}
+
+/**
+ * The five things the at-rest half of a turn reads, in the order it reads them:
+ * the policy, the vault with its four sysvars and feeds, the vault's rent floor,
+ * and the two balances.
+ */
+interface AtRestReads {
+  readonly fromSnapshot: boolean;
+  policy(): Promise<InvestmentPolicyState | null>;
+  vaultAndSysvars(): Promise<readonly (AccountInfo<Buffer> | null | undefined)[]>;
+  rentFloor(size: number): Promise<number>;
+  balance(ata: PublicKey): Promise<bigint>;
+}
+
+/** Today's reads, call for call: what every turn without the invest-batch cut makes. */
+function freshReads(connection: Connection, program: anchor.Program, vault: PublicKey): AtRestReads {
+  return {
+    fromSnapshot: false,
+    policy: () => readInvestmentPolicy(program, vault),
+    // THE CHAIN'S CLOCK COMES WITH THE VAULT, and so do Pyth's two feeds and
+    // the EpochSchedule: see the turn below for why all five ride one request.
+    vaultAndSysvars: () =>
+      connection.getMultipleAccountsInfo([vault, SYSVAR_CLOCK_PUBKEY, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SYSVAR_EPOCH_SCHEDULE_PUBKEY]),
+    rentFloor: (size) => connection.getMinimumBalanceForRentExemption(size),
+    balance: (ata) => balanceOf(connection, ata),
+  };
+}
+
+/**
+ * The same five, from the sweep's batch (src/invest-snapshot.ts). Nothing here
+ * asks the chain but the rent floor, once per size for the life of the process
+ * (C2).
+ *
+ * THE SNAPSHOT MUST BE THIS VAULT'S. A map lookup by the wrong key would hand
+ * one vault's balances to another's turn; it is checked, not assumed.
+ */
+function snapshotReads(connection: Connection, program: anchor.Program, vault: PublicKey, snapshot: InvestSnapshot): AtRestReads {
+  if (!snapshot.vaultAddress.equals(vault)) {
+    throw new Error(`the invest snapshot handed to vault ${vault.toBase58()} is vault ${snapshot.vaultAddress.toBase58()}'s`);
+  }
+  return {
+    fromSnapshot: true,
+    policy: async () => decodeInvestmentPolicy(program, snapshot.policyAddress, snapshot.policy?.data ?? null),
+    vaultAndSysvars: async () => [snapshot.vault, snapshot.clock, snapshot.solFeed, snapshot.usdcFeed, snapshot.epochSchedule],
+    rentFloor: (size) => cachedRentFloor(connection, size),
+    balance: async (ata) => {
+      if (ata.equals(snapshot.wsolAta)) return snapshot.wsolHeld;
+      if (ata.equals(snapshot.usdcAta)) return snapshot.usdcHeld;
+      throw new Error(`the invest snapshot holds no balance for ${ata.toBase58()}`);
+    },
+  };
+}
+
+async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult | typeof NEEDS_FRESH_READS> {
+  const { connection, program, vault } = deps;
+  const reads = deps.snapshot === undefined ? freshReads(connection, program, vault) : snapshotReads(connection, program, vault, deps.snapshot);
+
+  const policy = await reads.policy();
   if (policy === null) return { outcome: "NO_POLICY", detail: "the owner has not chosen a basket yet" };
   if (!policy.enabled) return { outcome: "IDLE", detail: "investing is switched off in the policy" };
 
@@ -420,13 +591,10 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // AND THE EPOCHSCHEDULE, LAST, for the same reason: the landing-window rule
   // (worstCaseTransferFee) needs where this epoch ENDS, which the Clock does not
   // carry, and a fifth address in a request already being sent costs nothing.
-  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await connection.getMultipleAccountsInfo([
-    vault,
-    SYSVAR_CLOCK_PUBKEY,
-    PYTH_SOL_USD_FEED,
-    PYTH_USDC_USD_FEED,
-    SYSVAR_EPOCH_SCHEDULE_PUBKEY,
-  ]);
+  //
+  // ONE REQUEST, [vault, Clock, Pyth SOL, Pyth USDC, EpochSchedule] — or, under
+  // the invest-batch cut, the same five out of the sweep's batch (AtRestReads).
+  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await reads.vaultAndSysvars();
   if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
   // own switch is decoded from the read that also gives its lamports, so a
@@ -488,7 +656,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const noted = (detail: string): string =>
     oracleRested === null ? detail : `${detail.replace(/\.$/, "")} — ${oracleRested}`;
 
-  const rentFloor = await connection.getMinimumBalanceForRentExemption(vaultInfo.data.length);
+  const rentFloor = await reads.rentFloor(vaultInfo.data.length);
   const free = BigInt(vaultInfo.lamports - rentFloor);
 
   const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true, TOKEN_PROGRAM_ID);
@@ -497,9 +665,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // leaves the vault's SOL sitting as wSOL. Nothing used to read this balance:
   // every convert moved only the amount freshly wrapped in the same tick, so
   // that stranded wSOL was never converted again, by any later sweep, ever.
-  const wsolHeld = await balanceOf(connection, wsolAta);
+  const wsolHeld = await reads.balance(wsolAta);
   const usdcAta = getAssociatedTokenAddressSync(USDC, vault, true, TOKEN_PROGRAM_ID);
-  const usdcHeld = await balanceOf(connection, usdcAta);
+  const usdcHeld = await reads.balance(usdcAta);
 
   // The floor is the policy's own minimum, in USDC. Convert what is free only
   // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1 — and
@@ -537,11 +705,33 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
             (planned.short ? `; ${shortfall(planned, crankRead)}` : ""),
     };
   }
+  // ── the snapshot stops here: everything below acts, and acts on fresh reads ──
+  //
+  // UNDER THE invest-batch CUT this is the line the sweep's snapshot may not
+  // cross. Above it every way out sends nothing; below it the turn asks
+  // Jupiter, wraps, converts and buys. So a turn that got here on the snapshot
+  // hands back NEEDS_FRESH_READS, and runInvestTick runs it again from the top
+  // with today's reads — the policy, the vault, the Clock, the feeds, the rent
+  // and both balances as the chain holds them NOW, not as the sweep found them.
+  if (reads.fromSnapshot) return NEEDS_FRESH_READS;
   const crank = deps.crank;
   if (crank === null) {
     // Unreachable from the keeper, which passes the settle key whenever it is
     // live. Refused rather than guessed at: nothing can be paid for without it.
     return { outcome: "FAILED", detail: "a live invest turn arrived without the crank; nothing was sent" };
+  }
+
+  // ── under the explicit-send cut: may a buy start at all? ──────────────────
+  //
+  // BEFORE EVERY READ OF THE ACTING HALF — the leg mints, every Jupiter quote,
+  // the token accounts. A keeper inside its takeover quiet period, or draining
+  // after SIGTERM, would refuse the wrap anyway (CrankSender asks before every
+  // send); asking here as well means it also spends no RPC and no Jupiter
+  // budget on a basket it is not going to send. DEFERRED: busy, asked again next
+  // sweep, and nothing moved.
+  if (deps.sender !== undefined) {
+    const blocked = deps.sender.buyingBlocked();
+    if (blocked !== null) return { outcome: "DEFERRED", detail: blocked };
   }
 
   // ── the all-or-nothing gate: nothing below moves money until all of it passes ──
@@ -658,6 +848,31 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
   if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
 
+  // ── the Jupiter budget, under the jupiter-key cut: reserved before the first call ──
+  //
+  // HERE, AND NOT ONE LINE LATER. Everything above decided from the chain alone;
+  // everything below asks Jupiter, starting with the gate's first quote. So this
+  // is the last moment at which "not now" costs nothing: no quote, no wrap, no
+  // send, no budget. A turn that started and then met a 429 on its thirteenth
+  // call would have spent twelve and refused the basket anyway — measured,
+  // against the keyless api.jup.ag, on call 6 (test/fixtures/
+  // jupiter-turn-run2-apijup-unpaced.jsonl).
+  //
+  // THE CEILING, NOT AN ESTIMATE: every leg and the convert, measured twice
+  // (buyingTurnJupiterCalls). What the turn does not spend is handed back by
+  // runInvestTick when it ends.
+  //
+  // A BASKET THAT CAN NEVER FIT THE PLAN'S MINUTE IS REFUSED, NOT DEFERRED: a
+  // deferral is "next sweep", and next sweep it would not fit either. REFUSED
+  // raises `invest-refused`, whose detail names the remedy.
+  let jupiterApi: JupiterApi | undefined;
+  if (deps.jupiter !== undefined) {
+    const answer = deps.jupiter.pacer.reserve(buyingTurnJupiterCalls(policy.legs.length, converts));
+    if (!answer.granted) return { outcome: answer.reason === "never-fits" ? "REFUSED" : "DEFERRED", detail: answer.detail };
+    found.reservation = answer.reservation;
+    jupiterApi = jupiterApiForTurn(deps.jupiter, answer.reservation);
+  }
+
   // AND ON THE SAME LINE AGAIN: whether the VENUES this turn would trade
   // against can actually serve what it would push at them, RIGHT NOW.
   //
@@ -739,6 +954,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       convertCeiling,
       admissionFees: admission.worstCaseFees,
       landing,
+      ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
     });
   } catch (error) {
     // A MEASUREMENT THAT COULD NOT BE TAKEN IS A REFUSAL, NEVER A PASS, and it
@@ -816,10 +1032,20 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // account this turn certainly used. The create chains onto the
         // EXTRACTED builder, which hands back the call and not the
         // instruction precisely so that it still can.
-        await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
-          .preInstructions(await plan.createsFor(wsolAta))
-          .signers([crank])
-          .rpc();
+        if (deps.sender === undefined) {
+          await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
+            .preInstructions(await plan.createsFor(wsolAta))
+            .signers([crank])
+            .rpc();
+        } else {
+          // THE EXPLICIT-SEND CUT: the very Transaction `.rpc()` would have built
+          // — `.transaction()` is the builder `.rpc()` calls — handed to the
+          // sender, which signs it as Anchor would and asks before it sends.
+          const transaction = await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
+            .preInstructions(await plan.createsFor(wsolAta))
+            .transaction();
+          await deps.sender.sendLegacy(transaction, [crank]);
+        }
         found.wrap = wrapReport(wrap, wrap.amount);
       }
 
@@ -865,6 +1091,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           // min_convert_rate_wad — which is exactly what convert.rs would
           // answer with FloorTooLow, only without the fee.
           ownerFloorRateWad: policy.minConvertRateWad,
+          ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
         });
         // BOTH NUMBERS INSIDE THE SAME try, because both are derived from this
         // route's own bytes and both can refuse: investAmountIn if the blob
@@ -934,7 +1161,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           )
             .remainingAccounts(venueAccountsOf(route))
             .instruction(),
-        ], route, await tables.tablesFor(lookupTablesOf(route)));
+        ], route, await tables.tablesFor(lookupTablesOf(route)), deps.sender);
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
       }
       }
@@ -1046,6 +1273,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
           ownerFloorRateWad: leg.minOutRateWad,
           landing,
+          ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
         });
       } catch (error) {
         // THE FIRST REFUSED IN THIS FILE THAT CAN BE REACHED AFTER MONEY HAS
@@ -1120,7 +1348,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         )
           .remainingAccounts(venueAccountsOf(route))
           .instruction(),
-      ], route, await tables.tablesFor(lookupTablesOf(route)));
+      ], route, await tables.tablesFor(lookupTablesOf(route)), deps.sender);
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -1249,6 +1477,8 @@ async function measureBasketVenues(
     readonly admissionFees: ReadonlyMap<string, TransferFeeTerms>;
     /** The turn's epoch and slots-left, the read admissionFees was decided from. */
     readonly landing: LandingEpoch;
+    /** The jupiter-key cut's per-turn API; absent is today's keyless host. */
+    readonly api?: JupiterApi;
   },
 ): Promise<{ readonly legs: LegVenue[] }> {
   const legs: LegVenue[] = [];
@@ -1285,6 +1515,7 @@ async function measureBasketVenues(
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
       ownerFloorRateWad: leg.minOutRateWad,
       landing: params.landing,
+      ...(params.api === undefined ? {} : { api: params.api }),
     });
     legs.push(venue);
   }
@@ -1304,6 +1535,7 @@ async function measureBasketVenues(
       spend: params.convertCeiling,
       feeBps: 0n,
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+      ...(params.api === undefined ? {} : { api: params.api }),
       // NO ownerFloorRateWad HERE, DELIBERATELY. This gate asks whether the
       // venue is DEEP, and its verdict refuses the whole basket. The owner's
       // min_convert_rate_wad is a PRICE floor, and a price below it is a
@@ -1623,6 +1855,13 @@ export async function sendWithBudget(
    * route DOES name are always applied, never dropped for being inconvenient.
    */
   lookupTables: readonly AddressLookupTableAccount[] = [],
+  /**
+   * THE `explicit-send` CUT (src/explicit-send.ts): when given, the SAME
+   * transaction — the same budgeted instructions, the same fee payer, the same
+   * signatures — goes out through the sender's explicit order instead of
+   * Anchor's sendAndConfirm. Absent, the two Anchor calls below, as before.
+   */
+  sender?: CrankSender,
 ): Promise<string> {
   // AND IT IS THE BUILDER'S OWN CHECK, not a second spelling of it: the same
   // pure function, the same ROUTE_MAX_AGE_MS the build used, so a refusal here
@@ -1631,6 +1870,7 @@ export async function sendWithBudget(
   verifyRouteFresh(route, { nowMs: Date.now() }, { maxAgeMs: ROUTE_MAX_AGE_MS });
   const budgeted = budgetedInstructions(instructions);
   if (lookupTables.length === 0) {
+    if (sender !== undefined) return sender.sendLegacy(new Transaction().add(...budgeted), [crank]);
     return provider.sendAndConfirm(new Transaction().add(...budgeted), [crank]);
   }
 
@@ -1654,6 +1894,16 @@ export async function sendWithBudget(
     throw new Error(
       `this transaction is payable by the crank ${crank.publicKey.toBase58()} but the provider's wallet is ${wallet.toBase58()}: ` +
         "Anchor signs a VersionedTransaction with its own wallet, which is not a signer of this message",
+    );
+  }
+
+  // UNDER THE explicit-send CUT the sender reads the blockhash — with its last
+  // valid block height, which the line below drops — and the message is
+  // compiled around it by the same pure builder.
+  if (sender !== undefined) {
+    return sender.sendVersioned(
+      (recentBlockhash) => buildV0Transaction({ payer: crank.publicKey, recentBlockhash, instructions: budgeted, lookupTables }),
+      [crank],
     );
   }
 

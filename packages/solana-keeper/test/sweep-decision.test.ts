@@ -83,6 +83,20 @@ describe("a vault's invest turns folded across one sweep", () => {
     expect(investFailedStreak(2, fold({ outcome: "REFUSED", detail: "a" }, { outcome: "INVESTED", detail: "b" }).outcome)).toBe(0);
   });
 
+  it("never lets a DEFERRED turn — which attempted nothing — overwrite one that did, in either order", () => {
+    const deferred = { outcome: "DEFERRED", detail: "the Jupiter budget is short" } as const;
+    // Over a refusal: the refusal stands, and so does the streak it holds.
+    expect(fold({ outcome: "REFUSED", detail: "shallow" }, deferred)).toMatchObject({ outcome: "REFUSED", detail: "shallow" });
+    expect(fold(deferred, { outcome: "REFUSED", detail: "shallow" })).toMatchObject({ outcome: "REFUSED", detail: "shallow" });
+    // A resting sibling still ends a run, whichever came first.
+    expect(investFailedStreak(2, fold(deferred, { outcome: "IDLE", detail: "b" }).outcome)).toBe(0);
+    expect(investFailedStreak(2, fold({ outcome: "IDLE", detail: "b" }, deferred).outcome)).toBe(0);
+    // A failure still decides the sweep.
+    expect(fold(deferred, { outcome: "FAILED", detail: "leg broke" }).outcome).toBe("FAILED");
+    // Deferred alone holds the run where it stands.
+    expect(investFailedStreak(2, fold(deferred, deferred).outcome)).toBe(2);
+  });
+
   it("keeps a short turn's wrap report whatever the later turns saw, and the latest one when none was short", () => {
     expect(fold({ outcome: "INVESTED", detail: "a", wrap: wrap(true) }, { outcome: "INVESTED", detail: "b", wrap: wrap(false) }).wrap?.short).toBe(true);
     expect(fold({ outcome: "INVESTED", detail: "a", wrap: wrap(false) }, { outcome: "INVESTED", detail: "b", wrap: wrap(true) }).wrap?.short).toBe(true);

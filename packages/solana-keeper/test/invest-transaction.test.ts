@@ -50,6 +50,12 @@ import {
   VersionedTransaction,
 } from "@solana/web3.js";
 import type * as anchor from "@coral-xyz/anchor";
+import * as anchorRuntime from "@coral-xyz/anchor";
+import { NATIVE_MINT, TOKEN_PROGRAM_ID, createAssociatedTokenAccountIdempotentInstruction, getAssociatedTokenAddressSync } from "@solana/spl-token";
+import type { Connection } from "@solana/web3.js";
+import { investmentPolicyAddress } from "../src/accounts.js";
+import { CrankSender } from "../src/explicit-send.js";
+import { idl } from "../src/idl.js";
 import { describe, expect, it } from "vitest";
 import {
   COMPUTE_UNIT_LIMIT,
@@ -62,6 +68,7 @@ import {
   venueAccountsOf,
   sendWithBudget,
   versionedTransactionBytes,
+  wrapSolCall,
 } from "../src/invest-tick.js";
 import { legacyTransactionBytes, type JupiterRoute } from "../src/program-scripts.js";
 
@@ -460,5 +467,121 @@ describe("sendWithBudget", () => {
     await expect(sendWithBudget(provider(stranger), crank, [investInstruction], fresh(), tables)).rejects.toThrow(
       /payable by the crank .* but the provider's wallet is/,
     );
+  });
+});
+
+// ── the explicit-send cut: the bytes Anchor sends, sent in the keeper's own order ──
+//
+// THE CLAIM (ADR §4.3 item 1; SAFETY §2.3): the send-site rewrite changes WHO
+// reads the blockhash, WHEN the keeper asks whether it may still send, and HOW
+// the landing is watched — never what is sent. For one blockhash, every crank
+// transaction leaves the explicit sender with exactly the bytes Anchor's
+// `.rpc()` and `provider.sendAndConfirm` put on the wire. Each case below sends
+// the same transaction both ways through one stub connection that records the
+// raw bytes, and compares them.
+describe("the explicit-send cut sends the bytes Anchor sends", () => {
+  const BLOCKHASH = "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk";
+  // THE KEEPER'S N=1: the crank IS the provider's wallet (bin/keeper.mts passes the settle key as both).
+  const crank = Keypair.fromSeed(new Uint8Array(32).fill(5));
+  const nowFresh = () =>
+    ({ age: { quotedAtMs: Date.now(), quotedAtSlot: null, oldestHopSlot: null, oldestHopLabel: null, quoteTimeTakenMs: null } }) as unknown as JupiterRoute;
+
+  function bothWays() {
+    const raw: string[] = [];
+    const connection = {
+      getLatestBlockhash: async () => ({ blockhash: BLOCKHASH, lastValidBlockHeight: 1_000 }),
+      sendRawTransaction: async (bytes: Uint8Array) => {
+        raw.push(Buffer.from(bytes).toString("base64"));
+        return `sig-${raw.length}`;
+      },
+      // Anchor's confirmation, and the sender's.
+      confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+      getSignatureStatuses: async () => ({ context: { slot: 1 }, value: [{ confirmationStatus: "confirmed", err: null }] }),
+      getBlockHeight: async () => 0,
+    } as unknown as Connection;
+    const signer = {
+      publicKey: crank.publicKey,
+      async signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
+        if (tx instanceof Transaction) tx.partialSign(crank);
+        else (tx as VersionedTransaction).sign([crank]);
+        return tx;
+      },
+      async signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]> {
+        return txs;
+      },
+    };
+    const provider = new anchorRuntime.AnchorProvider(connection, signer, { commitment: "confirmed" });
+    const sender = new CrankSender({ connection, wallet: provider.wallet, isLive: () => true, quietMs: 0 });
+    return { raw, provider, sender };
+  }
+
+  /**
+   * An instruction small enough for a legacy message: the route's program and
+   * first keys, the route's own data — with every signer flag cleared, as
+   * venueAccountsOf clears them, so the crank is the only signature it needs.
+   */
+  const small = new TransactionInstruction({
+    programId: investInstruction.programId,
+    keys: investInstruction.keys.slice(0, 6).map((key) => ({ ...key, isSigner: false })),
+    data: investInstruction.data,
+  });
+
+  it("a budgeted LEGACY send — a route that named no lookup tables", async () => {
+    const { raw, provider, sender } = bothWays();
+    await sendWithBudget(provider, crank, [small], nowFresh());
+    await sendWithBudget(provider, crank, [small], nowFresh(), [], sender);
+    expect(raw).toHaveLength(2);
+    expect(raw[1]).toBe(raw[0]);
+    expect(Transaction.from(Buffer.from(raw[0]!, "base64")).instructions).toHaveLength(3);
+  });
+
+  it("a VERSIONED send carrying the route's own lookup tables — the captured ANTHROPIC route", async () => {
+    const { raw, provider, sender } = bothWays();
+    await sendWithBudget(provider, crank, [investInstruction], nowFresh(), tables);
+    await sendWithBudget(provider, crank, [investInstruction], nowFresh(), tables, sender);
+    expect(raw).toHaveLength(2);
+    expect(raw[1]).toBe(raw[0]);
+    const sent = VersionedTransaction.deserialize(Buffer.from(raw[0]!, "base64"));
+    expect(sent.message.addressTableLookups).toHaveLength(tables.length);
+    expect(sent.message.recentBlockhash).toBe(BLOCKHASH);
+  });
+
+  it("the WRAP: `.rpc()` and the sender's `.transaction()` are one message, creates and all", async () => {
+    const { raw, provider, sender } = bothWays();
+    const program = new anchorRuntime.Program(idl, provider);
+    const vault = Keypair.fromSeed(new Uint8Array(32).fill(6)).publicKey;
+    const vaultWsol = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true, TOKEN_PROGRAM_ID);
+    const accounts = { crank: crank.publicKey, vault, policy: investmentPolicyAddress(program.programId, vault), vaultWsol };
+    const creates = [createAssociatedTokenAccountIdempotentInstruction(crank.publicKey, vaultWsol, vault, NATIVE_MINT, TOKEN_PROGRAM_ID)];
+    // TODAY'S SITE, verbatim in shape (invest-tick.ts): the call, its pre-instructions, the crank as signer, .rpc().
+    await wrapSolCall(program, accounts, 19_700_000n).preInstructions(creates).signers([crank]).rpc();
+    // THE CUT'S SITE: the Transaction .rpc() builds, signed and sent by the sender.
+    await sender.sendLegacy(await wrapSolCall(program, accounts, 19_700_000n).preInstructions(creates).transaction(), [crank]);
+    expect(raw).toHaveLength(2);
+    expect(raw[1]).toBe(raw[0]);
+    expect(Transaction.from(Buffer.from(raw[0]!, "base64")).instructions).toHaveLength(2);
+  });
+
+  it("asks before it sends and confirms by polling, where Anchor confirmed on a websocket — the only difference on the wire", async () => {
+    const calls: string[] = [];
+    const { provider, sender } = bothWays();
+    const watched = new Proxy(provider.connection, {
+      get(target, prop) {
+        const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          calls.push(String(prop));
+          return (value as (...a: unknown[]) => unknown)(...args);
+        };
+      },
+    });
+    const anchorSide = new anchorRuntime.AnchorProvider(watched, provider.wallet, { commitment: "confirmed" });
+    await sendWithBudget(anchorSide, crank, [small], nowFresh());
+    const viaAnchor = calls.splice(0);
+    const explicit = new CrankSender({ connection: watched, wallet: provider.wallet, isLive: () => true, quietMs: 0 });
+    void sender;
+    await sendWithBudget(anchorSide, crank, [small], nowFresh(), [], explicit);
+    expect(viaAnchor).toEqual(["getLatestBlockhash", "sendRawTransaction", "confirmTransaction"]);
+    expect(calls).toEqual(["getLatestBlockhash", "sendRawTransaction", "getSignatureStatuses"]);
   });
 });

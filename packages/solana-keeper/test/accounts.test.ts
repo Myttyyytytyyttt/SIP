@@ -31,6 +31,7 @@ import {
   type Transaction,
   type VersionedTransaction,
 } from "@solana/web3.js";
+import { Secret } from "@sip/solana-log";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   configAddress,
@@ -45,8 +46,11 @@ import {
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
-import { LANDING_WINDOW_SLOTS, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+import { KEYED_API, LANDING_WINDOW_SLOTS, LITE_API, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
+import { CrankSender, QUIET_AFTER_TAKEOVER_MS } from "../src/explicit-send.js";
+import { readSweepState } from "../src/invest-snapshot.js";
+import { JupiterPacer } from "../src/jupiter-pacer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
   PYTH_RECEIVER_PROGRAM,
@@ -730,8 +734,9 @@ describe("the ticks' first steps, over the same bytes", () => {
     feeds = true,
     /** Anything else the turn reads off the chain: leg mints, their pools, and the pools' vaults. */
     more: ReadonlyMap<string, { readonly data: Buffer; readonly owner?: PublicKey }> = new Map(),
+    /** The vault's address, when a test must place accounts at addresses derived from it beforehand. */
+    vault: PublicKey = key(),
   ) {
-    const vault = key();
     const accounts = new Map([
       [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
@@ -2228,5 +2233,681 @@ describe("the ticks' first steps, over the same bytes", () => {
     ]);
     expect(MAX_SUPPORTED_TRANSACTION_VERSION).toBeGreaterThan(0);
     expect(callArgs[8]).toEqual([link.wallet, "confirmed"]);
+  });
+
+  // ── the jupiter-key cut: the measured unpaced turn, replayed through a real turn ──
+  //
+  // WHAT WAS MEASURED (test/fixtures/jupiter-turn-run2-apijup-unpaced.jsonl,
+  // 2026-10-11, the owner's two-leg converting basket against the keyless
+  // api.jup.ag): five calls answered 200 with x-ratelimit-remaining counting
+  // 4, 3, 2, 1, 0, and the SIXTH, 0.85 s in, answered 429. The gate's convert
+  // quote met the same wall, which in the keeper throws the gate: the whole
+  // basket REFUSED. Every call after that was refused too.
+  //
+  // WHAT THESE PROVE, through runInvestTick over the stub chain and the stub
+  // venue (nothing higher is faked): today's path reproduces that refusal call
+  // for call; under the cut the same gateway answers every call of a turn
+  // spaced at the plan's rate, a turn the minute cannot cover is DEFERRED
+  // before its first call — nothing quoted, wrapped or sent — and a 429 holds
+  // the next turn back instead of letting it spend another gate. And one the
+  // replay cannot show on its own, because the keyless gate is refused before
+  // the wrap: on a gateway wide enough to pass the gate, the unpaced turn
+  // WRAPS and then fails at send time — the mid-basket failure the reservation
+  // exists to prevent.
+  describe("the jupiter-key cut, against the measured rate limiter", () => {
+    /** The Jupiter requests of the measured turn, in the order they were made. */
+    const measured = readFileSync(new URL("./fixtures/jupiter-turn-run2-apijup-unpaced.jsonl", import.meta.url), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; status?: number | string; rl?: string; phase?: string })
+      .filter((entry) => entry.kind === "jupiter");
+
+    /** One request as the gateway saw it. */
+    interface Seen {
+      readonly at: number;
+      readonly host: string;
+      readonly path: string;
+      readonly status: number;
+      readonly key: string | null;
+    }
+
+    const refusedBody = () =>
+      new Response(JSON.stringify({ code: 429, message: "[API Gateway] Too many requests" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "x-ratelimit-remaining": "0" },
+      });
+
+    /**
+     * A gateway in front of the venue stub: `answer` decides each request's fate
+     * from what came before it, and an accepted one is served by stubJupiter.
+     * Installed AFTER stubJupiter, over it.
+     */
+    function gateway(now: () => number, answer: (accepted: readonly number[], index: number, at: number) => boolean) {
+      const venue = globalThis.fetch;
+      const accepted: number[] = [];
+      const seen: Seen[] = [];
+      vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+        const at = now();
+        const url = new URL(String(input));
+        const key = new Headers(init?.headers).get("x-api-key");
+        const ok = answer(accepted, seen.length, at);
+        seen.push({ at, host: url.host, path: url.pathname, status: ok ? 200 : 429, key });
+        if (!ok) return refusedBody();
+        accepted.push(at);
+        return venue(input as string, init);
+      });
+      return { seen, accepted };
+    }
+
+    /** The measured gateway, replayed: the n-th request gets the n-th recorded status, and anything past the recording is refused. */
+    const replayed = (now: () => number) =>
+      gateway(now, (_accepted, index) => (measured[index]?.status ?? 429) === 200);
+
+    /** The measured SHAPE: five accepted per ten seconds (x-ratelimit-reset +10 s, api-keyless-probe.log), refused ones not counted. */
+    const fivePerTen = (now: () => number, perWindow = 5) =>
+      gateway(now, (accepted, _index, at) => accepted.filter((t) => t > at - 10_000).length < perWindow);
+
+    /** A clock the pacer sleeps on: spacing advances it, real time does not. */
+    function fakeClock(start = 1_791_760_456_000) {
+      let now = start;
+      return {
+        now: () => now,
+        advance: (ms: number) => {
+          now += ms;
+        },
+        pacer: (perMinute: number) =>
+          new JupiterPacer({
+            perMinute,
+            now: () => now,
+            sleep: async (ms) => {
+              now += ms;
+            },
+          }),
+      };
+    }
+
+    /**
+     * The owner's vault on 2026-10-09 (smallVault: two legs at 50/50 under a
+     * $149 max_per_call, 0.0197 SOL free), on a chain that CONFIRMS what it is
+     * sent — so a turn that is let through can buy, and every send is counted.
+     */
+    function buyingVault(basket: ReturnType<typeof basketOnChain>) {
+      const crank = Keypair.generate();
+      let sent = 0;
+      let wsolAta: PublicKey | undefined;
+      let usdcAta: PublicKey | undefined;
+      const chain = smallVault(basket, {
+        sendRawTransaction: async () => {
+          sent += 1;
+          return Keypair.generate().publicKey.toBase58();
+        },
+        confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+        getSlot: async () => 1,
+        getTokenAccountBalance: async (address) => {
+          const raw = (amount: bigint) => ({ context: { slot: 1 }, value: { amount: amount.toString(), decimals: 6, uiAmount: null } });
+          if (wsolAta !== undefined && (address as PublicKey).equals(wsolAta) && sent >= 1) return raw(BigInt(SMALL_FREE));
+          if (usdcAta !== undefined && (address as PublicKey).equals(usdcAta) && sent >= 2) return raw(2_000_000n);
+          throw new Error("could not find account");
+        },
+      });
+      wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      usdcAta = getAssociatedTokenAddressSync(USDC_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      const signing = async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => tx;
+      const program = new anchor.Program(
+        idl,
+        new anchor.AnchorProvider(
+          chain.connection,
+          { publicKey: crank.publicKey, signTransaction: signing, signAllTransactions: async (txs) => txs },
+          { commitment: "confirmed" },
+        ),
+      );
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      return { deps, sent: () => sent };
+    }
+
+    const TEST_KEY = "jupiter-test-key-0000000001";
+
+    it("REPLAYS the measured turn on today's path: 429 on call 6, the gate throws, the whole basket REFUSED, nothing sent", async () => {
+      // THE RECORDING ITSELF, read rather than retyped.
+      expect(measured.map((entry) => entry.status)).toEqual([200, 200, 200, 200, 200, 429, 429, 429, 429, 429]);
+      expect(measured.map((entry) => entry.rl).slice(0, 5)).toEqual(["4", "3", "2", "1", "0"]);
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = replayed(clock.now);
+      const vault = buyingVault(basket);
+
+      const result = await runInvestTick(vault.deps);
+
+      // CALL FOR CALL WHAT THE MEASUREMENT SAW: leg 0 measured (3), leg 1's
+      // build (2) and its probe — the sixth call, refused, which ARM 2 takes as
+      // an abstention — and then the convert's quote, refused, which throws the
+      // gate.
+      expect(wire.seen.map((s) => s.status)).toEqual([200, 200, 200, 200, 200, 429, 429]);
+      expect(wire.seen.map((s) => s.path)).toEqual([
+        "/swap/v1/quote", "/swap/v1/swap-instructions", "/swap/v1/quote",
+        "/swap/v1/quote", "/swap/v1/swap-instructions", "/swap/v1/quote",
+        "/swap/v1/quote",
+      ]);
+      expect(result.outcome).toBe("REFUSED");
+      // THE DETAIL CANNOT SAY 429 — summarizeUpstreamError cuts the quoted URL
+      // before the status, today as in the measurement — so the wire above is
+      // the witness, and the detail says what was refused.
+      expect(result.detail).toContain("could not be measured");
+      expect(result.detail).toContain("refusing the whole basket");
+      // BEFORE THE WRAP, as the doctrine says — but having spent seven calls of
+      // an organisation's budget on a basket it then refused.
+      expect(vault.sent()).toBe(0);
+      // Today's host, keyless: no header was ever sent.
+      expect(new Set(wire.seen.map((s) => s.host))).toEqual(new Set(["lite-api.jup.ag"]));
+      expect(wire.seen.every((s) => s.key === null)).toBe(true);
+    });
+
+    it("under the cut, the same limiter answers all 18 calls of the turn — spaced, keyed, at api.jup.ag — and the basket is bought", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const vault = buyingVault(basket);
+
+      const result = await runInvestTick({ ...vault.deps, jupiter: { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer } });
+
+      expect(result.outcome).toBe("INVESTED");
+      // 6(L+1) at L = 2: the ADR's 18 calls per buy, unchanged by the cut.
+      expect(wire.seen).toHaveLength(18);
+      expect(wire.seen.every((s) => s.status === 200)).toBe(true);
+      // J1: every request to the keyed host, every one carrying the key.
+      expect(new Set(wire.seen.map((s) => s.host))).toEqual(new Set(["api.jup.ag"]));
+      expect(wire.seen.every((s) => s.key === TEST_KEY)).toBe(true);
+      // P8: two seconds apart, so no ten-second window ever held a sixth.
+      const gaps = wire.seen.slice(1).map((s, i) => s.at - wire.seen[i]!.at);
+      expect(Math.min(...gaps)).toBeGreaterThanOrEqual(2_000);
+      // The wrap, the convert and one invest per leg.
+      expect(vault.sent()).toBe(4);
+      expect(pacer.status()).toMatchObject({ granted: 1, calls: 18, overdrawn: 0, http429: 0, reservedOutstanding: 0 });
+    });
+
+    it("DEFERS a second buying turn in the same minute BEFORE ITS FIRST CALL, where today's path starts it and is refused", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const jupiter = { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer };
+
+      expect((await runInvestTick({ ...buyingVault(basket).deps, jupiter })).outcome).toBe("INVESTED");
+      const before = wire.seen.length;
+      // ANOTHER VAULT'S TURN, the same sweep: 18 more would make 36 of 30 in one minute.
+      const second = buyingVault(basket);
+      const deferred = await runInvestTick({ ...second.deps, jupiter });
+      expect(deferred.outcome).toBe("DEFERRED");
+      expect(deferred.detail).toContain("needs 18 calls and 18 of this keeper's 30 a minute");
+      expect(deferred.detail).toContain("nothing was quoted, wrapped or sent");
+      expect(wire.seen.length - before).toBe(0);
+      expect(second.sent()).toBe(0);
+      expect(pacer.status().deferred).toEqual({ budget: 1, backoff: 0, neverFits: 0 });
+
+      // TODAY'S PATH, the same turn at the same instant: it starts, and the
+      // gateway refuses it — a request spent, a basket refused, a warning raised.
+      const unpaced = await runInvestTick(buyingVault(basket).deps);
+      expect(unpaced.outcome).toBe("REFUSED");
+      expect(wire.seen.length - before).toBeGreaterThan(0);
+      expect(wire.seen.slice(before).some((s) => s.status === 429)).toBe(true);
+
+      // A MINUTE LATER the budget is back and the deferred vault buys.
+      clock.advance(60_000);
+      expect((await runInvestTick({ ...second.deps, jupiter })).outcome).toBe("INVESTED");
+    });
+
+    it("prevents the MID-BASKET failure: on a gateway wide enough for the gate, today's path WRAPS and then fails at send time", async () => {
+      // TEN PER TEN SECONDS: the free key's burst as the ADR assumes it (open
+      // question 10). The gate's nine calls fit; the send path's do not.
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now, 10);
+      const unpaced = buyingVault(basket);
+      const result = await runInvestTick(unpaced.deps);
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("429");
+      // THE WRAP WENT OUT: the owner's SOL is wSOL now, and no basket was bought with it.
+      expect(unpaced.sent()).toBe(1);
+      expect(wire.seen.filter((s) => s.status === 429)).toHaveLength(1);
+
+      // Under the cut, one call a second against the same gateway: all eighteen answered, the basket bought.
+      clock.advance(60_000);
+      const paced = buyingVault(basket);
+      const pacer = clock.pacer(60);
+      const bought = await runInvestTick({ ...paced.deps, jupiter: { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer } });
+      expect(bought.outcome).toBe("INVESTED");
+      expect(paced.sent()).toBe(4);
+      expect(pacer.status().http429).toBe(0);
+    });
+
+    it("backs off after a 429 it could not prevent: the refused turn's successor is DEFERRED with no request at all, then let through", async () => {
+      // ANOTHER CONSUMER OF THE SAME ORGANISATION — the web, a script — has
+      // just spent the gateway's window. The pacer cannot see it; the 429 says it.
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      for (let i = 0; i < 5; i++) wire.accepted.push(clock.now());
+      const pacer = clock.pacer(30);
+      const jupiter = { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer };
+
+      const refused = await runInvestTick({ ...buyingVault(basket).deps, jupiter });
+      expect(refused.outcome).toBe("REFUSED");
+      expect(refused.detail).toContain("could not be measured");
+      // ONE request, refused: the gate stops at its first build that throws.
+      expect(wire.seen.map((s) => s.status)).toEqual([429]);
+      expect(pacer.status().http429).toBe(1);
+
+      // THE NEXT SWEEP: deferred on the backoff, no request at all.
+      clock.advance(30_000);
+      const held = await runInvestTick({ ...buyingVault(basket).deps, jupiter });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("429 Too Many Requests");
+      expect(wire.seen).toHaveLength(1);
+
+      // Past the backoff, through — and bought.
+      clock.advance(30_000);
+      expect((await runInvestTick({ ...buyingVault(basket).deps, jupiter })).outcome).toBe("INVESTED");
+      expect(pacer.status().deferred).toEqual({ budget: 0, backoff: 1, neverFits: 0 });
+    });
+
+    it("refuses a basket the plan's minute can never cover — with the remedy — and asks Jupiter nothing", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const result = await runInvestTick({ ...buyingVault(basket).deps, jupiter: { baseUrl: LITE_API, apiKey: null, pacer: clock.pacer(12) } });
+      expect(result.outcome).toBe("REFUSED");
+      expect(result.detail).toContain("needs 18 Jupiter calls per buying turn");
+      expect(result.detail).toContain("can never be bought at this budget");
+      expect(wire.seen).toHaveLength(0);
+    });
+
+    it("releases the reservation on every way out — a FAILED turn included — so one bad turn cannot hold the budget for the life of the process", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const vault = buyingVault(basket);
+      const exploding = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          if (prop === "getBalance") return async () => {
+            throw new Error("the crank's balance could not be read");
+          };
+          return (target as unknown as Record<string | symbol, unknown>)[prop];
+        },
+      }) as Connection;
+      const result = await runInvestTick({ ...vault.deps, connection: exploding, jupiter: { baseUrl: LITE_API, apiKey: null, pacer } });
+      expect(result.outcome).toBe("FAILED");
+      expect(pacer.status().reservedOutstanding).toBe(0);
+    });
+  });
+
+  // ── the invest-batch cut: the snapshot decides only what sends nothing ──────
+  //
+  // THE CLAIM UNDER TEST (ADR §2.3.3, CUTS §3.3). The sweep's batch carries
+  // every input of the at-rest half of a turn, so a turn that rests can be
+  // decided from it with no request of its own; and a turn that would ACT is
+  // never decided from it — runInvestTick throws that answer away and runs the
+  // turn again on today's reads, so the requests it then makes and the bytes it
+  // then sends are today's, one for one. Each case below runs the same chain
+  // twice: once as today (no snapshot) and once from readSweepState's snapshot.
+  describe("the invest-batch cut", () => {
+    /** A classic SPL Token account owned by `vault`, holding `amount`: what a deposit leaves in its ATA. */
+    function ataHolding(mint: PublicKey, vault: PublicKey, amount: bigint) {
+      const data = Buffer.alloc(165);
+      mint.toBuffer().copy(data, 0);
+      vault.toBuffer().copy(data, 32);
+      data.writeBigUInt64LE(amount, 64);
+      return { data, owner: TOKEN_PROGRAM_ID };
+    }
+
+    /**
+     * A chain whose vault holds `usdc` in its USDC ATA and `wsol` in its wSOL ATA,
+     * both as ACCOUNTS (which the batch reads) and through getTokenAccountBalance
+     * (which today's turn asks) — one truth, two readers.
+     */
+    function chainHolding(
+      over: { readonly vault?: Partial<VaultFields>; readonly policy?: Partial<PolicyFields> | null; readonly usdc?: bigint; readonly wsol?: bigint; readonly feeds?: boolean },
+      extra: Readonly<Record<string, Handler>> = {},
+      more: Map<string, { readonly data: Buffer; readonly owner?: PublicKey }> = new Map(),
+    ) {
+      const vault = key();
+      const balances = new Map<string, bigint>();
+      if ((over.usdc ?? 0n) > 0n) {
+        const ata = classicAta(USDC_MINT, vault);
+        more.set(ata.toBase58(), ataHolding(USDC_MINT, vault, over.usdc!));
+        balances.set(ata.toBase58(), over.usdc!);
+      }
+      if ((over.wsol ?? 0n) > 0n) {
+        const ata = classicAta(NATIVE_MINT, vault);
+        more.set(ata.toBase58(), ataHolding(NATIVE_MINT, vault, over.wsol!));
+        balances.set(ata.toBase58(), over.wsol!);
+      }
+      const chain = chainWith(
+        over.vault ?? {},
+        over.policy === undefined ? {} : over.policy,
+        {
+          getMinimumBalanceForRentExemption: async () => 2_000_000,
+          getTokenAccountBalance: async (address) => {
+            const amount = balances.get((address as PublicKey).toBase58());
+            if (amount === undefined) throw new Error("could not find account");
+            return { context: { slot: 1 }, value: { amount: amount.toString(), decimals: 6, uiAmount: null } };
+          },
+          ...extra,
+        },
+        over.feeds ?? true,
+        more,
+        vault,
+      );
+      return { ...chain, balances };
+    }
+
+    /** The same turn, as today and from the batch: both answers, and what each asked the chain. */
+    async function bothWays(chain: ReturnType<typeof chainHolding>, deps: Omit<Parameters<typeof runInvestTick>[0], "connection" | "program" | "vault">) {
+      const base = { connection: chain.connection, program: chain.program, vault: chain.vault, ...deps };
+      chain.calls.splice(0);
+      const fresh = await runInvestTick(base);
+      const freshCalls = chain.calls.splice(0);
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      expect(chain.calls.splice(0)).toEqual(["getMultipleAccountsInfo"]);
+      const snapshot = state.invest.get(chain.vault.toBase58())!;
+      const fromBatch = await runInvestTick({ ...base, snapshot });
+      const batchCalls = chain.calls.splice(0);
+      // A SECOND TURN ON THE SAME VAULT, as a second linked wallet's would be: the rent is cached now.
+      const again = await runInvestTick({ ...base, snapshot });
+      const againCalls = chain.calls.splice(0);
+      return { fresh, freshCalls, fromBatch, batchCalls, again, againCalls };
+    }
+
+    const dry = { crank: null, crankLamports: 10_000_000_000n, live: false, protocolPaused: false } as const;
+
+    it.each([
+      ["NO_POLICY", { policy: null }, dry, "NO_POLICY"],
+      ["investing switched off", { policy: { enabled: false } }, dry, "IDLE"],
+      ["an in_mint this keeper cannot route", { policy: { inMint: Keypair.generate().publicKey } }, dry, "REFUSED"],
+      ["the vault paused", { vault: { paused: true } }, dry, "PAUSED"],
+      ["the protocol paused", {}, { ...dry, protocolPaused: true }, "PAUSED"],
+      ["below the minimum, with conversion off", { usdc: 1_000_000n, policy: { minConvertRateWad: 0n } }, dry, "IDLE"],
+      ["the crank too short to wrap", { usdc: 4_000_000n }, { ...dry, crankLamports: 1_000n }, "IDLE"],
+      ["the oracle unreadable, so the SOL rests", { usdc: 4_000_000n, feeds: false }, dry, "IDLE"],
+      ["a dry run that would wrap and invest", {}, dry, "INVESTED"],
+      ["a dry run that would invest USDC already held", { usdc: 50_000_000n, policy: { minConvertRateWad: 0n } }, dry, "INVESTED"],
+    ] as const)("decides %s exactly as today, from the batch alone", async (_name, over, deps, outcome) => {
+      const chain = chainHolding(over as Parameters<typeof chainHolding>[0]);
+      const run = await bothWays(chain, deps);
+      expect(run.fresh.outcome).toBe(outcome);
+      // THE SAME ANSWER, WORD FOR WORD — wrap report and fee notes included.
+      const { reads, ...batchAnswer } = run.fromBatch;
+      expect(batchAnswer).toEqual(run.fresh);
+      expect(reads).toBe("snapshot");
+      // TODAY IT ASKED THE CHAIN; FROM THE BATCH IT ASKED NOTHING but the rent floor, once for the connection.
+      expect(run.freshCalls.length).toBeGreaterThan(0);
+      expect(run.batchCalls.filter((call) => call !== "getMinimumBalanceForRentExemption")).toEqual([]);
+      expect(run.batchCalls.length).toBeLessThanOrEqual(1);
+      expect(run.againCalls).toEqual([]);
+      expect(run.again.outcome).toBe(outcome);
+    });
+
+    it("never decides a FAILED from the batch: a vault the batch found missing is read again, and failed by today's reads", async () => {
+      const chain = chainHolding({});
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      // The vault closes between the batch and the turn — or the batch simply did not have it.
+      const snapshot = { ...state.invest.get(chain.vault.toBase58())!, vault: null };
+      chain.calls.splice(0);
+      const result = await runInvestTick({ connection: chain.connection, program: chain.program, vault: chain.vault, ...dry, snapshot });
+      expect(result.reads).toBe("fresh");
+      // Today's verdict, from today's reads: the chain still HAS the vault, so it is not "missing".
+      expect(result.outcome).toBe("INVESTED");
+      expect(chain.calls).toContain("getAccountInfoAndContext");
+    });
+
+    it("throws on a policy that does not decode, as today — never a NO_POLICY that says nothing", async () => {
+      const chain = chainHolding({});
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      const snap = state.invest.get(chain.vault.toBase58())!;
+      const broken = { ...snap, policy: { ...snap.policy!, data: Buffer.alloc(snap.policy!.data.length) } };
+      await expect(runInvestTick({ connection: chain.connection, program: chain.program, vault: chain.vault, ...dry, snapshot: broken })).rejects.toThrow(/discriminator/);
+    });
+
+    it("refuses a snapshot that is another vault's, before reading anything from it", async () => {
+      const a = chainHolding({});
+      const b = chainHolding({});
+      const state = await readSweepState(b.connection, b.program, [b.vault]);
+      await expect(
+        runInvestTick({ connection: a.connection, program: a.program, vault: a.vault, ...dry, snapshot: state.invest.get(b.vault.toBase58())! }),
+      ).rejects.toThrow(/is vault .*'s/);
+    });
+
+    /**
+     * A vault that will BUY: a two-leg basket, `usdc` already in its ATA and no
+     * SOL free to wrap, on a chain that confirms what it is sent and records the
+     * bytes — the blockhash fixed, so two runs sign the same message.
+     */
+    function buyingWith(usdc: bigint) {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      const crank = Keypair.fromSeed(new Uint8Array(32).fill(9));
+      const raw: string[] = [];
+      const chain = chainHolding(
+        { usdc, policy: { legs: basket.legs, minConvertRateWad: 0n } },
+        {
+          // EVERY LAMPORT IS RENT, so nothing is free to wrap and only the deposit is bought.
+          getMinimumBalanceForRentExemption: async () => 10_000_000_000,
+          getBalance: async () => 10_000_000_000,
+          getLatestBlockhash: async () => ({ blockhash: "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk", lastValidBlockHeight: 1_000 }),
+          sendRawTransaction: async (bytes) => {
+            raw.push(Buffer.from(bytes as Uint8Array).toString("base64"));
+            return Keypair.generate().publicKey.toBase58();
+          },
+          confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+          getSlot: async () => 1,
+        },
+        new Map(basket.accounts),
+      );
+      const signing = async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => tx;
+      const program = new anchor.Program(
+        idl,
+        new anchor.AnchorProvider(chain.connection, { publicKey: crank.publicKey, signTransaction: signing, signAllTransactions: async (txs) => txs }, { commitment: "confirmed" }),
+      );
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      return { chain, deps, raw };
+    }
+
+    it("buys a MANUAL DEPOSIT with no settle at all: the batch sees the vault's own USDC, says act, and the turn buys on fresh reads", async () => {
+      // THE TRAP IN MEMORY (keeper-user-ceiling-measured): skipping invest on a
+      // vault whose settle rested would strand every deposit made by hand. The
+      // snapshot holds the vault's OWN balances, not a verdict about the settle.
+      const { urls } = stubJupiter();
+      const { chain, deps, raw } = buyingWith(100_000_000n);
+      const state = await readSweepState(chain.connection, deps.program, [chain.vault]);
+      expect(state.invest.get(chain.vault.toBase58())!.usdcHeld).toBe(100_000_000n);
+      const result = await runInvestTick({ ...deps, snapshot: state.invest.get(chain.vault.toBase58())! });
+      expect(result.reads).toBe("fresh");
+      expect(result.outcome).toBe("INVESTED");
+      expect(result.purchases).toHaveLength(2);
+      expect(raw).toHaveLength(2);
+      expect(urls.length).toBeGreaterThan(0);
+    });
+
+    it("re-reads EVERYTHING fresh before it acts, and sends the same bytes, after the same requests, as today's turn", async () => {
+      stubJupiter();
+      const { chain, deps, raw } = buyingWith(100_000_000n);
+      chain.calls.splice(0);
+      const asToday = await runInvestTick(deps);
+      const todayCalls = chain.calls.splice(0);
+      const todayBytes = raw.splice(0);
+      expect(asToday.outcome).toBe("INVESTED");
+      expect(todayBytes).toHaveLength(2);
+
+      // THE SAME VAULT ON THE SAME CHAIN, now led by the batch.
+      const state = await readSweepState(chain.connection, deps.program, [chain.vault]);
+      chain.calls.splice(0);
+      const fromBatch = await runInvestTick({ ...deps, snapshot: state.invest.get(chain.vault.toBase58())! });
+      const batchCalls = chain.calls.splice(0);
+
+      expect(fromBatch.reads).toBe("fresh");
+      expect(fromBatch.outcome).toBe("INVESTED");
+      // THE REQUESTS: the snapshot pass asked for the rent floor once (its cache
+      // is new to this connection) and nothing else; then the fresh turn made
+      // EXACTLY today's requests, in today's order — the policy, the vault batch,
+      // the rent, both balances, the leg mints, every venue read, the token
+      // accounts, the tables, the blockhash, the sends.
+      expect(batchCalls[0]).toBe("getMinimumBalanceForRentExemption");
+      expect(batchCalls.slice(1)).toEqual(todayCalls);
+      // THE BYTES: every transaction the batch-led turn sent is the one today's sent.
+      expect(raw).toEqual(todayBytes);
+      expect(fromBatch.purchases?.map((p) => p.spentRaw)).toEqual(asToday.purchases?.map((p) => p.spentRaw));
+    });
+  });
+
+  // ── the explicit-send cut, through whole turns ──────────────────────────────
+  //
+  // L1d's three behaviours, each against today's path on the same chain: the
+  // same four transactions for the same blockhash (wrap, convert, two legs);
+  // isLive() asked per SEND, so a claim lost after the wrap sends no convert and
+  // no leg — where today's turn, which asked once, sends all four; and no buy
+  // at all inside the takeover quiet period, nothing quoted either.
+  describe("the explicit-send cut", () => {
+    /**
+     * The owner's small converting vault (smallVault), on a chain that confirms
+     * what it is sent — by websocket for Anchor, by status for the sender — and
+     * records the bytes. The blockhash and the crank are fixed and the state is
+     * resettable, so two runs on ONE chain sign the same messages.
+     */
+    function sendingVault() {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      const crank = Keypair.fromSeed(new Uint8Array(32).fill(4));
+      const raw: string[] = [];
+      let sent = 0;
+      let wsolAta: PublicKey | undefined;
+      let usdcAta: PublicKey | undefined;
+      const chain = smallVault(basket, {
+        getLatestBlockhash: async () => ({ blockhash: "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk", lastValidBlockHeight: 1_000 }),
+        sendRawTransaction: async (bytes) => {
+          sent += 1;
+          raw.push(Buffer.from(bytes as Uint8Array).toString("base64"));
+          return `sig-${sent}`;
+        },
+        confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+        getSignatureStatuses: async () => ({ context: { slot: 1 }, value: [{ confirmationStatus: "confirmed", err: null, slot: 1, confirmations: 1 }] }),
+        getBlockHeight: async () => 0,
+        getSlot: async () => 1,
+        getTokenAccountBalance: async (address) => {
+          const amount = (value: bigint) => ({ context: { slot: 1 }, value: { amount: value.toString(), decimals: 6, uiAmount: null } });
+          if (wsolAta !== undefined && (address as PublicKey).equals(wsolAta) && sent >= 1) return amount(BigInt(SMALL_FREE));
+          if (usdcAta !== undefined && (address as PublicKey).equals(usdcAta) && sent >= 2) return amount(2_000_000n);
+          throw new Error("could not find account");
+        },
+      });
+      wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      usdcAta = getAssociatedTokenAddressSync(USDC_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      // THE KEEPER'S WALLET IS THE CRANK (bin/keeper.mts): it signs what it is handed, as anchor.Wallet does.
+      const wallet = {
+        publicKey: crank.publicKey,
+        async signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
+          if ("partialSign" in tx) (tx as Transaction).partialSign(crank);
+          else (tx as VersionedTransaction).sign([crank]);
+          return tx;
+        },
+        async signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]> {
+          return txs;
+        },
+      };
+      const program = new anchor.Program(idl, new anchor.AnchorProvider(chain.connection, wallet, { commitment: "confirmed" }));
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      /** A sender on a clock the test owns, already past its quiet period unless asked otherwise. */
+      const sender = (isLive: () => boolean, options: { quiet?: boolean } = {}) => {
+        let now = 1_000_000;
+        const made = new CrankSender({ connection: chain.connection, wallet, isLive, now: () => now, sleep: async (ms) => void (now += ms) });
+        if (options.quiet !== true) now += QUIET_AFTER_TAKEOVER_MS;
+        return { sender: made, advance: (ms: number) => void (now += ms) };
+      };
+      return { chain, deps, raw, sender, reset: () => ((sent = 0), raw.splice(0)) };
+    }
+
+    it("sends the wrap, the convert and both legs as the very bytes today's turn sends, for the same blockhash", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      const today = await runInvestTick(vault.deps);
+      const todayBytes = [...vault.raw];
+      expect(today.outcome).toBe("INVESTED");
+      expect(todayBytes).toHaveLength(4);
+
+      vault.reset();
+      const { sender } = vault.sender(() => true);
+      const explicit = await runInvestTick({ ...vault.deps, sender });
+      expect(explicit.outcome).toBe("INVESTED");
+      expect(vault.raw).toEqual(todayBytes);
+      expect(explicit.purchases?.map((p) => p.spentRaw)).toEqual(today.purchases?.map((p) => p.spentRaw));
+      // CONFIRMED BY POLLING, NEVER BY THE WEBSOCKET: no confirmTransaction on the explicit run.
+      expect(sender.status()).toMatchObject({ sent: 4, landed: 4, refused: { notLive: 0, quiet: 0, draining: 0 } });
+    });
+
+    it("asks isLive() before EACH send: a claim lost after the wrap sends no convert and no leg — today's turn sends all four", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      // TODAY: keysForTurn asked once, at the top of the turn, and nothing asks
+      // again — whatever happens to the claim after that, all four go out.
+      const today = await runInvestTick(vault.deps);
+      expect(today.outcome).toBe("INVESTED");
+      expect(vault.raw).toHaveLength(4);
+
+      vault.reset();
+      let live = true;
+      // The claim goes the moment the wrap's bytes have left.
+      const wrapThenLose = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          if (prop !== "sendRawTransaction") return value;
+          return async (...args: unknown[]) => {
+            const signature = await (value as (...a: unknown[]) => Promise<string>)(...args);
+            live = false;
+            return signature;
+          };
+        },
+      }) as Connection;
+      const lostSender = new CrankSender({ connection: wrapThenLose, wallet: (vault.deps.program.provider as anchor.AnchorProvider).wallet, isLive: () => live, quietMs: 0 });
+      const result = await runInvestTick({ ...vault.deps, sender: lostSender });
+      expect(vault.raw).toHaveLength(1);
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("no longer holds the claim");
+      expect(result.purchases).toBeUndefined();
+      expect(lostSender.status()).toMatchObject({ sent: 1, landed: 1, refused: { notLive: 1 } });
+    });
+
+    it("buys NOTHING inside the takeover quiet period — nothing quoted, wrapped or sent — and buys once it is over", async () => {
+      const { urls } = stubJupiter();
+      const vault = sendingVault();
+      const { sender, advance } = vault.sender(() => true, { quiet: true });
+      const held = await runInvestTick({ ...vault.deps, sender });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("the takeover quiet period");
+      expect(held.detail).toContain("settles go as usual");
+      expect(urls).toHaveLength(0);
+      expect(vault.raw).toHaveLength(0);
+
+      advance(QUIET_AFTER_TAKEOVER_MS);
+      const bought = await runInvestTick({ ...vault.deps, sender });
+      expect(bought.outcome).toBe("INVESTED");
+      expect(vault.raw).toHaveLength(4);
+    });
+
+    it("starts no buy while draining after SIGTERM", async () => {
+      const { urls } = stubJupiter();
+      const vault = sendingVault();
+      const { sender } = vault.sender(() => true);
+      sender.beginDrain();
+      const held = await runInvestTick({ ...vault.deps, sender });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("draining after SIGTERM");
+      expect(urls).toHaveLength(0);
+      expect(vault.raw).toHaveLength(0);
+    });
   });
 });

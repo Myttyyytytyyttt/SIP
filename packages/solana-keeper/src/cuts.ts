@@ -7,15 +7,19 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`jupiter-key`, `rest-skip`, `invest-batch`, `explicit-send`, …); they land
-// with their own code, each on its own soak, and until then naming one REFUSES
-// TO START. A token that is accepted and does nothing is the one failure this
+// (`rest-skip`, `lamports-filter`, …); they land with their own
+// code, each on its own soak, and until then naming one REFUSES TO START. A token that is accepted and does nothing is the one failure this
 // list exists to prevent: the owner reads Railway, sees `rest-skip`, and
 // believes the walk is being skipped.
 //
-// NONE OF THESE IS ON THE MONEY PATH. Each changes how a fact is read — the
-// link list, a wallet's Privy record, when the rankings are recomputed — and
+// THE FIRST THREE ARE NOT ON THE MONEY PATH. Each changes how a fact is read —
+// the link list, a wallet's Privy record, when the rankings are recomputed — and
 // never what is settled, for whom, or how much (ADR §6.2, L1b non-money).
+//
+// THE REST ARE, ONE TOKEN EACH, and the ADR's rule for them is that only one
+// soaks at a time (§6.1 rule 1): a money token changes whether, when or how a
+// buy is sent, so each has its own go gate and its rollback is removing it. They
+// are listed after the non-money three, in the order they are switched on.
 //
 // L3 IS NOT A TOKEN. The last-known-good link list carries a number, how old a
 // list it may fall back to, so it has a variable of its own
@@ -34,8 +38,28 @@
  *   * `board-timer`: the rankings recomputed at most every
  *     BOARD_REFRESH_MIN_GAP_MS after a settlement, one in flight and one queued,
  *     instead of once per SETTLED (src/board-refresh.ts).
+ *
+ *   MONEY PATH, one at a time:
+ *
+ *   * `jupiter-key` (J1 + P8, ADR §6.2 L1b-m1): every Jupiter call of a buying
+ *     turn through api.jup.ag with SIP_SOLANA_JUPITER_API_KEY when one is set
+ *     (today's host otherwise), paced, with the turn's calls RESERVED before its
+ *     first one — a turn the budget cannot cover ends DEFERRED having moved
+ *     nothing — and a backoff after a 429 (src/jupiter-pacer.ts).
+ *   * `invest-batch` (C5 with C2 inside, ADR §2.3.3, §6.2 L1b-m3): the invest
+ *     turn's at-rest reads — the policy, the vault's wSOL and USDC balances,
+ *     the Clock, both Pyth feeds, the EpochSchedule — folded into the sweep's
+ *     one vault batch, and the rent floor cached per size. The snapshot may only
+ *     decide a turn that sends nothing; one that would act is run again on
+ *     fresh reads, so every transaction is built as today
+ *     (src/invest-snapshot.ts). The profit keeper's census goes 19 → 7.
+ *   * `explicit-send` (L1d, ADR §4.3, §6.2): the wrap, the convert and every
+ *     leg sent in the keeper's own order — blockhash, build, sign, ask, send,
+ *     poll — with isLive() asked before EACH send, no wrap/convert/invest for
+ *     75 s after taking the claim, and a SIGTERM drain; the bytes are Anchor's
+ *     (src/explicit-send.ts).
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer"] as const;
+export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch", "explicit-send"] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 

@@ -393,6 +393,8 @@ describe("which finished turns may rest", () => {
     INVESTED: false,
     REFUSED: false,
     FAILED: false,
+    // The jupiter-key pacer's "not now": busy, so the next sweep turns it again.
+    DEFERRED: false,
     THREW: false,
   };
 

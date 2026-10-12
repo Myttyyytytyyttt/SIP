@@ -20,6 +20,8 @@ import type { Redactor, Secret } from "@sip/solana-log";
 import type { BoardRefreshStatus } from "./board-refresh.js";
 import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
+import type { CrankSenderStatus } from "./explicit-send.js";
+import type { JupiterPacerStatus } from "./jupiter-pacer.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
@@ -272,6 +274,45 @@ export interface CutsStatus {
   readonly privyAddressBook: PrivyAddressBookStatus | null;
   /** board-timer: recomputes started and requests they absorbed. */
   readonly board: BoardRefreshStatus | null;
+  /**
+   * jupiter-key: which host and whether a key, and the pacer's counters —
+   * `deferred` is the ADR's `pacer.deferred` and `http429` its go gate (0 over
+   * three real buys). ABSENT, not null, while the token is off: the block above
+   * predates it, and a keeper without the cut serves the page it served before.
+   */
+  readonly jupiter?: JupiterCutStatus;
+  /**
+   * invest-batch: batched sweeps and their requests, and what the snapshot did
+   * with each invest turn — decided it (sent nothing), handed it to fresh reads,
+   * or was not offered because the sweep had already moved that vault's money.
+   * `investedAfterReread` above 0 is the ADR's "≥ 1 real INVESTED through the
+   * new path". Absent while the token is off.
+   */
+  readonly investBatch?: InvestBatchStatus;
+  /**
+   * explicit-send: what the crank's sender sent, landed, saw revert or expire,
+   * and REFUSED before sending (not live, quiet, draining); the takeover quiet
+   * period while it runs; and the SIGTERM drain once one started — the ADR's
+   * `deploy.releasedOnSigterm`. Absent while the token is off.
+   */
+  readonly explicitSend?: CrankSenderStatus;
+}
+
+/** The `cuts.investBatch` block (src/invest-snapshot.ts; counted in bin/keeper.mts). */
+export interface InvestBatchStatus {
+  readonly sweeps: number;
+  readonly requests: number;
+  readonly decidedFromSnapshot: number;
+  readonly rereadFresh: number;
+  readonly investedAfterReread: number;
+  readonly dirtyFresh: number;
+  readonly batchFailed: number;
+}
+
+/** The `cuts.jupiter` block (src/jupiter-pacer.ts). Never the key: whether there is one. */
+export interface JupiterCutStatus extends JupiterPacerStatus {
+  readonly host: string;
+  readonly keyed: boolean;
 }
 
 export interface KeeperStatus {

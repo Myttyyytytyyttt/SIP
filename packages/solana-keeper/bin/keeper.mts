@@ -65,7 +65,10 @@ import {
   wrapShortAlert,
   wrapShortStreak,
 } from "../src/invest-decision.js";
+import { CrankSender, SIGTERM_DRAIN_MS } from "../src/explicit-send.js";
 import { runInvestTick } from "../src/invest-tick.js";
+import { investLeavesSnapshotTrue, readSweepState, settleLeavesSnapshotTrue, type InvestSnapshot } from "../src/invest-snapshot.js";
+import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
 import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
 import {
@@ -103,7 +106,7 @@ import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
-import { MODE_PROFIT } from "../src/program-scripts.js";
+import { KEYED_API, LITE_API, MODE_PROFIT } from "../src/program-scripts.js";
 import { measuredBase, resolvesSignerFor, roleProfile, unreachable } from "../src/role-registry.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
@@ -336,6 +339,26 @@ const providerWallet: ProviderWallet =
     : { publicKey: PublicKey.default, signTransaction: refuseToSign, signAllTransactions: refuseToSign };
 const provider = new anchor.AnchorProvider(connection, providerWallet, { commitment: "confirmed" });
 const program = new anchor.Program(idl, provider);
+
+/**
+ * THE `explicit-send` CUT (src/explicit-send.ts, L1d). Without the token, null,
+ * and every crank transaction goes through Anchor's `.rpc()` and
+ * `provider.sendAndConfirm`, as always. With it: the same transactions, signed
+ * by the same wallet, sent in the keeper's own order with isLive() asked before
+ * each one, no wrap/convert/invest for QUIET_AFTER_TAKEOVER_MS after this
+ * process starts or takes the claim, and a SIGTERM drain.
+ *
+ * isLive IS ASKED THROUGH A CLOSURE because it is defined below, beside the
+ * claim — and because the sender must never hold a cached answer to it.
+ */
+const crankSender: CrankSender | null = config.cuts.has("explicit-send")
+  ? new CrankSender({
+      connection,
+      wallet: provider.wallet,
+      isLive: () => isLive(),
+      onConfirmed: (ms) => turnTimers.record("investConfirmMs", ms),
+    })
+  : null;
 
 // History for the website. Absent DATABASE_URL it is a no-op; a write failure
 // is a warning and never touches the settlement path. See src/read-model.ts.
@@ -957,6 +980,38 @@ async function refreshLeaderboard(): Promise<void> {
 const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? new CoalescedRefresh(refreshLeaderboard) : null;
 
 /**
+ * THE `jupiter-key` CUT (src/jupiter-pacer.ts). Without the token, null, and
+ * every buying turn quotes lite-api.jup.ag keyless and unpaced, as it always
+ * has. With it: api.jup.ag and the key when SIP_SOLANA_JUPITER_API_KEY is set
+ * (today's host when it is not), and ONE pacer for the process — the budget is
+ * the organisation's, so two pacers in one process would each grant what the
+ * other already spent.
+ */
+const jupiterAccess: JupiterAccess | null = config.cuts.has("jupiter-key")
+  ? {
+      baseUrl: config.jupiterApiKey === null ? LITE_API : KEYED_API,
+      apiKey: config.jupiterApiKey,
+      pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),
+    }
+  : null;
+/**
+ * THE `invest-batch` CUT (src/invest-snapshot.ts), and only on a keeper that
+ * invests: the volume keeper never runs an invest turn, so it keeps today's
+ * vault read whatever the token says. With it, the sweep's one vault batch also
+ * reads every turned vault's policy and two ATAs and the four accounts every
+ * invest turn reads, and a turn whose at-rest decision sends nothing is decided
+ * from that.
+ */
+const investBatch = config.cuts.has("invest-batch") && profile.invests;
+/** What the invest-batch cut has done since boot, for /status (`cuts.investBatch`). Null without it. */
+const investBatchStats = investBatch
+  ? { sweeps: 0, requests: 0, decidedFromSnapshot: 0, rereadFresh: 0, investedAfterReread: 0, dirtyFresh: 0, batchFailed: 0 }
+  : null;
+// /status's per-minute view judged against the budget the pacer enforces, not
+// the keyless 30 — only under the token, so a keeper without it reads as before.
+if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.perMinute);
+
+/**
  * /status's two blocks for the cuts, folded in at render like the doorbell's:
  * where the last sweep's links came from, and what each cut that keeps counters
  * has done. Additive: a keeper with no cut and no L3 serves `cuts.on: []` and a
@@ -965,7 +1020,17 @@ const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? n
 function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
-    cuts: { on: [...config.cuts], privyAddressBook: privyBook?.status() ?? null, board: boardRefresh?.status() ?? null },
+    cuts: {
+      on: [...config.cuts],
+      privyAddressBook: privyBook?.status() ?? null,
+      board: boardRefresh?.status() ?? null,
+      // Only while the token is on: absent, the block is the one it always was.
+      ...(jupiterAccess === null
+        ? {}
+        : { jupiter: { host: new URL(jupiterAccess.baseUrl).host, keyed: jupiterAccess.apiKey !== null, ...jupiterAccess.pacer.status() } }),
+      ...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),
+      ...(crankSender === null ? {} : { explicitSend: crankSender.status() }),
+    },
   };
 }
 
@@ -1053,12 +1118,20 @@ const claim: KeeperClaim = new KeeperClaim({
     }),
   onTakeover: () => {
     log.info("took over as the acting keeper");
+    // THE explicit-send CUT: a new holder buys nothing until the previous one's
+    // last transaction can no longer land unseen (the takeover quiet period).
+    crankSender?.noteTakeover();
     alerter.clear("not-acting");
     alerter.clear("claim-lost");
   },
 });
 
 const liveBlocker = (): string | null =>
+  // UNDER THE explicit-send CUT, A DRAINING PROCESS IS NOT LIVE: after SIGTERM no
+  // turn is handed a key — no settle and no buy starts — while a crank send
+  // already on the wire is confirmed. Without the cut crankSender is null and
+  // this is the line it always was.
+  (crankSender?.draining === true ? "draining after SIGTERM: no new send starts while the last ones confirm" : null) ??
   missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName });
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
@@ -1413,14 +1486,38 @@ async function sweep(): Promise<void> {
     // throttling. The fallback is lazy and cached, so a degraded sweep reads each
     // distinct vault at most once, and only for the links it actually reaches.
     let vaults: ReadonlyMap<string, VaultState | null> | null = null;
+    /**
+     * THE invest-batch CUT: each turned vault's at-rest invest state, read in the
+     * same batch as the vaults. Null without the cut, and null when the batch
+     * failed — the degraded path below then runs with no snapshot at all, which
+     * is today's degraded path exactly.
+     */
+    let investSnapshots: ReadonlyMap<string, InvestSnapshot> | null = null;
+    /**
+     * Vaults this sweep has already settled into, or sent anything for. Their
+     * snapshot was read before that money moved, so their later invest turns
+     * read fresh — "settle, then buy in the same turn" keeps working.
+     */
+    const dirtyVaults = new Set<string>();
     const vaultReadAt = Date.now();
     try {
       // ONLY THE VAULTS THIS SWEEP TURNS: a vault nobody is turned for is a read nobody uses.
-      vaults = await readVaults(program, turns.map((turn) => turn.link.managed.vault));
+      if (investBatch) {
+        const state = await readSweepState(connection, program, turns.map((turn) => turn.link.managed.vault));
+        vaults = state.vaults;
+        investSnapshots = state.invest;
+        if (investBatchStats !== null) {
+          investBatchStats.sweeps += 1;
+          investBatchStats.requests += state.requests;
+        }
+      } else {
+        vaults = await readVaults(program, turns.map((turn) => turn.link.managed.vault));
+      }
       vaultReadFailures = 0;
       alerter.clear(VAULT_READ_ALERT_KEY);
     } catch (error) {
       vaultReadFailures += 1;
+      if (investBatchStats !== null) investBatchStats.batchFailed += 1;
       const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
       log.warn("the batched vault read failed; this sweep reads one vault per link instead", { links: turns.length, detail });
       // The alerter dedupes by key alone, so the standing warning is cleared at
@@ -1773,6 +1870,9 @@ async function sweep(): Promise<void> {
           onSend: noteSettleSend,
         });
         settleOutcome = settle.outcome;
+        // THE invest-batch CUT: a settle that may have moved SOL into the vault
+        // makes the batch's picture of it stale for the rest of this sweep.
+        if (investSnapshots !== null && !settleLeavesSnapshotTrue(settle.outcome)) dirtyVaults.add(vaultAddr);
         // A HOT SETTLE'S WALL TIME, the number the dispatcher is sized on and
         // nobody had measured. Only a LIVE turn that SETTLED: a resting turn's
         // time is the sweep's triage lane, already on /status, and a dry run's
@@ -1919,6 +2019,7 @@ async function sweep(): Promise<void> {
         // to go.
         phase = "invest";
         const investTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner: null });
+        const investSnapshot = investSnapshots === null || dirtyVaults.has(vaultAddr) ? undefined : investSnapshots.get(vaultAddr);
         const investAt = Date.now();
         const invest = await runInvestTick({
           connection,
@@ -1934,7 +2035,24 @@ async function sweep(): Promise<void> {
           // carry it and a config key that starts erroring is its own outage.
           live: investTurn.live,
           protocolPaused,
+          // THE jupiter-key CUT, only while its token is on (jupiterAccess above).
+          ...(jupiterAccess === null ? {} : { jupiter: jupiterAccess }),
+          // THE invest-batch CUT: the batch's picture of this vault, unless this
+          // sweep already moved money into or out of it.
+          ...(investSnapshot === undefined ? {} : { snapshot: investSnapshot }),
+          // THE explicit-send CUT, only while its token is on (crankSender above).
+          ...(crankSender === null ? {} : { sender: crankSender }),
         });
+        if (investSnapshots !== null) {
+          if (!investLeavesSnapshotTrue(invest.outcome)) dirtyVaults.add(vaultAddr);
+          if (investBatchStats !== null) {
+            if (invest.reads === "snapshot") investBatchStats.decidedFromSnapshot += 1;
+            else if (invest.reads === "fresh") {
+              investBatchStats.rereadFresh += 1;
+              if (investTurn.live && invest.outcome === "INVESTED") investBatchStats.investedAfterReread += 1;
+            } else investBatchStats.dirtyFresh += 1;
+          }
+        }
         // The same rule for a basket: a live turn that INVESTED, sends and all.
         if (investTurn.live && invest.outcome === "INVESTED") turnTimers.record("investInvestedMs", Date.now() - investAt);
         // INVESTED/FAILED/REFUSED always log; NO_POLICY, IDLE and PAUSED log on change.
@@ -2041,6 +2159,9 @@ async function sweep(): Promise<void> {
         // folded in as a FAILED invest turn, so the existing per-vault streak
         // warns on the first and pages critical on the third, exactly as a
         // returned FAILED does. Which half is which is what `phase` is for.
+        // THE invest-batch CUT: a turn that threw, in either half, may have sent
+        // something its vault's snapshot does not show. It reads fresh from here on.
+        if (investSnapshots !== null) dirtyVaults.add(vaultAddr);
         if (phase === "settle") {
           const threw = settleThrewAlert({ wallet, vault: vaultAddr }, detail);
           for (const key of threw.clear) alerter.clear(key);
@@ -2298,6 +2419,26 @@ log.info("keeper starting", {
  */
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
+    // THE explicit-send CUT'S DRAIN (ADR §4.3 item 4): stop starting sends, give
+    // a crank send already on the wire up to SIGTERM_DRAIN_MS to confirm, THEN
+    // let the claim go — so the successor cannot read balances its predecessor's
+    // last transaction is about to change. It needs Railway's
+    // RAILWAY_DEPLOYMENT_DRAINING_SECONDS >= 30; at 0 the process is killed
+    // first and the successor's quiet period covers the gap instead.
+    if (crankSender !== null) {
+      crankSender.beginDrain();
+      health.mode = "dry-run";
+      health.missingLiveCondition = liveBlocker();
+      void crankSender.idle(SIGTERM_DRAIN_MS).then((drained) => {
+        log.info("drained the crank's sends", { signal, drained, sender: crankSender.status().drain });
+        if (config.armed && readModel.enabled && claim.held) {
+          log.info("releasing the keeper claim", { signal });
+          claim.release();
+        }
+        process.exit(0);
+      });
+      return;
+    }
     if (config.armed && readModel.enabled && claim.held) {
       log.info("releasing the keeper claim", { signal });
       claim.release();

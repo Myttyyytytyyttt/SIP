@@ -345,6 +345,13 @@ export interface JupiterCallCounter {
   total(): number;
   /** The per-minute view, for /status. */
   report(now: number): JupiterUsageStatus;
+  /**
+   * The budget the per-minute view is judged against, when it is not the
+   * keyless 30: set once at boot under the `jupiter-key` cut to the plan's
+   * calls a minute (src/jupiter-pacer.ts). Never called without the token, so
+   * that keeper's /status reads exactly as it did.
+   */
+  setBudgetPerMinute(perMinute: number): void;
 }
 
 export function createJupiterCallCounter(options: { readonly startedAt?: number; readonly now?: () => number } = {}): JupiterCallCounter {
@@ -352,6 +359,7 @@ export function createJupiterCallCounter(options: { readonly startedAt?: number;
   const startedAt = options.startedAt ?? now();
   let sweep = 0;
   let all = 0;
+  let budgetPerMinute = JUPITER_KEYLESS_CALLS_PER_MINUTE;
   const minute = createRollingCounts({ windowMs: MINUTE_MS, bucketMs: MINUTE_BUCKET_MS, startedAt });
   const day = createRollingCounts({ windowMs: DAY_MS, bucketMs: DAY_BUCKET_MS, startedAt });
   const busiest = createRollingPeak({ windowMs: DAY_MS, bucketMs: DAY_BUCKET_MS });
@@ -376,14 +384,17 @@ export function createJupiterCallCounter(options: { readonly startedAt?: number;
     },
     sweepTotal: () => sweep,
     total: () => all,
+    setBudgetPerMinute(perMinute) {
+      if (Number.isSafeInteger(perMinute) && perMinute > 0) budgetPerMinute = perMinute;
+    },
     report(at) {
       const lastMinute = minute.total(at);
       const peak = busiest.peak(at);
       return {
         callsLastMinute: lastMinute,
         peakPerMinuteLastDay: peak,
-        budgetPerMinute: JUPITER_KEYLESS_CALLS_PER_MINUTE,
-        peakPctOfBudget: Math.round((peak / JUPITER_KEYLESS_CALLS_PER_MINUTE) * 1_000) / 10,
+        budgetPerMinute,
+        peakPctOfBudget: Math.round((peak / budgetPerMinute) * 1_000) / 10,
         callsPerDay: day.total(at),
         observedMs: day.observedMs(at),
         callsSinceBoot: all,
