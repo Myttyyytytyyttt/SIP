@@ -20,8 +20,10 @@ import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { readInvestmentPolicy, readVaults } from "../src/accounts.js";
+import { readChainSnapshot } from "../src/chain-state.js";
+import { readSweepState } from "../src/invest-snapshot.js";
 import { BenchChain, WRITE_PATH_REFUSAL } from "../src/bench/chain-stub.js";
-import { benchKey, buildFleet, buildHistory } from "../src/bench/fleet.js";
+import { benchKey, buildFleet, buildHistory, vaultBytes } from "../src/bench/fleet.js";
 import { discoverLinks, discoverLinksPreferringV2, rereadLinks } from "../src/discovery.js";
 import { LastKnownGoodDiscovery } from "../src/discovery-lkg.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
@@ -275,6 +277,124 @@ describe("L3's fresh re-read of the last-known-good links", () => {
     expect(outcome.source).toBe("lkg");
     expect(outcome.links).toHaveLength(3);
     expect(outcome.links.every((link) => link.frontierSlot === 400_000_000n)).toBe(true);
+  });
+});
+
+describe("the invest-batch cut on TODAY'S fleet: the profit keeper's census, 19 calls a sweep → 7", () => {
+  // THE FLEET THE CENSUS MEASURED (disp-measure/census, 2026-10-11, 30 sweeps,
+  // 19 calls every one): four links on three vaults — two PROFIT vaults whose
+  // owners chose no basket, and one VOLUME vault with a basket and TWO linked
+  // wallets (EFXK995P). All idle. The profit keeper settles the PROFIT links
+  // (one probe each) and invests every vault (NO_POLICY for two, IDLE for the
+  // VOLUME one, twice).
+  //
+  // THE SWEEP IS THE KEEPER'S OWN PIECES IN THE KEEPER'S ORDER: the chain
+  // snapshot, the listing, the vault batch, then for each link its settle turn
+  // and its invest turn — exactly the calls bin/keeper.mts makes per sweep in a
+  // dry run, with the batch under the cut being readSweepState and each invest
+  // turn handed its vault's snapshot (no vault is dirty: nothing settled).
+  function todaysFleet() {
+    const chain = new BenchChain({ programId, crank });
+    const built = buildFleet({ links: 4, hotRatio: 0, hotTxCount: 0, programId, seed: 11 });
+    // Links 2 and 3 share ONE vault, as EFXK995P's two wallets do.
+    const fleet = [built[0]!, built[1]!, built[2]!, { ...built[3]!, vault: built[2]!.vault, policy: built[2]!.policy }];
+    chain.setFleet(fleet);
+    const accounts = (chain as unknown as { accounts: Map<string, { data: Buffer }> }).accounts;
+    // The two PROFIT vaults: no basket chosen.
+    accounts.delete(fleet[0]!.policy.toBase58());
+    accounts.delete(fleet[1]!.policy.toBase58());
+    // The shared vault is VOLUME.
+    accounts.get(fleet[2]!.vault.toBase58())!.data = vaultBytes({ owner: benchKey("owner:shared"), skimMode: MODE_VOLUME, skimBps: 2_000, volumeBps: 200 });
+    const connection = stubConnection(chain);
+    return { chain, connection, program: stubProgram(connection) };
+  }
+
+  async function profitSweep(
+    connection: Connection,
+    program: anchor.Program,
+    cut: boolean,
+  ): Promise<{ settles: string[]; invests: string[] }> {
+    const snapshot = await readChainSnapshot(connection, program);
+    const links = await discoverLinks(connection, programId, accountDiscriminator("TradingLink"));
+    const vaultAddresses = links.map((link) => link.vault);
+    const state = cut ? await readSweepState(connection, program, vaultAddresses) : null;
+    const vaults = state?.vaults ?? (await readVaults(program, vaultAddresses));
+    const settles: string[] = [];
+    const invests: string[] = [];
+    for (const link of links) {
+      const settle = await runSettleTick({
+        settles: [MODE_PROFIT],
+        connection,
+        program,
+        link,
+        vault: vaults.get(link.vault.toBase58()) ?? null,
+        attester: null,
+        walletSigner: null,
+        live: false,
+        protocolPaused: false,
+        carries: new Map() as CarryBook,
+      });
+      settles.push(settle.outcome);
+      const investSnapshot = state?.invest.get(link.vault.toBase58());
+      const invest = await runInvestTick({
+        connection,
+        program,
+        vault: link.vault,
+        crank: null,
+        crankLamports: snapshot.crankLamports,
+        live: false,
+        protocolPaused: false,
+        ...(investSnapshot === undefined ? {} : { snapshot: investSnapshot }),
+      });
+      invests.push(`${invest.outcome}${invest.reads === undefined ? "" : `/${invest.reads}`}`);
+    }
+    return { settles, invests };
+  }
+
+  it("costs 19 calls a sweep today, by the census's own method mix", async () => {
+    const { chain, connection, program } = todaysFleet();
+    for (let sweep = 0; sweep < 2; sweep++) {
+      chain.takeCalls();
+      const outcomes = await profitSweep(connection, program, false);
+      expect(outcomes.settles.sort()).toEqual(["IDLE", "IDLE", "UNSUPPORTED_MODE", "UNSUPPORTED_MODE"]);
+      expect(outcomes.invests.sort()).toEqual(["IDLE", "IDLE", "NO_POLICY", "NO_POLICY"]);
+      const calls = chain.takeCalls();
+      expect(Object.fromEntries([...calls].sort())).toEqual({
+        getAccountInfo: 6,
+        getBalance: 1,
+        getMinimumBalanceForRentExemption: 2,
+        getMultipleAccounts: 3,
+        getProgramAccounts: 1,
+        getSignaturesForAddress: 2,
+        getTokenAccountBalance: 4,
+      });
+      expect([...calls.values()].reduce((a, b) => a + b, 0)).toBe(19);
+    }
+  });
+
+  it("costs 7 under the cut — the snapshot, the listing, ONE batch and the two probes — with every outcome unchanged", async () => {
+    const { chain, connection, program } = todaysFleet();
+    const perSweep: number[] = [];
+    for (let sweep = 0; sweep < 3; sweep++) {
+      chain.takeCalls();
+      const outcomes = await profitSweep(connection, program, true);
+      expect(outcomes.settles.sort()).toEqual(["IDLE", "IDLE", "UNSUPPORTED_MODE", "UNSUPPORTED_MODE"]);
+      // THE SAME FOUR VERDICTS, every one decided from the batch.
+      expect(outcomes.invests.sort()).toEqual(["IDLE/snapshot", "IDLE/snapshot", "NO_POLICY/snapshot", "NO_POLICY/snapshot"]);
+      const calls = chain.takeCalls();
+      perSweep.push([...calls.values()].reduce((a, b) => a + b, 0));
+      if (sweep > 0) {
+        expect(Object.fromEntries([...calls].sort())).toEqual({
+          getAccountInfo: 2,
+          getBalance: 1,
+          getMultipleAccounts: 1,
+          getProgramAccounts: 1,
+          getSignaturesForAddress: 2,
+        });
+      }
+    }
+    // THE FIRST SWEEP PAYS THE ONE RENT READ C2 THEN REMEMBERS; every sweep after is 7.
+    expect(perSweep).toEqual([8, 7, 7]);
   });
 });
 

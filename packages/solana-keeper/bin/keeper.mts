@@ -66,6 +66,7 @@ import {
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
+import { investLeavesSnapshotTrue, readSweepState, settleLeavesSnapshotTrue, type InvestSnapshot } from "../src/invest-snapshot.js";
 import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
 import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
@@ -972,6 +973,19 @@ const jupiterAccess: JupiterAccess | null = config.cuts.has("jupiter-key")
       pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),
     }
   : null;
+/**
+ * THE `invest-batch` CUT (src/invest-snapshot.ts), and only on a keeper that
+ * invests: the volume keeper never runs an invest turn, so it keeps today's
+ * vault read whatever the token says. With it, the sweep's one vault batch also
+ * reads every turned vault's policy and two ATAs and the four accounts every
+ * invest turn reads, and a turn whose at-rest decision sends nothing is decided
+ * from that.
+ */
+const investBatch = config.cuts.has("invest-batch") && profile.invests;
+/** What the invest-batch cut has done since boot, for /status (`cuts.investBatch`). Null without it. */
+const investBatchStats = investBatch
+  ? { sweeps: 0, requests: 0, decidedFromSnapshot: 0, rereadFresh: 0, investedAfterReread: 0, dirtyFresh: 0, batchFailed: 0 }
+  : null;
 // /status's per-minute view judged against the budget the pacer enforces, not
 // the keyless 30 — only under the token, so a keeper without it reads as before.
 if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.perMinute);
@@ -993,6 +1007,7 @@ function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
       ...(jupiterAccess === null
         ? {}
         : { jupiter: { host: new URL(jupiterAccess.baseUrl).host, keyed: jupiterAccess.apiKey !== null, ...jupiterAccess.pacer.status() } }),
+      ...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),
     },
   };
 }
@@ -1441,14 +1456,38 @@ async function sweep(): Promise<void> {
     // throttling. The fallback is lazy and cached, so a degraded sweep reads each
     // distinct vault at most once, and only for the links it actually reaches.
     let vaults: ReadonlyMap<string, VaultState | null> | null = null;
+    /**
+     * THE invest-batch CUT: each turned vault's at-rest invest state, read in the
+     * same batch as the vaults. Null without the cut, and null when the batch
+     * failed — the degraded path below then runs with no snapshot at all, which
+     * is today's degraded path exactly.
+     */
+    let investSnapshots: ReadonlyMap<string, InvestSnapshot> | null = null;
+    /**
+     * Vaults this sweep has already settled into, or sent anything for. Their
+     * snapshot was read before that money moved, so their later invest turns
+     * read fresh — "settle, then buy in the same turn" keeps working.
+     */
+    const dirtyVaults = new Set<string>();
     const vaultReadAt = Date.now();
     try {
       // ONLY THE VAULTS THIS SWEEP TURNS: a vault nobody is turned for is a read nobody uses.
-      vaults = await readVaults(program, turns.map((turn) => turn.link.managed.vault));
+      if (investBatch) {
+        const state = await readSweepState(connection, program, turns.map((turn) => turn.link.managed.vault));
+        vaults = state.vaults;
+        investSnapshots = state.invest;
+        if (investBatchStats !== null) {
+          investBatchStats.sweeps += 1;
+          investBatchStats.requests += state.requests;
+        }
+      } else {
+        vaults = await readVaults(program, turns.map((turn) => turn.link.managed.vault));
+      }
       vaultReadFailures = 0;
       alerter.clear(VAULT_READ_ALERT_KEY);
     } catch (error) {
       vaultReadFailures += 1;
+      if (investBatchStats !== null) investBatchStats.batchFailed += 1;
       const detail = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
       log.warn("the batched vault read failed; this sweep reads one vault per link instead", { links: turns.length, detail });
       // The alerter dedupes by key alone, so the standing warning is cleared at
@@ -1801,6 +1840,9 @@ async function sweep(): Promise<void> {
           onSend: noteSettleSend,
         });
         settleOutcome = settle.outcome;
+        // THE invest-batch CUT: a settle that may have moved SOL into the vault
+        // makes the batch's picture of it stale for the rest of this sweep.
+        if (investSnapshots !== null && !settleLeavesSnapshotTrue(settle.outcome)) dirtyVaults.add(vaultAddr);
         // A HOT SETTLE'S WALL TIME, the number the dispatcher is sized on and
         // nobody had measured. Only a LIVE turn that SETTLED: a resting turn's
         // time is the sweep's triage lane, already on /status, and a dry run's
@@ -1947,6 +1989,7 @@ async function sweep(): Promise<void> {
         // to go.
         phase = "invest";
         const investTurn = keysForTurn(isLive, { settleKey: settleKeypair, walletSigner: null });
+        const investSnapshot = investSnapshots === null || dirtyVaults.has(vaultAddr) ? undefined : investSnapshots.get(vaultAddr);
         const investAt = Date.now();
         const invest = await runInvestTick({
           connection,
@@ -1964,7 +2007,20 @@ async function sweep(): Promise<void> {
           protocolPaused,
           // THE jupiter-key CUT, only while its token is on (jupiterAccess above).
           ...(jupiterAccess === null ? {} : { jupiter: jupiterAccess }),
+          // THE invest-batch CUT: the batch's picture of this vault, unless this
+          // sweep already moved money into or out of it.
+          ...(investSnapshot === undefined ? {} : { snapshot: investSnapshot }),
         });
+        if (investSnapshots !== null) {
+          if (!investLeavesSnapshotTrue(invest.outcome)) dirtyVaults.add(vaultAddr);
+          if (investBatchStats !== null) {
+            if (invest.reads === "snapshot") investBatchStats.decidedFromSnapshot += 1;
+            else if (invest.reads === "fresh") {
+              investBatchStats.rereadFresh += 1;
+              if (investTurn.live && invest.outcome === "INVESTED") investBatchStats.investedAfterReread += 1;
+            } else investBatchStats.dirtyFresh += 1;
+          }
+        }
         // The same rule for a basket: a live turn that INVESTED, sends and all.
         if (investTurn.live && invest.outcome === "INVESTED") turnTimers.record("investInvestedMs", Date.now() - investAt);
         // INVESTED/FAILED/REFUSED always log; NO_POLICY, IDLE and PAUSED log on change.
@@ -2071,6 +2127,9 @@ async function sweep(): Promise<void> {
         // folded in as a FAILED invest turn, so the existing per-vault streak
         // warns on the first and pages critical on the third, exactly as a
         // returned FAILED does. Which half is which is what `phase` is for.
+        // THE invest-batch CUT: a turn that threw, in either half, may have sent
+        // something its vault's snapshot does not show. It reads fresh from here on.
+        if (investSnapshots !== null) dirtyVaults.add(vaultAddr);
         if (phase === "settle") {
           const threw = settleThrewAlert({ wallet, vault: vaultAddr }, detail);
           for (const key of threw.clear) alerter.clear(key);

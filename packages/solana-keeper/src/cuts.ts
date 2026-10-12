@@ -7,7 +7,7 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`rest-skip`, `invest-batch`, `explicit-send`, …); they land with their own
+// (`rest-skip`, `explicit-send`, …); they land with their own
 // code, each on its own soak, and until then naming one REFUSES TO START. A token that is accepted and does nothing is the one failure this
 // list exists to prevent: the owner reads Railway, sees `rest-skip`, and
 // believes the walk is being skipped.
@@ -46,8 +46,15 @@
  *     (today's host otherwise), paced, with the turn's calls RESERVED before its
  *     first one — a turn the budget cannot cover ends DEFERRED having moved
  *     nothing — and a backoff after a 429 (src/jupiter-pacer.ts).
+ *   * `invest-batch` (C5 with C2 inside, ADR §2.3.3, §6.2 L1b-m3): the invest
+ *     turn's at-rest reads — the policy, the vault's wSOL and USDC balances,
+ *     the Clock, both Pyth feeds, the EpochSchedule — folded into the sweep's
+ *     one vault batch, and the rent floor cached per size. The snapshot may only
+ *     decide a turn that sends nothing; one that would act is run again on
+ *     fresh reads, so every transaction is built as today
+ *     (src/invest-snapshot.ts). The profit keeper's census goes 19 → 7.
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key"] as const;
+export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch"] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 

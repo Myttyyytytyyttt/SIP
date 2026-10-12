@@ -103,3 +103,38 @@ describe("jupiter-key", () => {
     expect(keeper).toMatch(/\.\.\.\(jupiterAccess === null\n\s+\? \{\}\n\s+: \{ jupiter: \{ host: new URL\(jupiterAccess\.baseUrl\)\.host, keyed: jupiterAccess\.apiKey !== null, \.\.\.jupiterAccess\.pacer\.status\(\) \} \}\),/);
   });
 });
+
+describe("invest-batch", () => {
+  it("is on only under its token AND on a keeper that invests — the volume keeper keeps today's vault read", () => {
+    expect(keeper).toContain('const investBatch = config.cuts.has("invest-batch") && profile.invests;');
+  });
+
+  it("reads the sweep's batch through readSweepState under the cut, and through today's readVaults line otherwise", () => {
+    expect(sweepBody).toMatch(
+      /if \(investBatch\) \{\n\s+const state = await readSweepState\(connection, program, turns\.map\(\(turn\) => turn\.link\.managed\.vault\)\);\n\s+vaults = state\.vaults;\n\s+investSnapshots = state\.invest;[\s\S]{0,200}\} else \{\n\s+vaults = await readVaults\(program, turns\.map\(\(turn\) => turn\.link\.managed\.vault\)\);\n\s+\}/,
+    );
+    expect(keeper.match(/readSweepState\(/g)).toHaveLength(1);
+    expect(keeper.match(/await readVaults\(/g)).toHaveLength(1);
+  });
+
+  it("starts every sweep with no dirty vault, and never hands a snapshot to a vault the sweep already moved", () => {
+    expect(sweepBody).toContain("const dirtyVaults = new Set<string>();");
+    expect(sweepBody).toContain(
+      "const investSnapshot = investSnapshots === null || dirtyVaults.has(vaultAddr) ? undefined : investSnapshots.get(vaultAddr);",
+    );
+    expect(sweepBody).toContain("...(investSnapshot === undefined ? {} : { snapshot: investSnapshot }),");
+  });
+
+  it("marks a vault dirty after a settle that may have moved money, an invest that may have sent, and any turn that threw", () => {
+    expect(sweepBody).toContain("if (investSnapshots !== null && !settleLeavesSnapshotTrue(settle.outcome)) dirtyVaults.add(vaultAddr);");
+    expect(sweepBody).toContain("if (!investLeavesSnapshotTrue(invest.outcome)) dirtyVaults.add(vaultAddr);");
+    const catchAt = sweepBody.indexOf('if (phase === "settle") {');
+    expect(sweepBody.slice(catchAt - 300, catchAt)).toContain("if (investSnapshots !== null) dirtyVaults.add(vaultAddr);");
+    // THE SETTLE'S MARK COMES BEFORE THE INVEST TURN THAT WOULD READ THE SNAPSHOT.
+    expect(sweepBody.indexOf("!settleLeavesSnapshotTrue(settle.outcome)")).toBeLessThan(sweepBody.indexOf("const investSnapshot = "));
+  });
+
+  it("serves its counters only under the token", () => {
+    expect(keeper).toContain("...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),");
+  });
+});

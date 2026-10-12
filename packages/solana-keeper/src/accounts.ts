@@ -248,6 +248,29 @@ export async function readInvestmentPolicy(program: anchor.Program, vault: Publi
   const address = investmentPolicyAddress(program.programId, vault);
   const decoded = await client(program, "investmentPolicy").fetchNullable(address);
   if (decoded === null) return null;
+  return investmentPolicyState(address, decoded);
+}
+
+/**
+ * The same answer from bytes already in hand: the `invest-batch` cut's
+ * (src/invest-snapshot.ts), which read the policy in the sweep's batch.
+ *
+ * ANCHOR'S fetchNullable RULE, EXACTLY: no account, or an account with no data,
+ * is "no policy"; anything else is decoded, and bytes that are not an
+ * InvestmentPolicy THROW — the discriminator check, then every field by name —
+ * as readInvestmentPolicy throws. A malformed policy must never read as a vault
+ * whose owner chose no basket.
+ */
+export function decodeInvestmentPolicy(
+  program: anchor.Program,
+  address: PublicKey,
+  data: Buffer | null,
+): InvestmentPolicyState | null {
+  if (data === null || data.length === 0) return null;
+  return investmentPolicyState(address, program.coder.accounts.decode("investmentPolicy", data));
+}
+
+function investmentPolicyState(address: PublicKey, decoded: unknown): InvestmentPolicyState {
   const f = fields("InvestmentPolicy", decoded);
   // `[u32; 31]` and `[u64; 31]` in state.rs, which Anchor decodes as plain
   // lists: any other length is a layout this reader does not know.

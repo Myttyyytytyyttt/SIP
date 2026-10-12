@@ -48,6 +48,7 @@ import { accountDiscriminator, idl } from "../src/idl.js";
 import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
 import { KEYED_API, LANDING_WINDOW_SLOTS, LITE_API, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
+import { readSweepState } from "../src/invest-snapshot.js";
 import { JupiterPacer } from "../src/jupiter-pacer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
@@ -732,8 +733,9 @@ describe("the ticks' first steps, over the same bytes", () => {
     feeds = true,
     /** Anything else the turn reads off the chain: leg mints, their pools, and the pools' vaults. */
     more: ReadonlyMap<string, { readonly data: Buffer; readonly owner?: PublicKey }> = new Map(),
+    /** The vault's address, when a test must place accounts at addresses derived from it beforehand. */
+    vault: PublicKey = key(),
   ) {
-    const vault = key();
     const accounts = new Map([
       [vault.toBase58(), vaultBytes(vaultFields(vaultOver))],
       [SYSVAR_CLOCK_PUBKEY.toBase58(), clockBytes(TODAY_UNIX)],
@@ -2543,6 +2545,223 @@ describe("the ticks' first steps, over the same bytes", () => {
       const result = await runInvestTick({ ...vault.deps, connection: exploding, jupiter: { baseUrl: LITE_API, apiKey: null, pacer } });
       expect(result.outcome).toBe("FAILED");
       expect(pacer.status().reservedOutstanding).toBe(0);
+    });
+  });
+
+  // ── the invest-batch cut: the snapshot decides only what sends nothing ──────
+  //
+  // THE CLAIM UNDER TEST (ADR §2.3.3, CUTS §3.3). The sweep's batch carries
+  // every input of the at-rest half of a turn, so a turn that rests can be
+  // decided from it with no request of its own; and a turn that would ACT is
+  // never decided from it — runInvestTick throws that answer away and runs the
+  // turn again on today's reads, so the requests it then makes and the bytes it
+  // then sends are today's, one for one. Each case below runs the same chain
+  // twice: once as today (no snapshot) and once from readSweepState's snapshot.
+  describe("the invest-batch cut", () => {
+    /** A classic SPL Token account owned by `vault`, holding `amount`: what a deposit leaves in its ATA. */
+    function ataHolding(mint: PublicKey, vault: PublicKey, amount: bigint) {
+      const data = Buffer.alloc(165);
+      mint.toBuffer().copy(data, 0);
+      vault.toBuffer().copy(data, 32);
+      data.writeBigUInt64LE(amount, 64);
+      return { data, owner: TOKEN_PROGRAM_ID };
+    }
+
+    /**
+     * A chain whose vault holds `usdc` in its USDC ATA and `wsol` in its wSOL ATA,
+     * both as ACCOUNTS (which the batch reads) and through getTokenAccountBalance
+     * (which today's turn asks) — one truth, two readers.
+     */
+    function chainHolding(
+      over: { readonly vault?: Partial<VaultFields>; readonly policy?: Partial<PolicyFields> | null; readonly usdc?: bigint; readonly wsol?: bigint; readonly feeds?: boolean },
+      extra: Readonly<Record<string, Handler>> = {},
+      more: Map<string, { readonly data: Buffer; readonly owner?: PublicKey }> = new Map(),
+    ) {
+      const vault = key();
+      const balances = new Map<string, bigint>();
+      if ((over.usdc ?? 0n) > 0n) {
+        const ata = classicAta(USDC_MINT, vault);
+        more.set(ata.toBase58(), ataHolding(USDC_MINT, vault, over.usdc!));
+        balances.set(ata.toBase58(), over.usdc!);
+      }
+      if ((over.wsol ?? 0n) > 0n) {
+        const ata = classicAta(NATIVE_MINT, vault);
+        more.set(ata.toBase58(), ataHolding(NATIVE_MINT, vault, over.wsol!));
+        balances.set(ata.toBase58(), over.wsol!);
+      }
+      const chain = chainWith(
+        over.vault ?? {},
+        over.policy === undefined ? {} : over.policy,
+        {
+          getMinimumBalanceForRentExemption: async () => 2_000_000,
+          getTokenAccountBalance: async (address) => {
+            const amount = balances.get((address as PublicKey).toBase58());
+            if (amount === undefined) throw new Error("could not find account");
+            return { context: { slot: 1 }, value: { amount: amount.toString(), decimals: 6, uiAmount: null } };
+          },
+          ...extra,
+        },
+        over.feeds ?? true,
+        more,
+        vault,
+      );
+      return { ...chain, balances };
+    }
+
+    /** The same turn, as today and from the batch: both answers, and what each asked the chain. */
+    async function bothWays(chain: ReturnType<typeof chainHolding>, deps: Omit<Parameters<typeof runInvestTick>[0], "connection" | "program" | "vault">) {
+      const base = { connection: chain.connection, program: chain.program, vault: chain.vault, ...deps };
+      chain.calls.splice(0);
+      const fresh = await runInvestTick(base);
+      const freshCalls = chain.calls.splice(0);
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      expect(chain.calls.splice(0)).toEqual(["getMultipleAccountsInfo"]);
+      const snapshot = state.invest.get(chain.vault.toBase58())!;
+      const fromBatch = await runInvestTick({ ...base, snapshot });
+      const batchCalls = chain.calls.splice(0);
+      // A SECOND TURN ON THE SAME VAULT, as a second linked wallet's would be: the rent is cached now.
+      const again = await runInvestTick({ ...base, snapshot });
+      const againCalls = chain.calls.splice(0);
+      return { fresh, freshCalls, fromBatch, batchCalls, again, againCalls };
+    }
+
+    const dry = { crank: null, crankLamports: 10_000_000_000n, live: false, protocolPaused: false } as const;
+
+    it.each([
+      ["NO_POLICY", { policy: null }, dry, "NO_POLICY"],
+      ["investing switched off", { policy: { enabled: false } }, dry, "IDLE"],
+      ["an in_mint this keeper cannot route", { policy: { inMint: Keypair.generate().publicKey } }, dry, "REFUSED"],
+      ["the vault paused", { vault: { paused: true } }, dry, "PAUSED"],
+      ["the protocol paused", {}, { ...dry, protocolPaused: true }, "PAUSED"],
+      ["below the minimum, with conversion off", { usdc: 1_000_000n, policy: { minConvertRateWad: 0n } }, dry, "IDLE"],
+      ["the crank too short to wrap", { usdc: 4_000_000n }, { ...dry, crankLamports: 1_000n }, "IDLE"],
+      ["the oracle unreadable, so the SOL rests", { usdc: 4_000_000n, feeds: false }, dry, "IDLE"],
+      ["a dry run that would wrap and invest", {}, dry, "INVESTED"],
+      ["a dry run that would invest USDC already held", { usdc: 50_000_000n, policy: { minConvertRateWad: 0n } }, dry, "INVESTED"],
+    ] as const)("decides %s exactly as today, from the batch alone", async (_name, over, deps, outcome) => {
+      const chain = chainHolding(over as Parameters<typeof chainHolding>[0]);
+      const run = await bothWays(chain, deps);
+      expect(run.fresh.outcome).toBe(outcome);
+      // THE SAME ANSWER, WORD FOR WORD — wrap report and fee notes included.
+      const { reads, ...batchAnswer } = run.fromBatch;
+      expect(batchAnswer).toEqual(run.fresh);
+      expect(reads).toBe("snapshot");
+      // TODAY IT ASKED THE CHAIN; FROM THE BATCH IT ASKED NOTHING but the rent floor, once for the connection.
+      expect(run.freshCalls.length).toBeGreaterThan(0);
+      expect(run.batchCalls.filter((call) => call !== "getMinimumBalanceForRentExemption")).toEqual([]);
+      expect(run.batchCalls.length).toBeLessThanOrEqual(1);
+      expect(run.againCalls).toEqual([]);
+      expect(run.again.outcome).toBe(outcome);
+    });
+
+    it("never decides a FAILED from the batch: a vault the batch found missing is read again, and failed by today's reads", async () => {
+      const chain = chainHolding({});
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      // The vault closes between the batch and the turn — or the batch simply did not have it.
+      const snapshot = { ...state.invest.get(chain.vault.toBase58())!, vault: null };
+      chain.calls.splice(0);
+      const result = await runInvestTick({ connection: chain.connection, program: chain.program, vault: chain.vault, ...dry, snapshot });
+      expect(result.reads).toBe("fresh");
+      // Today's verdict, from today's reads: the chain still HAS the vault, so it is not "missing".
+      expect(result.outcome).toBe("INVESTED");
+      expect(chain.calls).toContain("getAccountInfoAndContext");
+    });
+
+    it("throws on a policy that does not decode, as today — never a NO_POLICY that says nothing", async () => {
+      const chain = chainHolding({});
+      const state = await readSweepState(chain.connection, chain.program, [chain.vault]);
+      const snap = state.invest.get(chain.vault.toBase58())!;
+      const broken = { ...snap, policy: { ...snap.policy!, data: Buffer.alloc(snap.policy!.data.length) } };
+      await expect(runInvestTick({ connection: chain.connection, program: chain.program, vault: chain.vault, ...dry, snapshot: broken })).rejects.toThrow(/discriminator/);
+    });
+
+    it("refuses a snapshot that is another vault's, before reading anything from it", async () => {
+      const a = chainHolding({});
+      const b = chainHolding({});
+      const state = await readSweepState(b.connection, b.program, [b.vault]);
+      await expect(
+        runInvestTick({ connection: a.connection, program: a.program, vault: a.vault, ...dry, snapshot: state.invest.get(b.vault.toBase58())! }),
+      ).rejects.toThrow(/is vault .*'s/);
+    });
+
+    /**
+     * A vault that will BUY: a two-leg basket, `usdc` already in its ATA and no
+     * SOL free to wrap, on a chain that confirms what it is sent and records the
+     * bytes — the blockhash fixed, so two runs sign the same message.
+     */
+    function buyingWith(usdc: bigint) {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      const crank = Keypair.fromSeed(new Uint8Array(32).fill(9));
+      const raw: string[] = [];
+      const chain = chainHolding(
+        { usdc, policy: { legs: basket.legs, minConvertRateWad: 0n } },
+        {
+          // EVERY LAMPORT IS RENT, so nothing is free to wrap and only the deposit is bought.
+          getMinimumBalanceForRentExemption: async () => 10_000_000_000,
+          getBalance: async () => 10_000_000_000,
+          getLatestBlockhash: async () => ({ blockhash: "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk", lastValidBlockHeight: 1_000 }),
+          sendRawTransaction: async (bytes) => {
+            raw.push(Buffer.from(bytes as Uint8Array).toString("base64"));
+            return Keypair.generate().publicKey.toBase58();
+          },
+          confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+          getSlot: async () => 1,
+        },
+        new Map(basket.accounts),
+      );
+      const signing = async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => tx;
+      const program = new anchor.Program(
+        idl,
+        new anchor.AnchorProvider(chain.connection, { publicKey: crank.publicKey, signTransaction: signing, signAllTransactions: async (txs) => txs }, { commitment: "confirmed" }),
+      );
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      return { chain, deps, raw };
+    }
+
+    it("buys a MANUAL DEPOSIT with no settle at all: the batch sees the vault's own USDC, says act, and the turn buys on fresh reads", async () => {
+      // THE TRAP IN MEMORY (keeper-user-ceiling-measured): skipping invest on a
+      // vault whose settle rested would strand every deposit made by hand. The
+      // snapshot holds the vault's OWN balances, not a verdict about the settle.
+      const { urls } = stubJupiter();
+      const { chain, deps, raw } = buyingWith(100_000_000n);
+      const state = await readSweepState(chain.connection, deps.program, [chain.vault]);
+      expect(state.invest.get(chain.vault.toBase58())!.usdcHeld).toBe(100_000_000n);
+      const result = await runInvestTick({ ...deps, snapshot: state.invest.get(chain.vault.toBase58())! });
+      expect(result.reads).toBe("fresh");
+      expect(result.outcome).toBe("INVESTED");
+      expect(result.purchases).toHaveLength(2);
+      expect(raw).toHaveLength(2);
+      expect(urls.length).toBeGreaterThan(0);
+    });
+
+    it("re-reads EVERYTHING fresh before it acts, and sends the same bytes, after the same requests, as today's turn", async () => {
+      stubJupiter();
+      const { chain, deps, raw } = buyingWith(100_000_000n);
+      chain.calls.splice(0);
+      const asToday = await runInvestTick(deps);
+      const todayCalls = chain.calls.splice(0);
+      const todayBytes = raw.splice(0);
+      expect(asToday.outcome).toBe("INVESTED");
+      expect(todayBytes).toHaveLength(2);
+
+      // THE SAME VAULT ON THE SAME CHAIN, now led by the batch.
+      const state = await readSweepState(chain.connection, deps.program, [chain.vault]);
+      chain.calls.splice(0);
+      const fromBatch = await runInvestTick({ ...deps, snapshot: state.invest.get(chain.vault.toBase58())! });
+      const batchCalls = chain.calls.splice(0);
+
+      expect(fromBatch.reads).toBe("fresh");
+      expect(fromBatch.outcome).toBe("INVESTED");
+      // THE REQUESTS: the snapshot pass asked for the rent floor once (its cache
+      // is new to this connection) and nothing else; then the fresh turn made
+      // EXACTLY today's requests, in today's order — the policy, the vault batch,
+      // the rent, both balances, the leg mints, every venue read, the token
+      // accounts, the tables, the blockhash, the sends.
+      expect(batchCalls[0]).toBe("getMinimumBalanceForRentExemption");
+      expect(batchCalls.slice(1)).toEqual(todayCalls);
+      // THE BYTES: every transaction the batch-led turn sent is the one today's sent.
+      expect(raw).toEqual(todayBytes);
+      expect(fromBatch.purchases?.map((p) => p.spentRaw)).toEqual(asToday.purchases?.map((p) => p.spentRaw));
     });
   });
 });

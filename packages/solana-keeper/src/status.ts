@@ -280,6 +280,25 @@ export interface CutsStatus {
    * predates it, and a keeper without the cut serves the page it served before.
    */
   readonly jupiter?: JupiterCutStatus;
+  /**
+   * invest-batch: batched sweeps and their requests, and what the snapshot did
+   * with each invest turn — decided it (sent nothing), handed it to fresh reads,
+   * or was not offered because the sweep had already moved that vault's money.
+   * `investedAfterReread` above 0 is the ADR's "≥ 1 real INVESTED through the
+   * new path". Absent while the token is off.
+   */
+  readonly investBatch?: InvestBatchStatus;
+}
+
+/** The `cuts.investBatch` block (src/invest-snapshot.ts; counted in bin/keeper.mts). */
+export interface InvestBatchStatus {
+  readonly sweeps: number;
+  readonly requests: number;
+  readonly decidedFromSnapshot: number;
+  readonly rereadFresh: number;
+  readonly investedAfterReread: number;
+  readonly dirtyFresh: number;
+  readonly batchFailed: number;
 }
 
 /** The `cuts.jupiter` block (src/jupiter-pacer.ts). Never the key: whether there is one. */

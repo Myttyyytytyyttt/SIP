@@ -35,6 +35,7 @@
 
 import type * as anchor from "@coral-xyz/anchor";
 import {
+  type AccountInfo,
   type AccountMeta,
   type AddressLookupTableAccount,
   ComputeBudgetProgram,
@@ -57,7 +58,7 @@ import {
   getAssociatedTokenAddressSync,
 } from "@solana/spl-token";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { decodeVault, readInvestmentPolicy, type InvestmentPolicyState } from "./accounts.js";
+import { decodeInvestmentPolicy, decodeVault, readInvestmentPolicy, type InvestmentPolicyState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import { BN } from "./anchor-interop.js";
 import {
@@ -93,6 +94,7 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
+import { type InvestSnapshot, cachedRentFloor } from "./invest-snapshot.js";
 import { type JupiterAccess, type JupiterReservation, buyingTurnJupiterCalls, jupiterApiForTurn } from "./jupiter-pacer.js";
 import { method, type MethodCall } from "./methods.js";
 // FOUR NAMES LEFT WITH THE RAYDIUM ARM. raydiumLegVenue, raydiumSides,
@@ -340,6 +342,14 @@ export interface InvestResult {
    * legAdmissionDecision alone, exactly as before.
    */
   readonly feeWarnings?: readonly Alert[];
+  /**
+   * UNDER THE `invest-batch` CUT ONLY: where this turn's at-rest reads came
+   * from. "snapshot" — the sweep's batch decided it, and it sent nothing;
+   * "fresh" — the snapshot said it would act (or could not say), so the turn
+   * was run again on today's fresh reads, and THAT is the answer above. Absent
+   * whenever no snapshot was handed in: today's turn, which says nothing new.
+   */
+  readonly reads?: "snapshot" | "fresh";
 }
 
 export interface InvestDeps {
@@ -367,6 +377,18 @@ export interface InvestDeps {
    * and ends DEFERRED, having moved nothing, when the budget cannot cover it.
    */
   readonly jupiter?: JupiterAccess;
+  /**
+   * THE `invest-batch` CUT (src/invest-snapshot.ts): this vault's at-rest state
+   * from the sweep's one batch read. ABSENT IS TODAY — the policy, the vault and
+   * its sysvars, the rent floor and both balances read by this turn itself.
+   *
+   * PRESENT, IT MAY ONLY DECIDE A TURN THAT SENDS NOTHING. The turn runs on it
+   * up to its first live act; if it gets that far, or ends anywhere the snapshot
+   * may not decide (SNAPSHOT_MAY_DECIDE), runInvestTick throws that answer away
+   * and runs the whole turn again without it. bin/keeper.mts hands none to a
+   * vault that settled or sent anything earlier in the sweep.
+   */
+  readonly snapshot?: InvestSnapshot;
 }
 
 /** What a turn learns on its way through, whichever way it then ends. */
@@ -418,10 +440,27 @@ interface TurnFindings {
  * findings are written once, here, rather than in each of them.
  */
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
-  const found: TurnFindings = {};
+  let found: TurnFindings = {};
   let result: InvestResult;
+  let reads: InvestResult["reads"];
   try {
-    result = await investTurn(deps, found);
+    let answer = await investTurn(deps, found);
+    if (deps.snapshot !== undefined) {
+      if (answer !== NEEDS_FRESH_READS && snapshotMayDecide(answer, deps.live)) {
+        reads = "snapshot";
+      } else {
+        // THE SNAPSHOT'S ANSWER IS THROWN AWAY, findings and all, and the turn
+        // is run again exactly as it runs without the cut: every read fresh,
+        // every byte of every transaction built from what is on chain now. The
+        // snapshot pass cannot have reserved Jupiter calls or sent anything: it
+        // stops at NEEDS_FRESH_READS before the first of either.
+        reads = "fresh";
+        found = {};
+        answer = await investTurn({ ...deps, snapshot: undefined }, found);
+      }
+    }
+    if (answer === NEEDS_FRESH_READS) throw new Error("an invest turn with no snapshot asked for fresh reads: it already had them");
+    result = answer;
   } finally {
     // WHAT THE TURN DID NOT SPEND GOES BACK, on every way out, a throw included.
     found.reservation?.release();
@@ -434,13 +473,89 @@ export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
     ...(notes.length === 0 ? {} : { detail: `${notes.join("; ")}; ${result.detail}` }),
     ...(found.wrap === undefined ? {} : { wrap: found.wrap }),
     ...(found.feeWarnings === undefined ? {} : { feeWarnings: found.feeWarnings }),
+    ...(reads === undefined ? {} : { reads }),
   };
 }
 
-async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult> {
-  const { connection, program, vault } = deps;
+/**
+ * What the at-rest half of a turn returns when it ran on the sweep's snapshot
+ * and got as far as its first live act: "read again, fresh, and do it then".
+ */
+const NEEDS_FRESH_READS = Symbol("needs fresh reads");
 
-  const policy = await readInvestmentPolicy(program, vault);
+/**
+ * The outcomes a snapshot may decide: the ones today's turn reaches BEFORE its
+ * first live act, and which therefore send nothing — NO_POLICY; the disabled,
+ * capped and below-minimum IDLEs; either PAUSED; the in-mint REFUSED; and a DRY
+ * RUN's INVESTED, which only says what would be done. Every FAILED is re-read
+ * fresh too: a missing vault or an unreadable Clock is today's verdict to give,
+ * from today's reads.
+ */
+const SNAPSHOT_MAY_DECIDE: ReadonlySet<InvestOutcome> = new Set(["NO_POLICY", "IDLE", "PAUSED", "REFUSED", "INVESTED"]);
+
+function snapshotMayDecide(result: InvestResult, live: boolean): boolean {
+  if (!SNAPSHOT_MAY_DECIDE.has(result.outcome)) return false;
+  // Belt and braces: the only INVESTED before the first live act is a dry run's.
+  return result.outcome !== "INVESTED" || !live;
+}
+
+/**
+ * The five things the at-rest half of a turn reads, in the order it reads them:
+ * the policy, the vault with its four sysvars and feeds, the vault's rent floor,
+ * and the two balances.
+ */
+interface AtRestReads {
+  readonly fromSnapshot: boolean;
+  policy(): Promise<InvestmentPolicyState | null>;
+  vaultAndSysvars(): Promise<readonly (AccountInfo<Buffer> | null | undefined)[]>;
+  rentFloor(size: number): Promise<number>;
+  balance(ata: PublicKey): Promise<bigint>;
+}
+
+/** Today's reads, call for call: what every turn without the invest-batch cut makes. */
+function freshReads(connection: Connection, program: anchor.Program, vault: PublicKey): AtRestReads {
+  return {
+    fromSnapshot: false,
+    policy: () => readInvestmentPolicy(program, vault),
+    // THE CHAIN'S CLOCK COMES WITH THE VAULT, and so do Pyth's two feeds and
+    // the EpochSchedule: see the turn below for why all five ride one request.
+    vaultAndSysvars: () =>
+      connection.getMultipleAccountsInfo([vault, SYSVAR_CLOCK_PUBKEY, PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED, SYSVAR_EPOCH_SCHEDULE_PUBKEY]),
+    rentFloor: (size) => connection.getMinimumBalanceForRentExemption(size),
+    balance: (ata) => balanceOf(connection, ata),
+  };
+}
+
+/**
+ * The same five, from the sweep's batch (src/invest-snapshot.ts). Nothing here
+ * asks the chain but the rent floor, once per size for the life of the process
+ * (C2).
+ *
+ * THE SNAPSHOT MUST BE THIS VAULT'S. A map lookup by the wrong key would hand
+ * one vault's balances to another's turn; it is checked, not assumed.
+ */
+function snapshotReads(connection: Connection, program: anchor.Program, vault: PublicKey, snapshot: InvestSnapshot): AtRestReads {
+  if (!snapshot.vaultAddress.equals(vault)) {
+    throw new Error(`the invest snapshot handed to vault ${vault.toBase58()} is vault ${snapshot.vaultAddress.toBase58()}'s`);
+  }
+  return {
+    fromSnapshot: true,
+    policy: async () => decodeInvestmentPolicy(program, snapshot.policyAddress, snapshot.policy?.data ?? null),
+    vaultAndSysvars: async () => [snapshot.vault, snapshot.clock, snapshot.solFeed, snapshot.usdcFeed, snapshot.epochSchedule],
+    rentFloor: (size) => cachedRentFloor(connection, size),
+    balance: async (ata) => {
+      if (ata.equals(snapshot.wsolAta)) return snapshot.wsolHeld;
+      if (ata.equals(snapshot.usdcAta)) return snapshot.usdcHeld;
+      throw new Error(`the invest snapshot holds no balance for ${ata.toBase58()}`);
+    },
+  };
+}
+
+async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<InvestResult | typeof NEEDS_FRESH_READS> {
+  const { connection, program, vault } = deps;
+  const reads = deps.snapshot === undefined ? freshReads(connection, program, vault) : snapshotReads(connection, program, vault, deps.snapshot);
+
+  const policy = await reads.policy();
   if (policy === null) return { outcome: "NO_POLICY", detail: "the owner has not chosen a basket yet" };
   if (!policy.enabled) return { outcome: "IDLE", detail: "investing is switched off in the policy" };
 
@@ -462,13 +577,10 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // AND THE EPOCHSCHEDULE, LAST, for the same reason: the landing-window rule
   // (worstCaseTransferFee) needs where this epoch ENDS, which the Clock does not
   // carry, and a fifth address in a request already being sent costs nothing.
-  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await connection.getMultipleAccountsInfo([
-    vault,
-    SYSVAR_CLOCK_PUBKEY,
-    PYTH_SOL_USD_FEED,
-    PYTH_USDC_USD_FEED,
-    SYSVAR_EPOCH_SCHEDULE_PUBKEY,
-  ]);
+  //
+  // ONE REQUEST, [vault, Clock, Pyth SOL, Pyth USDC, EpochSchedule] — or, under
+  // the invest-batch cut, the same five out of the sweep's batch (AtRestReads).
+  const [vaultInfo, clockInfo, solFeedInfo, usdcFeedInfo, epochScheduleInfo] = await reads.vaultAndSysvars();
   if (vaultInfo === null || vaultInfo === undefined) return { outcome: "FAILED", detail: "vault account missing" };
   // BEFORE ANY OTHER READ, ANY ATA, ANY WRAP: either pause switch. The vault's
   // own switch is decoded from the read that also gives its lamports, so a
@@ -530,7 +642,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   const noted = (detail: string): string =>
     oracleRested === null ? detail : `${detail.replace(/\.$/, "")} — ${oracleRested}`;
 
-  const rentFloor = await connection.getMinimumBalanceForRentExemption(vaultInfo.data.length);
+  const rentFloor = await reads.rentFloor(vaultInfo.data.length);
   const free = BigInt(vaultInfo.lamports - rentFloor);
 
   const wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, vault, true, TOKEN_PROGRAM_ID);
@@ -539,9 +651,9 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   // leaves the vault's SOL sitting as wSOL. Nothing used to read this balance:
   // every convert moved only the amount freshly wrapped in the same tick, so
   // that stranded wSOL was never converted again, by any later sweep, ever.
-  const wsolHeld = await balanceOf(connection, wsolAta);
+  const wsolHeld = await reads.balance(wsolAta);
   const usdcAta = getAssociatedTokenAddressSync(USDC, vault, true, TOKEN_PROGRAM_ID);
-  const usdcHeld = await balanceOf(connection, usdcAta);
+  const usdcHeld = await reads.balance(usdcAta);
 
   // The floor is the policy's own minimum, in USDC. Convert what is free only
   // if doing so could plausibly clear it — at ~$100/SOL, 0.01 SOL is ~$1 — and
@@ -579,6 +691,15 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
             (planned.short ? `; ${shortfall(planned, crankRead)}` : ""),
     };
   }
+  // ── the snapshot stops here: everything below acts, and acts on fresh reads ──
+  //
+  // UNDER THE invest-batch CUT this is the line the sweep's snapshot may not
+  // cross. Above it every way out sends nothing; below it the turn asks
+  // Jupiter, wraps, converts and buys. So a turn that got here on the snapshot
+  // hands back NEEDS_FRESH_READS, and runInvestTick runs it again from the top
+  // with today's reads — the policy, the vault, the Clock, the feeds, the rent
+  // and both balances as the chain holds them NOW, not as the sweep found them.
+  if (reads.fromSnapshot) return NEEDS_FRESH_READS;
   const crank = deps.crank;
   if (crank === null) {
     // Unreachable from the keeper, which passes the settle key whenever it is
