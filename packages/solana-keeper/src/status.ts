@@ -18,8 +18,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Redactor, Secret } from "@sip/solana-log";
 import type { BoardRefreshStatus } from "./board-refresh.js";
+import type { ClaimWatchStatus } from "./claim-watch.js";
 import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
+import type { Dependency, DependencyStatus } from "./dependency-watch.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
@@ -30,6 +32,9 @@ import type { PrivyUsageStatus } from "./privy-usage.js";
 import type { KeeperRole } from "./role-registry.js";
 import type { RpcUsageStatus } from "./rpc-usage.js";
 import type { SeatCheck } from "./seat-check.js";
+import type { JupiterAnswersStatus } from "./usage-alerts.js";
+import type { WarnDigestStatus } from "./warn-digest.js";
+import type { WatchdogStatus } from "./watchdog.js";
 
 export interface WalletStatus {
   readonly settle: string;
@@ -274,6 +279,26 @@ export interface CutsStatus {
   readonly board: BoardRefreshStatus | null;
 }
 
+/**
+ * The rest of L1a, one sub-block per token that keeps state (src/cuts.ts,
+ * OPS_TOKENS), each present only while its token is on. The whole block is
+ * absent while none is, so a keeper without them serves the page it always did,
+ * byte for byte. The four alerts on L1a's counters keep no state of their own:
+ * they read `rpc`, `privy` and `jupiter` above.
+ */
+export interface OpsStatus {
+  /** watchdog-exit: the bound it exits at and the clock it reads (ADR §6.3 "liveness", progress.lastAt). */
+  readonly progress?: WatchdogStatus;
+  /** dep-down: each shared dependency, down or not, and the alerts its outages held. */
+  readonly deps?: Readonly<Record<Dependency, DependencyStatus>>;
+  /** dep-down or jupiter-budget: what Jupiter's host answered, as the transport saw it. */
+  readonly jupiterAnswers?: JupiterAnswersStatus;
+  /** claim-flap: takeovers, losses and regains of the single-keeper claim by this process. */
+  readonly claim?: ClaimWatchStatus;
+  /** warn-digest: when the next one goes, and what the open window holds. */
+  readonly digest?: WarnDigestStatus;
+}
+
 export interface KeeperStatus {
   service: string;
   startedAt: string;
@@ -404,6 +429,8 @@ export interface KeeperStatus {
   discovery?: DiscoveryStatus;
   /** The cost cuts this process runs (src/cuts.ts). Folded in at render. */
   cuts?: CutsStatus;
+  /** The rest of L1a, while any of its tokens keeps state (OpsStatus). Folded in at render. */
+  ops?: OpsStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);
@@ -411,8 +438,10 @@ const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === 
 /**
  * The floor under the staleness bound: ten minutes.
  *
- * A PROBE THAT FIRES EARLY IS WORSE THAN ONE THAT NEVER FIRES. Railway restarts
- * the container when /health fails, and a restart has never once fixed an RPC —
+ * A PROBE THAT FIRES EARLY IS WORSE THAN ONE THAT NEVER FIRES. A failing verdict
+ * ends in a restart — not Railway's, which calls /health only at deploy time
+ * (ADR §3.11, RT-11), but the watchdog's, which exits on this same verdict under
+ * `watchdog-exit` (src/watchdog.ts) — and a restart has never once fixed an RPC:
  * it re-runs the same failing chain read against the same endpoint. Sweeps
  * legitimately overrun: a VOLUME wallet with hundreds of transactions above its
  * frontier costs one getTransaction each, and three such wallets can take longer
@@ -470,9 +499,11 @@ export interface HealthReport {
  *
  * WHAT IT CATCHES: a process up and wedged — a sweep hung inside a call that
  * never returns, an interval that stopped firing, a turn that will never end.
- * Nothing advances the clock and nothing ever will, so the restart Railway
- * performs is the one thing that does fix it. Absence is this keeper's
- * characteristic failure.
+ * Nothing advances the clock and nothing ever will, so a restart is the one
+ * thing that does fix it. RAILWAY DOES NOT PERFORM IT: it asks /health only at
+ * deploy time (ADR §3.11, RT-11). The watchdog does, under `watchdog-exit`, on
+ * this very verdict (src/watchdog.ts). Absence is this keeper's characteristic
+ * failure.
  *
  * WHAT IT MUST NEVER CATCH — three cases, each a restart that makes things
  * worse:

@@ -33,7 +33,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { readVaultNullable, readVaults, type VaultState } from "../src/accounts.js";
-import { createAlerter, describeDelivery } from "../src/alerts.js";
+import { createAlerter, describeDelivery, type Alerter, type AlerterOptions } from "../src/alerts.js";
 import {
   keysForTurn,
   missingLiveCondition,
@@ -42,7 +42,18 @@ import {
   type ChainSnapshot,
   type LiveVerification,
 } from "../src/chain-state.js";
+import { ClaimWatch } from "../src/claim-watch.js";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, type KeeperConfig } from "../src/config.js";
+import {
+  DependencyWatch,
+  answerOutcome,
+  depDownAlerts,
+  gatedAlerter,
+  isJupiterHost,
+  observeGlobalFetch,
+  unansweredOutcome,
+  watchedRpcFetch,
+} from "../src/dependency-watch.js";
 import { discoverLinks, discoverLinksPreferringV2, rereadLinks, type DiscoveryReport, type ManagedLink } from "../src/discovery.js";
 import { DISCOVERY_STALE_ALERT_KEY, LastKnownGoodDiscovery, discoveryStaleAlert } from "../src/discovery-lkg.js";
 import { CoalescedRefresh } from "../src/board-refresh.js";
@@ -112,12 +123,15 @@ import { computeGlobalStats, type GlobalStats } from "../src/global-stats.js";
 import {
   createHeartbeatServer,
   decideHealth,
+  healthStaleAfterMs,
   httpHandler,
   renderLeaderboard,
   renderStatus,
   type DoorbellStatus,
+  type HealthReport,
   type KeeperStatus,
   type LeaderboardReply,
+  type OpsStatus,
   type PendingCarry,
 } from "../src/status.js";
 import {
@@ -132,6 +146,20 @@ import {
   sweepSlowAlert,
   walkSweepReport,
 } from "../src/sweep-cost.js";
+import {
+  JUPITER_BUDGET_ALERT_KEY,
+  JupiterAnswers,
+  PRIVY_BURN_ALERT_KEY,
+  PRIVY_INDEX_ALERT_KEY,
+  RPC_FALLBACK_ALERT_KEY,
+  jupiterBudgetAlert,
+  privyBurnAlert,
+  privyIndexAlert,
+  rpcFallbackAlert,
+  type AlertDecision,
+} from "../src/usage-alerts.js";
+import { DIGEST_ALERT_KEY, WarnDigest } from "../src/warn-digest.js";
+import { WATCHDOG_EXIT_CODE, startWatchdog, watchdogExitAlert, type Watchdog } from "../src/watchdog.js";
 import {
   VAULT_READ_ALERT_KEY,
   VAULT_READ_CRITICAL_STREAK,
@@ -247,6 +275,38 @@ const noteProgress = (): void => {
 let failovers = 0;
 let rpcEndpointInUse: string | null = null;
 /**
+ * THE REST OF L1a (src/cuts.ts, OPS_TOKENS): each piece that keeps state, built
+ * only while its token is named and null otherwise — and every line below that
+ * reaches one asks it through that null, so with none named nothing here runs.
+ *
+ *   * dep-down: the shared dependencies, told how each request ended where it
+ *     already passes — the RPC pool just below, the Privy clients' fetch, the
+ *     global fetch for Jupiter's host, the read model's round trips — and one
+ *     page per dependency that is down (src/dependency-watch.ts).
+ *   * jupiter-budget (and dep-down, which needs the same observation): what
+ *     Jupiter's host answered, 429s by sweep (src/usage-alerts.ts).
+ *   * claim-flap: the claim's takeovers, losses and regains (src/claim-watch.ts).
+ *   * warn-digest: the day's warnings, for one message at 08:00 UTC (src/warn-digest.ts).
+ *
+ * The watchdog (watchdog-exit) is started further down, once the claim it
+ * releases exists.
+ */
+const depWatch: DependencyWatch | null = config.cuts.has("dep-down") ? new DependencyWatch() : null;
+const jupiterAnswers: JupiterAnswers | null = config.cuts.has("dep-down") || config.cuts.has("jupiter-budget") ? new JupiterAnswers() : null;
+const claimWatch: ClaimWatch | null = config.cuts.has("claim-flap") ? new ClaimWatch() : null;
+const warnDigest: WarnDigest | null = config.cuts.has("warn-digest") ? new WarnDigest(Date.now()) : null;
+// JUPITER'S ROUTE BUILDER TAKES NO FETCH (it lives in @sip/solana-program and
+// calls the global one), so its answers are seen there, for its host only: every
+// other request passes through untouched (observeGlobalFetch). Its 429s are
+// jupiter-budget's, never dep-down's — being throttled is not being down.
+if (jupiterAnswers !== null) {
+  observeGlobalFetch(globalThis, isJupiterHost, (answer, error) => {
+    const at = Date.now();
+    jupiterAnswers.record(answer, at);
+    if (depWatch !== null && answer !== 429) depWatch.record("jupiter", at, answer === "unanswered" ? unansweredOutcome(error) : answerOutcome(answer));
+  });
+}
+/**
  * WHAT THIS KEEPER ASKS OF ITS PROVIDERS, AND WHAT IT COSTS (ADR L1a). The RPC
  * meter is told every request the pool is handed and how each endpoint
  * answered (src/rpc-usage.ts); the Privy meter every request a Privy client of
@@ -261,9 +321,20 @@ const rpcUsage = createRpcUsage({
   budgetPerDay: config.creditBudgetPerDay,
   startedAt: Date.now(),
 });
-const privyUsage = createPrivyUsage({ startedAt: Date.now() });
+// UNDER dep-down, the same fetch also tells the Privy watch how each request
+// ended (onAnswer: an answer, or a 5xx, 408, 429 or no answer at all); without
+// it, the meter exactly as it was.
+const privyUsage = createPrivyUsage({
+  startedAt: Date.now(),
+  ...(depWatch === null
+    ? {}
+    : {
+        onAnswer: (answer: number | "unanswered", error?: unknown) =>
+          depWatch.record("privy", Date.now(), answer === "unanswered" ? unansweredOutcome(error) : answerOutcome(answer)),
+      }),
+});
 const turnTimers = createTurnTimers();
-const rpcFetch = poolFetch(
+const pooledFetch = poolFetch(
   config.rpcUrls,
   (message, fields) => {
     failovers += 1;
@@ -275,6 +346,12 @@ const rpcFetch = poolFetch(
   },
   rpcUsage,
 );
+/**
+ * Under dep-down, the pool's own verdict on each request: an answer, or the
+ * pool's one throw, which it makes only once every endpoint has refused
+ * (watchedRpcFetch). Without the token, the pool itself.
+ */
+const rpcFetch: typeof fetch = depWatch === null ? pooledFetch : watchedRpcFetch(pooledFetch, depWatch);
 /**
  * The same transport, plus the one thing /health needs: AN ANSWER FROM THE CHAIN
  * IS PROGRESS. Every RPC call this process makes goes through here — Anchor's
@@ -339,7 +416,13 @@ const program = new anchor.Program(idl, provider);
 
 // History for the website. Absent DATABASE_URL it is a no-op; a write failure
 // is a warning and never touches the settlement path. See src/read-model.ts.
-const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) => log.warn(message, fields ?? {}));
+// Under dep-down, each round trip also tells the Postgres watch whether the
+// database answered (databaseAnswered, src/read-model.ts); without it, nothing.
+const readModel = SolanaReadModel.create(
+  config.databaseUrl,
+  (message, fields) => log.warn(message, fields ?? {}),
+  depWatch === null ? undefined : (answered) => depWatch.record("postgres", Date.now(), answered ? { ok: true } : { ok: false, reason: "no answer from the database" }),
+);
 
 /**
  * WAKING SOMEONE WHEN SAVINGS STOP.
@@ -350,7 +433,7 @@ const readModel = SolanaReadModel.create(config.databaseUrl, (message, fields) =
  * did not arrive — and nothing reported absences to anyone. Conditions fire ONCE
  * and stay quiet until they clear; without a webhook they still reach the log.
  */
-const alerter = createAlerter({
+const alerterOptions: AlerterOptions = {
   webhookUrl: config.alertWebhook,
   minSeverity: config.alertMinSeverity,
   destination: config.alertChatId === null ? { kind: "webhook" } : { kind: "telegram", chatId: config.alertChatId },
@@ -366,7 +449,24 @@ const alerter = createAlerter({
   // a driver's — and the byte-run net exists precisely for a key none of them
   // ever registered.
   sanitize: (text) => scrubbedForExport(text),
-});
+};
+const baseAlerter = createAlerter(alerterOptions);
+/**
+ * WHAT EVERY LINE BELOW FIRES INTO. With neither dep-down nor warn-digest named,
+ * the alerter above itself. With them: the dependency gate first, which holds
+ * what a down dependency explains (gatedAlerter), then the digest's tap, which
+ * counts what is still raised (WarnDigest.tap) — so a held warn is not also
+ * summarized tomorrow as if it had stood on its own.
+ */
+const tappedAlerter: Alerter = warnDigest === null ? baseAlerter : warnDigest.tap(baseAlerter);
+const alerter: Alerter = depWatch === null ? tappedAlerter : gatedAlerter(tappedAlerter, depWatch);
+/**
+ * The digest's own sender (warn-digest): the same destination, title prefix and
+ * redactor as every alert, with a threshold of `warn`, so the day's summary of
+ * warnings reaches the chat as the warning it is (src/warn-digest.ts says why
+ * it is not dressed as a critical). Nothing else is ever fired on it.
+ */
+const digestAlerter: Alerter | null = warnDigest === null ? null : createAlerter({ ...alerterOptions, minSeverity: "warn" });
 
 /**
  * THE ALERT LINE ON /status, AS A FACT RATHER THAN A RESTATEMENT.
@@ -786,6 +886,13 @@ function signingRoute(): string {
 const startedAtMs = Date.now();
 
 /**
+ * WHAT /health ANSWERS, AND THE ONE VERDICT THE WATCHDOG EXITS ON: decideHealth
+ * over the progress clock (src/status.ts). One function for both, so the bound
+ * and the meaning of "moved" cannot drift apart.
+ */
+const healthNow = (): HealthReport => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs });
+
+/**
  * What /status serves. An operator must be able to tell a HALTED keeper from a
  * WEDGED one without ssh: `lastSweepAt` moving = alive; an old timestamp with
  * the process up = wedged; the rest says what the last sweep actually saw.
@@ -960,13 +1067,42 @@ const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? n
  * /status's two blocks for the cuts, folded in at render like the doorbell's:
  * where the last sweep's links came from, and what each cut that keeps counters
  * has done. Additive: a keeper with no cut and no L3 serves `cuts.on: []` and a
- * discovery block that says "v1, fresh", which is what it always did.
+ * discovery block that says "v1, fresh", which is what it always did. And the
+ * `ops` block of the SIP_SOLANA_CUTS tokens that are not cuts (opsStatusBlock),
+ * which is absent unless one of them is named.
  */
-function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
+function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts" | "ops"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
     cuts: { on: [...config.cuts], privyAddressBook: privyBook?.status() ?? null, board: boardRefresh?.status() ?? null },
+    ...opsStatusBlock(),
   };
+}
+
+/**
+ * /status's `ops` block (OpsStatus, src/status.ts), folded in at render: one
+ * sub-block per OPS token that keeps state, and NO BLOCK AT ALL while none is
+ * named — the page is then byte for byte the one served before these existed.
+ */
+function opsStatusBlock(): Pick<KeeperStatus, "ops"> {
+  const now = Date.now();
+  const ops: OpsStatus = {
+    ...(watchdog === null
+      ? {}
+      : {
+          progress: {
+            exitAfterMs: healthStaleAfterMs(config.sweepMs),
+            lastProgressAt: lastProgressAt === null ? null : new Date(lastProgressAt).toISOString(),
+            checks: watchdog.checks(),
+            exitCode: WATCHDOG_EXIT_CODE,
+          },
+        }),
+    ...(depWatch === null ? {} : { deps: depWatch.status(now) }),
+    ...(jupiterAnswers === null ? {} : { jupiterAnswers: jupiterAnswers.status() }),
+    ...(claimWatch === null ? {} : { claim: claimWatch.status() }),
+    ...(warnDigest === null ? {} : { digest: warnDigest.status() }),
+  };
+  return Object.keys(ops).length === 0 ? {} : { ops };
 }
 
 /** Asks for the rankings to be recomputed: the timer's way in and a settlement's. Never awaited. */
@@ -1001,7 +1137,7 @@ if (config.port !== null) {
     httpHandler(
       () =>
         renderStatus({ ...health, ...usageStatus(), pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus(), ...cutsStatusBlocks() }, sharedRedactor),
-      () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
+      healthNow,
       () => leaderboard,
       hooks,
     ),
@@ -1044,6 +1180,7 @@ const claim: KeeperClaim = new KeeperClaim({
       health.mode = "dry-run";
       health.missingLiveCondition = liveBlocker();
       log.error("the keeper claim was lost with its database session — acting stops until it is claimed again");
+      claimWatch?.lost(Date.now(), "session-dropped");
       alerter.fire({
         key: "claim-lost",
         severity: "critical",
@@ -1055,6 +1192,10 @@ const claim: KeeperClaim = new KeeperClaim({
     log.info("took over as the acting keeper");
     alerter.clear("not-acting");
     alerter.clear("claim-lost");
+    // claim-flap: A SECOND TAKEOVER BY THIS SAME PROCESS IS A REGAIN, and pages
+    // (src/claim-watch.ts); a container's first one is a deploy and says nothing.
+    const regained = claimWatch?.takeover(Date.now()) ?? null;
+    if (regained !== null) alerter.fire(regained);
   },
 });
 
@@ -1062,6 +1203,30 @@ const liveBlocker = (): string | null =>
   missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName });
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
+
+/**
+ * THE WATCHDOG (src/watchdog.ts), under `watchdog-exit`: once the sweep has not
+ * moved for /health's own bound — healthNow, the same verdict on the same clock —
+ * it logs, pages once, releases the claim as SIGTERM would, and exits with
+ * WATCHDOG_EXIT_CODE so Railway's ON_FAILURE policy starts a fresh process.
+ * Started here, before the chain is first read, so a boot that hangs is covered
+ * too. Without the token, null: a wedged keeper stays up, as it always has.
+ */
+const watchdog: Watchdog | null = config.cuts.has("watchdog-exit")
+  ? startWatchdog({
+      health: healthNow,
+      beforeExit: (report) => {
+        log.error("watchdog: the sweep has stopped moving — exiting so Railway starts a fresh process", {
+          quietForMs: report.quietForMs,
+          staleAfterMs: report.staleAfterMs,
+          exitCode: WATCHDOG_EXIT_CODE,
+        });
+        alerter.fire(watchdogExitAlert(report));
+        if (config.armed && readModel.enabled && claim.held) claim.release();
+      },
+      exit: (code) => process.exit(code),
+    })
+  : null;
 
 function applySnapshot(snapshot: ChainSnapshot): void {
   // THIS READ'S ANSWER, null when it could not say, never an earlier sweep's.
@@ -1123,7 +1288,10 @@ function verifyLive(snapshot: ChainSnapshot, atStartup: boolean): LiveVerificati
       title: "The settle key no longer matches the on-chain ProtocolConfig",
       detail: next.detail,
     });
-    if (readModel.enabled && config.armed && claim.held) claim.release();
+    if (readModel.enabled && config.armed && claim.held) {
+      claim.release();
+      claimWatch?.lost(Date.now(), "settle-key-mismatch");
+    }
   } else {
     alerter.clear("settle-key-mismatch");
   }
@@ -1194,6 +1362,57 @@ function noteSweepCost(
   const burn = creditBurnAlert(rpcUsage.report(Date.now()));
   if (burn.fire !== null) alerter.fire(burn.fire);
   else if (burn.clear) alerter.clear(CREDIT_BURN_ALERT_KEY);
+  // AND THE REST OF L1a's ALERTS, each only under its token. LAST, for the same
+  // reason the meters are: nothing added here can keep anything above from running.
+  noteOpsAfterSweep();
+}
+
+/** One of usage-alerts.ts's decisions, applied: raise it, or clear its key. */
+function applyDecision(key: string, decision: AlertDecision): void {
+  if (decision.fire !== null) alerter.fire(decision.fire);
+  else if (decision.clear) alerter.clear(key);
+}
+
+/**
+ * What the rest of L1a asks once a sweep has ended, failed or not: the
+ * dependencies that are down (dep-down), the four alerts on L1a's counters
+ * (privy-burn, privy-index, rpc-fallback, jupiter-budget), and whether the
+ * day's digest is due (warn-digest). Each line asks its token first; with none
+ * named this function does nothing at all.
+ */
+function noteOpsAfterSweep(): void {
+  const now = Date.now();
+  if (depWatch !== null) {
+    const down = depDownAlerts(depWatch, now);
+    for (const key of down.clear) alerter.clear(key);
+    for (const page of down.fire) alerter.fire(page);
+  }
+  if (config.cuts.has("privy-burn")) applyDecision(PRIVY_BURN_ALERT_KEY, privyBurnAlert(privyUsage.report(now)));
+  if (config.cuts.has("privy-index")) applyDecision(PRIVY_INDEX_ALERT_KEY, privyIndexAlert(privyUsage.report(now)));
+  if (config.cuts.has("rpc-fallback")) {
+    applyDecision(
+      RPC_FALLBACK_ALERT_KEY,
+      rpcFallbackAlert({ endpointInUse: rpcEndpointInUse, endpointSinceMs: rpcUsage.report(now).endpointSinceMs, endpoints: config.rpcUrls.length }),
+    );
+  }
+  if (config.cuts.has("jupiter-budget") && jupiterAnswers !== null) {
+    applyDecision(
+      JUPITER_BUDGET_ALERT_KEY,
+      jupiterBudgetAlert({
+        usage: jupiterCalls.report(now),
+        http429ThisSweep: jupiterAnswers.http429ThisSweep(),
+        lastHttp429At: jupiterAnswers.lastHttp429At(),
+        live: isLive(),
+        now,
+      }),
+    );
+  }
+  // THE DIGEST ON ITS OWN SENDER, cleared first so a day's message is never
+  // read as the "(x2)" repeat of yesterday's.
+  if (warnDigest !== null && digestAlerter !== null && warnDigest.due(now)) {
+    digestAlerter.clear(DIGEST_ALERT_KEY);
+    digestAlerter.fire(warnDigest.take(now));
+  }
 }
 
 async function sweep(): Promise<void> {
@@ -1230,6 +1449,8 @@ async function sweep(): Promise<void> {
   // ZEROED AT THE TOP, READ IN THE `finally`: one sweep runs at a time, so the
   // count between those two points is this sweep's.
   jupiterCalls.startSweep();
+  // AND THE 429s JUPITER ANSWERS THIS SWEEP (jupiter-budget, dep-down), on the same terms.
+  jupiterAnswers?.startSweep();
   // AND THE RPC AND PRIVY METERS' PER-SWEEP COUNTS, on the same terms.
   rpcUsage.startSweep();
   privyUsage.startSweep();
@@ -2196,6 +2417,12 @@ async function sweep(): Promise<void> {
     selectionOutstanding = false;
     health.lastSweepError = summarizeUpstreamError(error, { take: 3, maxChars: 500 });
     log.error("sweep cycle failed", { detail: health.lastSweepError });
+    // dep-down: A SWEEP THAT ENDED ON THE POOL'S "EVERY ENDPOINT REFUSED" IS THE
+    // RPC DOWN, at once (DependencyWatch.sweepFailureCause): the generic
+    // sweep-failed below is then held by the gate, and dep-down:rpc pages
+    // instead from noteSweepCost. Any other failure is still sweep-failed.
+    const failedOn = depWatch?.sweepFailureCause(cycleBeganAt) ?? null;
+    if (failedOn !== null) depWatch?.sweepFailedOn(failedOn, health.lastSweepError);
     alerter.fire({
       key: "sweep-failed",
       severity: "critical",

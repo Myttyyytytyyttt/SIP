@@ -121,8 +121,22 @@ export interface PrivyUsage {
   report(now: number): PrivyUsageStatus;
 }
 
-export function createPrivyUsage(options: { readonly startedAt: number; readonly now?: () => number }): PrivyUsage {
+export interface PrivyUsageOptions {
+  readonly startedAt: number;
+  readonly now?: () => number;
+  /**
+   * Told how each request through fetch() ended — its HTTP status, or
+   * "unanswered" with what was thrown — after it ended. For the `dep-down`
+   * token's Privy watch (src/dependency-watch.ts) and nothing else; absent, as
+   * it is everywhere but a keeper with that token, nothing is told. It is called
+   * inside a try of its own, like every count here.
+   */
+  readonly onAnswer?: (answer: number | "unanswered", error?: unknown) => void;
+}
+
+export function createPrivyUsage(options: PrivyUsageOptions): PrivyUsage {
   const now = options.now ?? (() => Date.now());
+  const onAnswer = options.onAnswer;
   const day = () => createRollingCounts({ windowMs: DAY_MS, bucketMs: DAY_BUCKET_MS, startedAt: options.startedAt });
   const calls = day();
   const failures = day();
@@ -163,9 +177,11 @@ export function createPrivyUsage(options: { readonly startedAt: number; readonly
           response = await inner(input, init);
         } catch (error) {
           quietly(() => failures.add("unanswered", 1, now()));
+          if (onAnswer !== undefined) quietly(() => onAnswer("unanswered", error));
           throw error;
         }
         if (!response.ok) quietly(() => failures.add(response.status === 429 ? "http429" : "httpOther", 1, now()));
+        if (onAnswer !== undefined) quietly(() => onAnswer(response.status));
         return response;
       }) as typeof fetch;
     },

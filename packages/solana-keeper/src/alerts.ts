@@ -157,6 +157,21 @@ export async function postJson(url: string, body: string): Promise<void> {
 const RANK: Record<AlertSeverity, number> = { warn: 0, critical: 1 };
 
 /**
+ * The KIND of condition a key names: the key up to its first colon —
+ * `settle-retry:<wallet>` is "settle-retry", `leg-fee:<mint>:<bps>` is
+ * "leg-fee", and a fleet key with no colon (`sweep-failed`) is itself.
+ *
+ * Every per-wallet and per-vault key in this keeper is built as
+ * `<kind>:<address…>`, so this is how a reader that must not list addresses —
+ * the daily digest, the dependency gate — groups them. Addresses are public, but
+ * a digest of forty wallet keys is a message nobody reads.
+ */
+export function alertFamily(key: string): string {
+  const colon = key.indexOf(":");
+  return colon === -1 ? key : key.slice(0, colon);
+}
+
+/**
  * The /status alert line. PURE, so it can be pinned: the line an operator reads
  * to decide whether the box works is worth a test, and bin/keeper.mts —
  * where it is rendered — has none.
