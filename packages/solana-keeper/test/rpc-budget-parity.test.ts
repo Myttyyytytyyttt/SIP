@@ -92,6 +92,13 @@ function sources(dir: string): string[] {
     .map((name) => resolve(KEEPER, dir, name));
 }
 
+/**
+ * The dispatcher's own entry points (test/dispatch-dark.test.ts keeps the same
+ * list): production starts none of them, and they are the ONE place a budget is
+ * passed — bin/scheduler.mts builds the scheduler's bucket.
+ */
+const DISPATCHER_ENTRY_POINTS = new Set([resolve(KEEPER, "bin/scheduler.mts")]);
+
 describe("no legacy caller can pass a budget", () => {
   it("hands poolFetch at most five arguments at every call outside the pool itself, and bin/keeper.mts exactly five", () => {
     const counted = poolFetchCalls("x(poolFetch(a, (m, f) => { g(m, f); }, undefined, (at) => { h = at; }, meter,\n));");
@@ -99,7 +106,7 @@ describe("no legacy caller can pass a budget", () => {
     expect(poolFetchCalls("poolFetch(urls)")).toEqual([1]);
     let calls = 0;
     for (const file of [...sources("bin"), ...sources("src")]) {
-      if (file.endsWith("rpc-pool.ts")) continue;
+      if (file.endsWith("rpc-pool.ts") || DISPATCHER_ENTRY_POINTS.has(file)) continue;
       for (const args of poolFetchCalls(readFileSync(file, "utf8"))) {
         calls += 1;
         expect(args, file).toBeLessThanOrEqual(5);
@@ -111,9 +118,14 @@ describe("no legacy caller can pass a budget", () => {
 
   it("imports none of the dispatcher's budget modules from any entry point production starts", () => {
     for (const file of sources("bin")) {
+      if (DISPATCHER_ENTRY_POINTS.has(file)) continue;
       const text = readFileSync(file, "utf8");
       expect(text, file).not.toMatch(/rpc-budget|rpc-quota|credit-governor/);
     }
+  });
+
+  it("the scheduler's entry point is the one that does: its pool is handed the bucket, a sixth argument", () => {
+    expect(poolFetchCalls(readFileSync(resolve(KEEPER, "bin/scheduler.mts"), "utf8"))).toEqual([6]);
   });
 });
 

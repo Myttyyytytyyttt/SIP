@@ -92,6 +92,33 @@ export async function discoverLinks(
 }
 
 /**
+ * The same listing as discoverLinks, asked WITH ITS CONTEXT: the slot the
+ * answer was read at, which the dispatcher's scheduler records beside each link
+ * it lists (keeper_link.seen_slot, src/scheduler-pg.ts).
+ *
+ * THE SCHEDULER'S, NEVER THE LEGACY KEEPER'S: the request differs by its
+ * `withContext` (same method, same filter, same credits), and the legacy sweep
+ * keeps discoverLinks so that its requests stay byte for byte what they were.
+ */
+export async function discoverLinksWithContext(
+  connection: Connection,
+  programId: PublicKey,
+  discriminator: Buffer,
+): Promise<{ readonly links: ManagedLink[]; readonly contextSlot: number }> {
+  const answer = await connection.getProgramAccounts(programId, {
+    commitment: "confirmed",
+    filters: [{ dataSize: TRADING_LINK_SPACE }],
+    withContext: true,
+  });
+  const links: ManagedLink[] = [];
+  for (const { pubkey, account } of answer.value) {
+    const link = decodeTradingLink(pubkey, account.data, discriminator);
+    if (link !== null) links.push(link);
+  }
+  return { links, contextSlot: answer.context.slot };
+}
+
+/**
  * Accounts per getProgramAccountsV2 page: Helius's maximum. One page — one
  * credit — holds every link this program will have for a long while.
  */
@@ -115,6 +142,12 @@ export interface DiscoveryReport {
   readonly requests: number;
   /** Why V2 was not used, when it was tried and the sweep fell back. */
   readonly fallbackReason?: string;
+  /**
+   * The slot the listing was read at — the LOWEST over a V2 listing's pages,
+   * which is not atomic — when it was asked with its context (`withContext`,
+   * the dispatcher's scheduler only). Absent for every legacy listing.
+   */
+  readonly contextSlot?: number;
 }
 
 /** A V2 listing that could not be used. Its message names what was wrong, never a URL. */
@@ -197,13 +230,14 @@ export async function listLinksV2(
   rpc: typeof fetch,
   programId: PublicKey,
   discriminator: Buffer,
-  options: { readonly pageLimit?: number; readonly maxPages?: number } = {},
-): Promise<{ readonly links: ManagedLink[]; readonly requests: number }> {
+  options: { readonly pageLimit?: number; readonly maxPages?: number; readonly withContext?: boolean } = {},
+): Promise<{ readonly links: ManagedLink[]; readonly requests: number; readonly contextSlot?: number }> {
   const pageLimit = options.pageLimit ?? GPA_V2_PAGE_LIMIT;
   const maxPages = options.maxPages ?? GPA_V2_MAX_PAGES;
   const links: ManagedLink[] = [];
   let paginationKey: string | null = null;
   let requests = 0;
+  let contextSlot: number | undefined;
   do {
     if (requests >= maxPages) {
       throw new GpaV2Unavailable(`getProgramAccountsV2 was still paginating after ${maxPages} pages`, requests);
@@ -220,6 +254,8 @@ export async function listLinksV2(
           filters: [{ dataSize: TRADING_LINK_SPACE }],
           limit: pageLimit,
           ...(paginationKey === null ? {} : { paginationKey }),
+          // ONLY WHEN ASKED (the scheduler): absent, the request is the legacy one, byte for byte.
+          ...(options.withContext === true ? { withContext: true } : {}),
         },
       ],
     });
@@ -241,13 +277,25 @@ export async function listLinksV2(
     }
     const page = readV2Page(reply["result"], programId);
     if (typeof page === "string") throw new GpaV2Unavailable(`getProgramAccountsV2 answered a malformed page: ${page}`, requests);
+    if (options.withContext === true) {
+      const slot = contextSlotOf(reply["result"]);
+      if (slot === null) throw new GpaV2Unavailable("getProgramAccountsV2 was asked for its context and answered none", requests);
+      contextSlot = contextSlot === undefined ? slot : Math.min(contextSlot, slot);
+    }
     for (const { pubkey, data } of page.accounts) {
       const link = decodeTradingLink(pubkey, data, discriminator);
       if (link !== null) links.push(link);
     }
     paginationKey = page.paginationKey;
   } while (paginationKey !== null);
-  return { links, requests };
+  return contextSlot === undefined ? { links, requests } : { links, requests, contextSlot };
+}
+
+/** A `withContext` answer's `result.context.slot`, or null when it carries none that is a slot. */
+function contextSlotOf(result: unknown): number | null {
+  if (!isRecord(result) || !isRecord(result["context"])) return null;
+  const slot = result["context"]["slot"];
+  return typeof slot === "number" && Number.isSafeInteger(slot) && slot >= 0 ? slot : null;
 }
 
 /**
@@ -267,10 +315,10 @@ export async function discoverLinksPreferringV2(
   programId: PublicKey,
   discriminator: Buffer,
   rpc: typeof fetch,
-  options: { readonly pageLimit?: number; readonly maxPages?: number } = {},
+  options: { readonly pageLimit?: number; readonly maxPages?: number; readonly withContext?: boolean } = {},
 ): Promise<DiscoveryReport> {
   try {
-    const { links, requests } = await listLinksV2(rpc, programId, discriminator, options);
+    const { links, requests, contextSlot } = await listLinksV2(rpc, programId, discriminator, options);
     const seen = new Set<string>();
     const unique = links.filter((link) => {
       const key = link.linkAddress.toBase58();
@@ -278,11 +326,15 @@ export async function discoverLinksPreferringV2(
       seen.add(key);
       return true;
     });
-    return { links: unique, method: "v2", requests };
+    return { links: unique, method: "v2", requests, ...(contextSlot === undefined ? {} : { contextSlot }) };
   } catch (error) {
     const spent = error instanceof GpaV2Unavailable ? error.requests : 1;
     const fallbackReason = error instanceof GpaV2Unavailable ? error.message : `getProgramAccountsV2 failed (${error instanceof Error ? error.name : "unknown"})`;
     // V1's own failure propagates unchanged: it is today's sweep-failed, or L3's.
+    if (options.withContext === true) {
+      const listed = await discoverLinksWithContext(connection, programId, discriminator);
+      return { links: listed.links, method: "v1-fallback", requests: spent + 1, fallbackReason, contextSlot: listed.contextSlot };
+    }
     const links = await discoverLinks(connection, programId, discriminator);
     return { links, method: "v1-fallback", requests: spent + 1, fallbackReason };
   }

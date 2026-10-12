@@ -37,10 +37,18 @@ const DISPATCHER_MODULES = [
   "src/fleet-alerts.ts",
   "src/rpc-quota.ts",
   "src/credit-governor.ts",
+  // Q2, the scheduler.
+  "src/scheduler.ts",
+  "src/scheduler-pg.ts",
+  "src/scheduler-select.ts",
+  "src/scheduler-chain.ts",
+  "src/scheduler-config.ts",
+  "src/scheduler-board.ts",
+  "src/lamports-filter.ts",
 ] as const;
 
-/** bin/ files that are the dispatcher's own (none yet: Q2 and Q3 add theirs). */
-const DISPATCHER_ENTRY_POINTS: readonly string[] = [];
+/** bin/ files that are the dispatcher's own: the only ones allowed to reach the modules above (Q3 adds the worker's). */
+const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/scheduler.mts"];
 
 /** Relative specifiers, static (import/export … from, bare import) and dynamic. Type-only imports load nothing. */
 function relativeImports(text: string): string[] {
@@ -107,6 +115,16 @@ describe("DARK: no entry point production can start reaches a dispatcher module"
     expect(keeper.has(resolve(KEEPER, "src/rpc-pool.ts"))).toBe(true);
     expect(keeper.has(resolve(KEEPER, "src/rpc-budget.ts"))).toBe(true);
     for (const module of DISPATCHER_MODULES) expect(existsSync(resolve(KEEPER, module)), module).toBe(true);
+  });
+
+  it("the scheduler's entry point is the dispatcher's, reaches its modules, and is not what the image runs", () => {
+    const scheduler = reach(resolve(KEEPER, "bin/scheduler.mts"));
+    for (const module of ["src/scheduler.ts", "src/scheduler-pg.ts", "src/dispatch-store.ts", "src/fleet-receiver.ts", "src/lamports-filter.ts"]) {
+      expect(scheduler.has(resolve(KEEPER, module)), module).toBe(true);
+    }
+    const dockerfile = readFileSync(resolve(KEEPER, "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/^CMD \["node_modules\/\.bin\/tsx", "bin\/keeper\.mts"\]$/m);
+    expect(dockerfile).not.toMatch(/scheduler\.mts/);
   });
 
   it.each(entries.map((file) => [rel(file), file] as const))("%s reaches none of them", (_name, file) => {

@@ -327,6 +327,8 @@ export class FleetReceiver {
   #deliveries = 0;
   #transactions = 0;
   #rejected = 0;
+  /** 403s since the last authenticated transaction: the webhook sync's evidence (deliveryCounts). */
+  #rejectedSinceAccepted = 0;
   #rejectedCoalesced = 0;
   #lost = 0;
   #lastEventAt: number | null = null;
@@ -365,6 +367,7 @@ export class FleetReceiver {
     const now = this.#now();
     if (delivery.transactions > 0) {
       this.#transactions += delivery.transactions;
+      this.#rejectedSinceAccepted = 0;
       // AN AUTHENTICATED TRANSACTION IS PROOF the webhook sends this secret
       // (Doorbell.ingest): from here on, a 403 is a stranger guessing.
       this.#authConfirmed = true;
@@ -384,6 +387,7 @@ export class FleetReceiver {
   /** A delivery refused 403 (Doorbell.rejected's rule, with a Postgres write behind it). */
   reject(): void {
     this.#rejected += 1;
+    this.#rejectedSinceAccepted += 1;
     if (this.#authConfirmed) return;
     const now = this.#now();
     if (this.#lastRejectRequestAt !== null && now - this.#lastRejectRequestAt < REJECT_FULL_PASS_COALESCE_MS) {
@@ -409,6 +413,18 @@ export class FleetReceiver {
    */
   confirmAuthorization(): void {
     this.#authConfirmed = true;
+  }
+
+  /**
+   * What this replica counted, in the shape the webhook sync judges a hidden
+   * header by (Doorbell.deliveryCounts, src/helius-webhooks.ts DeliveryCounts):
+   * transactions authenticated, deliveries refused, and refused since the last
+   * authenticated one. Only the lock holder syncs (bin/scheduler.mts), and it
+   * hands the sync its own replica's counts: deliveries the other replica took
+   * are not in them, which can only make a header look less proven, never more.
+   */
+  deliveryCounts(): { readonly accepted: number; readonly rejected: number; readonly rejectedSinceAccepted: number } {
+    return { accepted: this.#transactions, rejected: this.#rejected, rejectedSinceAccepted: this.#rejectedSinceAccepted };
   }
 
   /**
