@@ -30,6 +30,7 @@
 // FIRST, so every library that prints while loading prints through the redactor.
 import "../src/console-bridge.js";
 import { randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
@@ -56,6 +57,14 @@ import {
   watchedRpcFetch,
 } from "../src/dependency-watch.js";
 import { discoverLinks, discoverLinksPreferringV2, rereadLinks, type DiscoveryReport, type ManagedLink } from "../src/discovery.js";
+import {
+  LEGACY_SELECT_ALERT_KEY,
+  LEGACY_SELECT_CRITICAL_STREAK,
+  LegacySelector,
+  legacySelectAlert,
+  leftAloneDetail,
+  partitionLegacyTurns,
+} from "../src/dispatch-select.js";
 import { DISCOVERY_STALE_ALERT_KEY, LastKnownGoodDiscovery, discoveryStaleAlert } from "../src/discovery-lkg.js";
 import { CoalescedRefresh } from "../src/board-refresh.js";
 import {
@@ -575,6 +584,26 @@ const carryStore: DurableCarries | null =
  * after a restart, each window is fetched once more.
  */
 const walkCache = new WalkCache();
+
+/**
+ * THE MIGRATION'S SELECTION (src/dispatch-select.ts), only under
+ * SIP_SOLANA_DISPATCH: every sweep reads sip_solana.vault_work, leaves alone —
+ * settle and invest — every vault it does not call `legacy`, and writes this
+ * process's receipt (legacy_process) in the same statement. NULL IS `off`, which
+ * is today: no statement, no receipt, every selected turn runs. config.ts refuses
+ * the variable without DATABASE_URL, so a selector always has a database.
+ */
+const legacySelector: LegacySelector | null =
+  config.dispatch === "off"
+    ? null
+    : new LegacySelector({
+        role: config.role,
+        mode: config.dispatch,
+        processId: randomUUID(),
+        deployment: process.env["RAILWAY_DEPLOYMENT_ID"]?.trim() || null,
+        host: hostname(),
+        run: (text, values) => readModel.statement(text, values),
+      });
 
 /**
  * The `rest-skip` cut's memos (src/rest-book.ts): which settled links rest on
@@ -1170,7 +1199,7 @@ if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.
  * ABSENT WHILE `off`, so a keeper without the variable serves the page it served
  * before the store existed, key for key.
  */
-function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts" | "carryStore" | "ops"> {
+function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts" | "carryStore" | "ops" | "dispatch"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
     cuts: {
@@ -1189,6 +1218,8 @@ function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts" | "carrySto
     },
     ...(carryStore === null ? {} : { carryStore: carryStore.status() }),
     ...opsStatusBlock(),
+    // THE MIGRATION'S SELECTION, and ABSENT WITHOUT SIP_SOLANA_DISPATCH: the page of before, key for key.
+    ...(legacySelector === null ? {} : { dispatch: legacySelector.status() }),
   };
 }
 
@@ -1539,6 +1570,55 @@ function noteOpsAfterSweep(): void {
   }
 }
 
+/**
+ * THE LEGACY KEEPER'S SHARE OF A SELECTION, under SIP_SOLANA_DISPATCH: the
+ * sweep's one read of vault_work (and its receipt), then the selected turns split
+ * into the ones still this keeper's and the ones it leaves alone
+ * (src/dispatch-select.ts). A READ THAT FAILED LEAVES EVERY TURN ALONE: a delay,
+ * never a vault acted on by two actors. Each turn left alone says so on /status
+ * — its row, and a signing route that is not counted as signable — and is not
+ * told to the doorbell, which keeps selecting it at no cost.
+ */
+async function legacyTurns<T extends { readonly link: { readonly vault: string; readonly wallet: string; readonly managed: ManagedLink } }>(
+  selector: LegacySelector,
+  selected: readonly T[],
+  links: readonly ManagedLink[],
+  live: boolean,
+): Promise<readonly T[]> {
+  // THE VAULTS WHOSE LOSS CARRY LIVES ONLY IN THIS PROCESS'S MEMORY: a worker could
+  // not see it, so the receipt names them and no handover arms them. With a carry
+  // store (dual or on) the carry is in Postgres as well, and nothing is named.
+  const carryVaults =
+    carryStore !== null ? [] : links.filter((link) => (settleCarries.get(link.linkAddress.toBase58())?.size ?? 0) > 0).map((link) => link.vault.toBase58());
+  const read = await selector.read({ live, carryVaults, now: Date.now() });
+  if (read.ok) {
+    alerter.clear(LEGACY_SELECT_ALERT_KEY);
+  } else {
+    log.warn("vault_work could not be read; this sweep settles and invests nothing", { detail: read.detail, consecutive: read.streak });
+    if (read.streak === LEGACY_SELECT_CRITICAL_STREAK) alerter.clear(LEGACY_SELECT_ALERT_KEY);
+    alerter.fire(legacySelectAlert(read.streak, read.detail));
+  }
+  const { act, left } = partitionLegacyTurns(selected, (turn) => turn.link.vault, read.ok ? read.view : null);
+  const at = new Date().toISOString();
+  for (const { turn, reason } of left) {
+    const wallet = turn.link.wallet;
+    const route = `not resolved (left alone: ${reason})`;
+    signingRoutes.set(wallet, route);
+    health.wallets[wallet] = { settle: "LEFT_ALONE", invest: "LEFT_ALONE", signing: route, detail: leftAloneDetail(reason, selector.mode), at };
+  }
+  const leftVaults = new Set(left.map(({ turn }) => turn.link.vault));
+  selector.noteLeft(
+    left.map(({ turn, reason }) => ({ wallet: turn.link.wallet, vault: turn.link.vault, reason })),
+    carryVaults.filter((vault) => leftVaults.has(vault)),
+  );
+  changes.change(
+    "legacy-select",
+    left.length === 0 ? "every selected vault is the legacy keepers'" : "vaults left alone: not the legacy keepers'",
+    left.length === 0 ? {} : { leftAlone: left.length, reasons: [...new Set(left.map(({ reason }) => reason))].sort() },
+  );
+  return act;
+}
+
 async function sweep(): Promise<void> {
   if (cycleRunning) {
     // COUNTED AND ESCALATED, WHICH IT NEVER USED TO BE. This was one log line:
@@ -1729,7 +1809,11 @@ async function sweep(): Promise<void> {
     }));
     knownAddresses = new Set(doorLinks.flatMap((link) => [link.wallet, link.vault]));
     const selection = doorbell.select({ links: doorLinks, now: Date.now(), sweepMs: config.sweepMs, protocolPaused, live: liveAtStart });
-    const turns = selection.turns;
+    // AND, UNDER SIP_SOLANA_DISPATCH, ONLY THE ONES THAT ARE STILL THE LEGACY
+    // KEEPERS' (legacyTurns below): a vault vault_work hands to the queue is not
+    // turned at all — no vault read, no Privy lookup, no settle, no invest.
+    // Without the variable this is the selection, untouched.
+    const turns = legacySelector === null ? selection.turns : await legacyTurns(legacySelector, selection.turns, links, liveAtStart);
     // Set until the loop below has turned every selected link; a sweep that
     // throws before then asks the next one to turn everybody.
     selectionOutstanding = turns.length > 0;
@@ -1944,6 +2028,7 @@ async function sweep(): Promise<void> {
     log.info("sweep", {
       links: links.length,
       turned: turns.length,
+      ...(legacySelector === null ? {} : { leftAlone: legacySelector.status().leftAloneLastSweep }),
       ...(selection.fullReason === null ? { lanes: selection.lanes } : { fullPass: selection.fullReason }),
       localKeypairs: localSigners?.signers.size ?? 0,
       mode: liveAtStart ? "live" : "dry-run",

@@ -53,10 +53,20 @@ const DISPATCHER_MODULES = [
   "src/fenced-sender.ts",
   "src/job-chain.ts",
   "src/settle-modules.ts",
+  // THE HANDOVER (src/handover.ts) and its command line: an operator's tool that
+  // writes who acts on each vault. src/dispatch-select.ts, the legacy keepers'
+  // read of that answer, is NOT here: bin/keeper.mts loads it on purpose, and it
+  // runs nothing unless SIP_SOLANA_DISPATCH is set (test/dispatch-select.test.ts).
+  "src/handover.ts",
+  "src/handover-cli.ts",
 ] as const;
 
-/** bin/ files that are the dispatcher's own: the only ones allowed to reach the modules above. */
-const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/scheduler.mts", "bin/worker.mts"];
+/**
+ * bin/ files that are the dispatcher's own, the only ones allowed to reach the
+ * modules above: the scheduler's and the worker's services, and the handover's
+ * command, which only an operator runs.
+ */
+const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/scheduler.mts", "bin/worker.mts", "bin/dispatch-handover.mts"];
 
 /** Relative specifiers, static (import/export … from, bare import) and dynamic. Type-only imports load nothing. */
 function relativeImports(text: string): string[] {

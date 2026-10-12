@@ -707,6 +707,139 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   la vez); el de volumen, 2 y 4. Antes de encenderlo, comprueba que la suma de los dos servicios durante un despliegue
   (6 + 4 = 10) más todo lo demás que use esa base queda al menos 5 por debajo del límite del pooler de sesión de Supabase.
 
+## 10. El despachador (`scheduler` y `worker`) y el traspaso de vaults — **TODAVÍA NO ESTÁ DESPLEGADO**
+
+> **Nada de esta sección está en `main` ni en Railway.** Vive en la rama `scale-dispatcher`, que nunca se ha subido.
+> Llega a producción solo cuando tú decidas el merge (decisión O4 del plan `PLAN_DISPATCHER_FIRST.md`), con todas las
+> variables nuevas apagadas. Hasta entonces, **no crees estos servicios ni pongas estas variables**: se describen aquí
+> para que el día que toque estén escritos de antemano. Al escribir esto (12-oct) la rama todavía no tiene los puntos de
+> entrada del `scheduler` ni del `worker` (`bin/scheduler.mts`, `bin/worker.mts`); lo que sí tiene es lo de 10.3 a 10.5:
+> los vigilantes de siempre leyendo quién actúa sobre cada vault, y el comando del traspaso. Diseño: ADR del dispatcher,
+> §2.4, §3.8–§3.12 y §6.
+
+### 10.1 Los dos servicios nuevos
+
+| servicio | réplicas | público | lleva | no lleva |
+|---|---|---|---|---|
+| `keeper-scheduler` | 2 (una tiene el candado `sip-solana-scheduler`, la otra espera) | sí: `/hooks/helius`, `/status`, `/leaderboard`, `/health` | `DATABASE_URL`, las URL de RPC, la clave de Helius, el secreto del timbre, el Telegram | la llave de cobro, nada de Privy |
+| `keeper-worker` | `r` réplicas (empezar con 2) × 2 huecos | no | `DATABASE_URL`, las URL de RPC, la llave de cobro, la app y la authorization key de Privy, la clave de Jupiter, el Telegram | el secreto del timbre (no recibe a Helius) |
+
+- **Cada servicio se configura a mano**, como los de las secciones 1 y 6: el Dockerfile de la raíz construye la imagen
+  del vigilante (que copia `packages/solana-keeper` entero, así que los archivos nuevos van dentro), *Restart On
+  Failure*, y **`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` en todos** (decisión 6: sin eso Railway mata el contenedor al
+  instante de avisarle y cada despliegue es una toma de control con espera, ADR §3.11).
+- **`/health` solo lo mira Railway al desplegar.** Un proceso colgado se reinicia porque **sale solo** con código de error
+  (ADR §3.11), no porque Railway lo vigile.
+- **`SIP_SOLANA_DISPATCH`** (`off`, `shadow` u `on`; un valor distinto **no arranca**): en `shadow` los workers pasan por
+  la puerta de envío igual que en `on` pero **no envían nada** y no llevan ninguna clave.
+- **El ensayo en sombra va con su PROPIA base de datos**, nunca con la `DATABASE_URL` de producción. En la sombra todos
+  los vaults tienen que estar en la cola para que los workers trabajen; en la base de producción, un vault marcado `queue`
+  lo soltarían los vigilantes de siempre en cuanto llevaran `SIP_SOLANA_DISPATCH` (10.3), **sin traspaso**. En la base de
+  la sombra los vaults llegan a la cola con `dispatch-handover arm --all --roles=none --allow-dry` (10.4), porque ningún
+  vigilante de siempre la usa. Por eso las conexiones a Supabase de 10.2 no las mide la sombra: se cuentan aparte.
+
+### 10.2 Conexiones a Supabase (cuéntalas antes de crear nada)
+
+La cuenta exacta la hace `dispatchConnections` (`src/dispatch-store.ts`): el scheduler usa 3 (la réplica con el candado
+2, la otra 1), cada worker 2, cada vigilante de siempre 2, y el de beneficio 1 más si tiene `SIP_SOLANA_CARRY_STORE`
+`dual` u `on`. **Un push lo duplica todo** mientras arrancan los contenedores nuevos.
+
+| workers (`r`) | sin los vigilantes de siempre | con los dos (y el almacén de pérdidas) | durante un push, con los dos |
+|---|---|---|---|
+| 1 | 5 | 10 | 20 |
+| 2 | 7 | 12 | 24 |
+| 3 | 9 | 14 | 28 |
+
+Con un pooler de sesión de 15 (supuesto, sin comprobar) **no cabe ningún `r` mientras los dos vigilantes de siempre
+siguen vivos durante un push**. Antes del primer servicio nuevo: mira el host de `DATABASE_URL` y el tamaño del pooler,
+y súbelo o usa el host directo (60 conexiones) (decisión 32). El comando del traspaso (10.4) abre 1 más mientras corre.
+
+### 10.3 Los vigilantes de siempre durante la migración (`SIP_SOLANA_DISPATCH` en ellos)
+
+Para que un vault pase a la cola, **los dos** vigilantes de siempre (`sip-solana-keeper` y `sip-solana-volume-keeper`)
+tienen que dejarlo en paz: el de beneficio **invierte todos los vaults, sean del modo que sean**, así que excluirlo solo
+en el de volumen dejaría una compra doble (RT-4).
+
+- **Sin la variable (u `off`) no cambia nada**: ni siquiera consultan la tabla.
+- **Con `shadow` u `on`** (en un vigilante de siempre las dos significan lo mismo): en cada barrida leen
+  `sip_solana.vault_work` y **no cobran ni invierten** ningún vault cuyo `system` no sea `legacy`. Quién actúa lo decide
+  esa columna, **nunca el modo del vault**: si el dueño cambia de beneficio a volumen, el vault no cambia de manos.
+- **Exige `DATABASE_URL`** (sin ella no arranca) y la tabla creada: corre antes `setup-read-model` (sección 0; es
+  idempotente). No abre conexiones nuevas: usa las 2 del historial.
+- **Si la lectura falla, esa barrida no cobra ni invierte nada** (es un retraso, nunca un vault con dos dueños). Alerta
+  `legacy-select`: aviso al primer fallo, **Telegram a la tercera barrida seguida**; se resuelve sola con la primera
+  lectura buena.
+- **En `/status`**: el bloque `dispatch` (`consecutiveFailures`, `lastReadAt`, `notLegacy` con cuántos vaults están
+  `draining` y `queue`, `leftAlone` con las wallets que la última barrida dejó en paz y por qué, y `carryOnlyInMemory`);
+  y cada wallet dejada en paz dice `"settle":"LEFT_ALONE","invest":"LEFT_ALONE"` con el motivo en `detail`.
+- **El timbre de Helius se queda en el vigilante de beneficio** hasta que el último vault pase a la cola (P3d): sigue
+  vigilando también las direcciones de los vaults de la cola.
+- **Nunca quites `SIP_SOLANA_DISPATCH` de un vigilante de siempre mientras algún vault no sea `legacy`**
+  (`dispatch-handover status` lo dice): volvería a cobrar e invertir vaults de la cola. Primero devuélvelos todos (10.5).
+
+### 10.4 El traspaso en dos pasos: de los vigilantes de siempre a la cola
+
+**Reglas:** un vault cada vez; **ningún push mientras un traspaso esté abierto** (un push reinicia los servicios, y cada
+contenedor nuevo es un proceso más que el traspaso tiene que ver); para un vault de **beneficio**, el vigilante de
+beneficio tiene que llevar antes `SIP_SOLANA_CARRY_STORE=dual` u `on` (sección 9): una pérdida que solo está en su
+memoria no la vería la cola y cobraría de más el siguiente trade ganador, y el comando se niega a armar ese vault.
+
+El comando, desde **Terminal.app** (es SQL de producción: lo corres tú). Pide la `DATABASE_URL` y una URL de RPC sin
+enseñarlas; la de RPC solo se usa para **leer** la altura de bloque, no envía nada:
+
+```bash
+cd ~/ProyectosCT/SIP/packages/solana-keeper && printf 'DATABASE_URL (puerto 5432): ' && read -rs DB && echo && printf 'URL de RPC: ' && read -rs RPC && echo
+H() { DATABASE_URL="$DB" SIP_SOLANA_RPC_URLS="$RPC" PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/dispatch-handover.mts "$@"; }
+```
+
+Después, con `H` y la dirección del vault (`V=EFXK995P…`, la entera):
+
+1. **`H status`** — tiene que haber al menos una fila `profit` y una `volume` con `live: true` y lectura reciente. Si
+   falta un rol, ese servicio no tiene `SIP_SOLANA_DISPATCH` o no está corriendo.
+2. **`H drain $V`** — el vault pasa a `draining`. En su siguiente barrida (≈ 1 min) los dos vigilantes lo dejan en paz.
+3. **`H arm $V`** — mira que **cada** proceso apuntado haya leído el vault como ajeno. Si dice que un proceso no lo ha
+   leído: espera una barrida. Si sigue, mira en Railway (*Deployments* del servicio) si ese `deployment` ya no existe;
+   solo entonces márcalo: `H gone <process_id>` (o `H gone --stale` para todos los que llevan más de 15 min sin leer).
+   Cuando nada falla, **apunta la altura de bloque** y dice hasta qué altura esperar.
+4. **Espera ≥ 150 bloques** (≈ 1–1,5 min: lo que tarda en caducar cualquier transacción que un vigilante pudiera haber
+   firmado antes) y repite **`H arm $V`** hasta que diga `moved: true` y `system: queue`. Si mientras tanto aparece un
+   proceso que no lo ha leído como ajeno, `arm` lo nombra y la espera vuelve a empezar sola.
+5. **Solo entonces** se arma el worker para ese vault (claves por referencia, `SIP_SOLANA_DISPATCH=on`; plan P3c).
+
+Si ningún vigilante está armado (un ensayo), `arm` necesita `--allow-dry`. `--roles=profit` (o `none`) solo si ese
+servicio **no existe**: con `none` el comando no comprueba que cada rol haya leído el vault, y solo vale para una base de
+datos que no usa ningún vigilante de siempre (el ensayo en sombra).
+
+### 10.5 Volver atrás: de la cola a los vigilantes de siempre
+
+1. **`H rollback $V`** — `queue` → `draining`: ningún worker lo vuelve a coger; el que lo tenga termina su trabajo.
+2. **`H release $V`** — se niega mientras un worker lo tenga (como mucho 6 minutos desde que lo cogió) o mientras una
+   transacción de un worker para ese vault pueda aún aterrizar (espera a que la altura finalizada pase la última). Repite
+   hasta `moved: true` y `system: legacy`: los vigilantes de siempre lo cogen en su siguiente barrida.
+
+Para apagar el despachador del todo: devuelve así **todos** los vaults (`H status` sin vault no debe listar ninguno), y
+solo después quita `SIP_SOLANA_DISPATCH` de los dos vigilantes de siempre.
+
+**Vaults nuevos.** `H new-vaults queue` (paso P3d) hace que un vault descubierto a partir de entonces sea de la cola: los
+vigilantes de siempre lo dejan en paz desde su siguiente lectura y el scheduler lo dará de alta en `draining`
+(`ENROL_VAULTS_SQL`, `src/handover.ts`), de modo que también llega a la cola por `arm` (`H arm --all`). `H new-vaults legacy` lo deshace para los vaults que aún no tengan fila.
+
+### 10.6 Si salta `credit-burn` con el despachador
+
+Primero lo de 4.1 (el timbre sordo es la causa conocida de las pasadas completas). Además, con la cola:
+
+- **El gobernador de créditos del scheduler** (`src/credit-governor.ts`) suma `rpc_usage` de toda la flota. Si el mes
+  proyectado pasa del **90 %** del plan, alarga la rotación de seguridad 30 → 60 → 120 minutos (un paso por hora como
+  mucho) y deja un aviso en el registro; por encima del **100 %** te manda una crítica (`credit-governor`). Vuelve atrás por debajo del 85 %.
+  **Nunca frena un envío, un timbre ni un vault con trabajo**: solo mira menos a menudo a los que están quietos.
+- **El presupuesto de peticiones**: la flota usa el 80 % de las peticiones por segundo del plan (40 de las 50 de
+  Developer); el scheduler se queda 8 y el resto se reparte entre los workers vivos.
+- **Lo que tú puedes mover**: los recortes en los workers (`rest-skip`, `invest-batch`, y `lamports-filter` cuando exista),
+  **de uno en uno**;
+  el precio real de la llamada de archivo cuando lo diga la Admin API (decisión O8); y el tope del autoescalado de Helius.
+  Los nombres de las variables del scheduler para el plan (peticiones por segundo, créditos del mes, precio de archivo)
+  los fija su punto de entrada, que aún no existe en esta rama: se añadirán aquí con él.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
