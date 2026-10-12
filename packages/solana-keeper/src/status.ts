@@ -20,6 +20,7 @@ import type { Redactor, Secret } from "@sip/solana-log";
 import type { BoardRefreshStatus } from "./board-refresh.js";
 import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
+import type { RestBookStatus } from "./rest-book.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
@@ -272,6 +273,14 @@ export interface CutsStatus {
   readonly privyAddressBook: PrivyAddressBookStatus | null;
   /** board-timer: recomputes started and requests they absorbed. */
   readonly board: BoardRefreshStatus | null;
+  /**
+   * rest-skip: memos held, turns that returned from one, memos written and
+   * dropped. ABSENT, NOT NULL, while the cut is off — unlike the two above, which
+   * predate it: a keeper without the token serves exactly the page it served
+   * before the cut existed. `skips` rising while `recorded` stays put is the cut
+   * working; `invalidated` is a resting link that moved and was walked.
+   */
+  readonly restSkip?: RestBookStatus;
 }
 
 export interface KeeperStatus {

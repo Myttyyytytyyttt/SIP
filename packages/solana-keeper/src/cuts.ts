@@ -7,15 +7,21 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`jupiter-key`, `rest-skip`, `invest-batch`, `explicit-send`, …); they land
+// (`jupiter-key`, `invest-batch`, `explicit-send`, …); they land
 // with their own code, each on its own soak, and until then naming one REFUSES
 // TO START. A token that is accepted and does nothing is the one failure this
-// list exists to prevent: the owner reads Railway, sees `rest-skip`, and
-// believes the walk is being skipped.
+// list exists to prevent: the owner reads Railway, sees `invest-batch`, and
+// believes the invest reads are being batched.
 //
-// NONE OF THESE IS ON THE MONEY PATH. Each changes how a fact is read — the
+// THE FIRST THREE ARE OFF THE MONEY PATH. Each changes how a fact is read — the
 // link list, a wallet's Privy record, when the rankings are recomputed — and
 // never what is settled, for whom, or how much (ADR §6.2, L1b non-money).
+//
+// `rest-skip` SOAKS AS A MONEY CUT (ADR §2.3.2, RT-24) although it builds and
+// sends nothing: it decides when a settle is LOOKED FOR, so a wrong memo would
+// delay one. It cannot double one or change its amount — a memo only ever
+// returns a resting IDLE (src/rest-book.ts). The ADR's rule of one money change
+// switched on at a time applies to it.
 //
 // L3 IS NOT A TOKEN. The last-known-good link list carries a number, how old a
 // list it may fall back to, so it has a variable of its own
@@ -34,8 +40,13 @@
  *   * `board-timer`: the rankings recomputed at most every
  *     BOARD_REFRESH_MIN_GAP_MS after a settlement, one in flight and one queued,
  *     instead of once per SETTLED (src/board-refresh.ts).
+ *   * `rest-skip` (C4): a link resting on its own settle, whose probe shows the
+ *     same newest signature for the same link state as the walk that last
+ *     proved it, returns that walk's IDLE without walking again: 1 call instead
+ *     of 3 (src/rest-book.ts). The dispatcher plan (§3.2) switches it on after
+ *     `jupiter-key`, a money cut this build does not have yet.
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer"] as const;
+export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "rest-skip"] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 

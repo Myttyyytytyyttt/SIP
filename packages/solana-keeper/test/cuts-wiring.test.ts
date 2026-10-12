@@ -75,9 +75,32 @@ describe("privy-address", () => {
   });
 });
 
+describe("rest-skip", () => {
+  it("keeps a RestBook only with the token, for the life of the process", () => {
+    expect(keeper).toContain('const restBook: RestBook | null = config.cuts.has("rest-skip") ? new RestBook() : null;');
+    // ONE BOOK: nothing builds a second one around the switch.
+    expect(keeper.match(/new RestBook\(\)/g)).toHaveLength(1);
+  });
+
+  it("hands it to the settle turn only when it exists, beside the walk cache", () => {
+    expect(sweepBody).toMatch(/walkCache,\n(\s+\/\/[^\n]*\n)*\s+\.\.\.\(restBook === null \? \{\} : \{ restBook \}\),/);
+    expect(keeper.match(/restBook \}/g)).toHaveLength(1);
+  });
+
+  it("drops the memo of every link the sweep no longer discovered, by link address", () => {
+    expect(sweepBody).toContain("restBook?.prune(new Set(doorLinks.map((link) => link.managed.linkAddress.toBase58())));");
+  });
+});
+
 describe("/status", () => {
   it("serves the discovery block and the cuts block on every render", () => {
     expect(keeper).toContain("doorbell: doorbellStatus(), ...cutsStatusBlocks() }");
-    expect(keeper).toMatch(/discovery: linkDiscovery\.status\(Date\.now\(\)\),\n\s+cuts: \{ on: \[\.\.\.config\.cuts\], privyAddressBook: privyBook\?\.status\(\) \?\? null, board: boardRefresh\?\.status\(\) \?\? null \},/);
+    expect(keeper).toMatch(
+      /discovery: linkDiscovery\.status\(Date\.now\(\)\),\n\s+cuts: \{\n\s+on: \[\.\.\.config\.cuts\],\n\s+privyAddressBook: privyBook\?\.status\(\) \?\? null,\n\s+board: boardRefresh\?\.status\(\) \?\? null,\n/,
+    );
+  });
+
+  it("adds rest-skip's counters only with its token: without it the block is the one served before the cut existed", () => {
+    expect(keeper).toContain("...(restBook === null ? {} : { restSkip: restBook.status() }),");
   });
 });

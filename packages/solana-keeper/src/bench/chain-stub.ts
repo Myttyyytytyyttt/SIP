@@ -52,6 +52,9 @@ export const WRITE_PATH_REFUSAL =
   "the ceiling bench's stubbed chain accepts no transaction: it measures the READ path and the sweep loop only, " +
   "and the write path (sign, send, confirm) is EXCLUDED from every number it reports";
 
+/** The precompile our own settle's first instruction verifies the attestation with. */
+const ED25519_PROGRAM = new PublicKey("Ed25519SigVerify111111111111111111111111111");
+
 /** The loader a deployed program's account is owned by; the sweep reads `executable` off it. */
 const BPF_UPGRADEABLE_LOADER = new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111");
 
@@ -248,6 +251,7 @@ export class BenchChain {
    * isSignedByWallet in src/measure-window.ts run for real over these bytes.
    */
   private transactionJson(link: BenchLink, tx: BenchTx): unknown {
+    if (tx.ownSettle === true) return this.ownSettleJson(link, tx);
     return {
       slot: tx.slot,
       blockTime: Number(CHAIN_UNIX_SECONDS),
@@ -266,6 +270,45 @@ export class BenchChain {
         fee: BENCH_FEE_LAMPORTS,
         preBalances: [tx.pre, 1],
         postBalances: [tx.post, 1],
+        innerInstructions: [],
+        logMessages: [],
+        preTokenBalances: [],
+        postTokenBalances: [],
+        rewards: [],
+        status: { Ok: null },
+      },
+    };
+  }
+
+  /**
+   * Our own settle as getTransaction answers it: [Ed25519SigVerify, settle_v2],
+   * signed and paid by the wallet, as settle-tick.ts sends it. Every program it
+   * names is non-trading or sip-vault, sip-vault among them, so the walk reads it
+   * as an external flow and as OUR settle (isExternalFlowTx), which is what makes
+   * a window holding only it stop at the loop guard.
+   */
+  private ownSettleJson(link: BenchLink, tx: BenchTx): unknown {
+    return {
+      slot: tx.slot,
+      blockTime: Number(CHAIN_UNIX_SECONDS),
+      version: "legacy",
+      transaction: {
+        signatures: [tx.signature],
+        message: {
+          accountKeys: [link.wallet.toBase58(), link.vault.toBase58(), ED25519_PROGRAM.toBase58(), this.options.programId.toBase58()],
+          header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 2 },
+          instructions: [
+            { programIdIndex: 2, accounts: [], data: base58(Buffer.from([1, 0])), stackHeight: null },
+            { programIdIndex: 3, accounts: [0, 1], data: base58(Buffer.from([7, 7, 7, 7])), stackHeight: null },
+          ],
+          recentBlockhash: BLOCKHASH,
+        },
+      },
+      meta: {
+        err: null,
+        fee: BENCH_FEE_LAMPORTS,
+        preBalances: [tx.pre, 1, 1, 1],
+        postBalances: [tx.post, 1 + (tx.pre - tx.post - BENCH_FEE_LAMPORTS), 1, 1],
         innerInstructions: [],
         logMessages: [],
         preTokenBalances: [],

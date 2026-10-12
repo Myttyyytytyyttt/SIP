@@ -63,6 +63,7 @@ import {
   type VolumeBase,
 } from "./settle-decision.js";
 import { classifySettleRefusal, type SettleRefusal } from "./settle-refusal.js";
+import type { RestBook } from "./rest-book.js";
 
 export type { SettleOutcome } from "./settle-decision.js";
 
@@ -176,6 +177,17 @@ export interface SettleDeps {
    * fetches its whole window again — the anchor and the oldest prefix above it.
    */
   readonly walkCache?: WalkCache;
+  /**
+   * The `rest-skip` cut's memos (src/rest-book.ts), kept by keeper.mts for the
+   * life of the process, and only when SIP_SOLANA_CUTS names the cut. ABSENT IS
+   * TODAY: every turn whose probe sees a signature above the frontier walks.
+   *
+   * IT CAN ONLY RETURN A RESTING STATE. A memo answers IDLE, with the loop
+   * guard's own detail, for a link whose probe shows exactly what the walk that
+   * wrote it showed; it is read before any walk and written after one, and
+   * nothing between a base and a send ever looks at it.
+   */
+  readonly restBook?: RestBook;
   /**
    * Told, after the fact, what each live send took and how it ended
    * (SettleSend): /status's turn timers and the Privy signature count by mode
@@ -403,6 +415,13 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   if (newest === undefined || BigInt(newest.slot) <= from) {
     return { outcome: "IDLE", detail: `nothing since slot ${from}` };
   }
+  // A LINK RESTING ON ITS OWN SETTLE, WHOSE PROBE SHOWS WHAT THE LAST WALK SHOWED
+  // (the `rest-skip` cut, src/rest-book.ts): the walk would read the same final
+  // history and stop at the same loop guard, so its answer is returned without
+  // it — the same IDLE in the same words. Any other newest signature, or a link
+  // state that moved, misses here and walks.
+  const resting = deps.restBook?.restingDetail(link, newest.signature) ?? null;
+  if (resting !== null) return { outcome: "IDLE", detail: resting };
   // BEFORE THE WALK, NOT AFTER: see MeasurementContext.finalizedSlot.
   const finalizedSlot = BigInt(await connection.getSlot("finalized"));
   const measured = await measureSince(connectionReader(connection), link.wallet, from, program.programId, deps.volumeProbe, {
@@ -420,6 +439,13 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     carry,
   });
   if (decision.kind === "stop") {
+    // REMEMBERED ONLY WHEN THE WALK SAW EVERYTHING THE PROBE DID: its newest
+    // finalized signature is the probe's newest confirmed one. A settle the walk
+    // could not see yet (confirmed, not finalized) ends elsewhere, at
+    // PENDING_FINALITY, and writes nothing.
+    if (deps.restBook !== undefined && decision.ownSettleOnly === true && measured.newestSignature === newest.signature) {
+      deps.restBook.record(link, newest.signature, decision.detail);
+    }
     return {
       outcome: decision.outcome,
       detail: decision.detail,

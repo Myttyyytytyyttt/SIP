@@ -103,6 +103,7 @@ import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
+import { RestBook } from "../src/rest-book.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
 import { measuredBase, resolvesSignerFor, roleProfile, unreachable } from "../src/role-registry.js";
 import { createVolumeBase } from "../src/volume-base.js";
@@ -420,6 +421,14 @@ const settleCarries: CarryBook = new Map();
  * after a restart, each window is fetched once more.
  */
 const walkCache = new WalkCache();
+
+/**
+ * The `rest-skip` cut's memos (src/rest-book.ts): which settled links rest on
+ * their own settle, so a probe that shows nothing new returns their IDLE without
+ * walking. ONLY WITH THE TOKEN; null is today, where every such link walks every
+ * sweep. IN MEMORY: after a restart each settled link walks once more.
+ */
+const restBook: RestBook | null = config.cuts.has("rest-skip") ? new RestBook() : null;
 
 /**
  * What the carry book holds, for /status. The book is keyed by LINK and an
@@ -965,7 +974,14 @@ const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? n
 function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
-    cuts: { on: [...config.cuts], privyAddressBook: privyBook?.status() ?? null, board: boardRefresh?.status() ?? null },
+    cuts: {
+      on: [...config.cuts],
+      privyAddressBook: privyBook?.status() ?? null,
+      board: boardRefresh?.status() ?? null,
+      // ABSENT, NOT NULL, WITHOUT ITS TOKEN: a keeper with no new cut serves the
+      // page it served before this one existed, key for key.
+      ...(restBook === null ? {} : { restSkip: restBook.status() }),
+    },
   };
 }
 
@@ -1553,6 +1569,8 @@ async function sweep(): Promise<void> {
     privyBook?.prune(discoveredWallets);
     // So does what the walks kept for it.
     walkCache.prune(discoveredWallets);
+    // And a memo for a link this sweep no longer discovered (rest-skip): keyed by link.
+    restBook?.prune(new Set(doorLinks.map((link) => link.managed.linkAddress.toBase58())));
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
     const investSweep = new Map<string, VaultInvestSweep>();
     /**
@@ -1769,6 +1787,8 @@ async function sweep(): Promise<void> {
           settles: profile.settles,
           ...volumeTurn,
           walkCache,
+          // THE `rest-skip` CUT, only with its token (src/rest-book.ts).
+          ...(restBook === null ? {} : { restBook }),
           // TOLD AFTER EACH SEND, never asked before one (SettleDeps.onSend).
           onSend: noteSettleSend,
         });

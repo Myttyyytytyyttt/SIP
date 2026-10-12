@@ -30,6 +30,7 @@ const span = (volumeTrades: readonly VolumeTrade[] | undefined, over: Partial<Wi
   firstSlot: 101n,
   lastSlot: 200n,
   signaturesAbove: 5,
+  newestSignature: "sig-5",
   frontierReached: true,
   pagesExhausted: false,
   prefixCut: false,

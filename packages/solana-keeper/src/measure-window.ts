@@ -514,6 +514,13 @@ export interface WindowMeasurement {
   /** Signatures the walk collected strictly above the frontier, read or not. */
   readonly signaturesAbove: number;
   /**
+   * The NEWEST finalized signature the walk collected above the frontier, or
+   * null when it collected none. The `rest-skip` cut (src/rest-book.ts) writes a
+   * memo only when this is the probe's own newest confirmed signature: then the
+   * walk saw, finalized, everything the probe could see. Nothing else reads it.
+   */
+  readonly newestSignature: string | null;
+  /**
    * True only when the walk SAW a finalized signature at or below the frontier.
    * Nothing is attested without it: a walk that ran out of history, or out of
    * pages, measured a window whose oldest part it never saw.
@@ -651,6 +658,8 @@ export async function measureSince(
     firstSlot: 0n,
     lastSlot: from,
     signaturesAbove,
+    // NEWEST FIRST, as the pages are served: the first collected is the newest.
+    newestSignature: collected[0]?.signature ?? null,
     frontierReached,
     pagesExhausted,
     prefixCut: false,
