@@ -27,7 +27,10 @@ function body(declaration: string): string {
 
 describe("the RPC meter", () => {
   it("is handed to the pool every call of the keeper goes through", () => {
-    expect(keeper).toMatch(/const rpcFetch = poolFetch\(\s*config\.rpcUrls,[\s\S]*?\n {2}rpcUsage,\n\);/);
+    // THE METERED POOL is what every call goes through. Under dep-down it is
+    // observed around (watchedRpcFetch), never replaced; without it, it is the pool.
+    expect(keeper).toMatch(/const pooledFetch = poolFetch\(\s*config\.rpcUrls,[\s\S]*?\n {2}rpcUsage,\n\);/);
+    expect(keeper).toContain("const rpcFetch: typeof fetch = depWatch === null ? pooledFetch : watchedRpcFetch(pooledFetch, depWatch);");
   });
 
   it("is priced and budgeted from the configuration, never from a literal", () => {

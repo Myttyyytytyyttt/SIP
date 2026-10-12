@@ -54,7 +54,9 @@ describe("the keeper's switch", () => {
   });
 
   it("adds /status's carryStore block only when there is a store, beside the cuts' blocks every render serves", () => {
-    const blocks = keeper.slice(keeper.indexOf("function cutsStatusBlocks(): Pick<KeeperStatus, \"discovery\" | \"cuts\" | \"carryStore\"> {"));
+    const start = keeper.indexOf("function cutsStatusBlocks(): Pick<KeeperStatus, \"discovery\" | \"cuts\" | \"carryStore\" | \"ops\"> {");
+    expect(start).toBeGreaterThan(-1);
+    const blocks = keeper.slice(start);
     expect(blocks.slice(0, blocks.indexOf("\n}\n"))).toContain("...(carryStore === null ? {} : { carryStore: carryStore.status() }),");
     expect(keeper).toContain("doorbell: doorbellStatus(), ...cutsStatusBlocks() }, sharedRedactor)");
   });

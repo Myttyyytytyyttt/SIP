@@ -68,13 +68,14 @@ authorization key) o ninguna; con solo una se niega a arrancar.
 
 Cuando despliegue, abre el dominio del servicio:
 
-- `/health` responde `{"ok":true}`. Contesta `503` —y entonces Railway reinicia— solo cuando el barrido no AVANZA
+- `/health` responde `{"ok":true}`. Contesta `503` solo cuando el barrido no AVANZA
   desde hace más de `max(3 × sweepMs, 10 min)`, que con el barrido por defecto de 60 s son 10 minutos; el cuerpo dice
   cuánto lleva quieto. Avanza al empezar un barrido, al empezar el turno de cada wallet y con cada respuesta del RPC,
   así que un barrido LENTO —una wallet con mucho retraso puede tardar más que los diez minutos ella sola— sigue en
   `200`: reiniciarlo solo repetiría el mismo trabajo desde cero y perdería las pérdidas pendientes. Un vigilante recién
   arrancado o uno que no tiene nada que barrer sigue en `200` igual, y un fallo de RPC sale por `/status` y por las
-  alertas, nunca reiniciando el contenedor.
+  alertas, nunca reiniciando el contenedor. **Ojo: Railway solo llama a `/health` al desplegar** (ADR del dispatcher,
+  §3.11): un `503` después NO reinicia nada. Para que un vigilante colgado se reinicie solo está `watchdog-exit` (§8).
 - `/status` enseña `program` = `6kA9…`, `mode` = `dry-run` y `signing.secretsRead` = `false`. Hasta que se publique el
   programa, `programDeployed` es `false` y `config` es `null`: es lo esperado.
 
@@ -631,6 +632,32 @@ leer **cada vínculo de la cadena en ese momento** (el nonce y la frontera que f
   la barrida falla como siempre (`sweep-failed`, que sí llega a Telegram).
 - Al arrancar siempre hace falta una búsqueda buena: no hay lista guardada entre reinicios.
 - Volver atrás: `0` o borrar la variable.
+
+## 8. Lo que falta de L1a: vigilancia y alertas (`SIP_SOLANA_CUTS`, apagado si no se nombra)
+
+Van en la misma variable que los recortes de §7, con las mismas reglas: un nombre desconocido o repetido **impide
+arrancar**, y **volver atrás = quitar el nombre** y redesplegar. Ninguno toca el dinero: cambian a quién se despierta
+y, uno de ellos, si el proceso sigue vivo. Diseño: ADR del dispatcher, §3.11, §4.10 y §6.3. Sin ninguno, `/status` no
+tiene bloque `ops` y el vigilante hace lo de siempre.
+
+| nombre | qué hace | qué mirar en `/status` |
+|---|---|---|
+| `watchdog-exit` | Si el barrido no AVANZA en `max(3 × sweepMs, 10 min)` —la misma regla que `/health`—, el vigilante manda una crítica (`watchdog-exit`), suelta el candado y **sale con código 3**; Railway lo arranca de nuevo (`ON_FAILURE`). Un barrido lento que avanza, un vigilante sin nada que hacer o uno arrancando no salen nunca | `ops.progress.lastProgressAt`, `ops.progress.exitAfterMs` |
+| `dep-down` | Una crítica **por dependencia caída** —`dep-down:rpc`, `:privy`, `:jupiter`, `:postgres`— en vez de un `sweep-failed` genérico y una alerta por wallet. Caída = 3 peticiones seguidas fallando durante al menos 1 minuto (sin respuesta, 5xx, 408 o 429; para Jupiter el 429 es cosa de `jupiter-budget`), o un barrido que muere porque **todos** los endpoints RPC rechazan. Mientras dura, las alertas de wallet que explica se **retienen** (no salen) y se cuentan. Un `settle` RECHAZADO (FAILED) nunca se retiene | `ops.deps.<dep>.down`, `.downSince`, `.lastFailure`, `.held` |
+| `warn-digest` | **Un mensaje al día a las 08:00 UTC** con los avisos que no salieron de la caja, por tipo (`no-signer`, `invest-refused`…), cuántas veces y cuándo el último; también los días sin avisos, como prueba de que las alertas llegan. Sale por su propio canal con umbral `warn`, al mismo chat | `ops.digest.nextAt`, `.kinds`, `.raised` |
+| `claim-flap` | Cuenta las tomas del candado de este proceso, sus pérdidas y sus **recuperaciones**; una recuperación (segunda toma del mismo proceso) es crítica. La primera toma de cada contenedor es un despliegue y no avisa | `ops.claim.takeovers`, `.regains`, `.losses`, `.lastLoss` |
+| `privy-burn` | Aviso al 60 % y crítica al 85 % de las 50.000 firmas gratis de Privy al mes, al ritmo observado (hasta las últimas 24 h; nada antes de 1 h). Es la cuenta de **este** servicio: los dos vigilantes firman con la misma app, así que el total es la suma de sus dos `/status` | `privy.signaturesMonthEstimate` |
+| `jupiter-budget` | Aviso cuando el último minuto gasta el 80 % del límite por minuto de Jupiter (30 sin clave); **crítica si Jupiter contesta 429 a una compra real** (en seco, aviso). No se da por resuelta hasta 30 minutos sin otro 429, así que un episodio avisa una vez | `jupiter.callsLastMinute`, `ops.jupiterAnswers.http429` |
+| `rpc-fallback` | Crítica cuando un endpoint de respaldo lleva **10 minutos** contestando solo (el 1, el de Helius, sigue apartado: una clave sin créditos contesta 429 "max usage") | `rpcEndpointInUse`, `rpc.endpointSinceMs`, `rpc.byEndpointPerDay` |
+| `privy-index` | Aviso al primer barrido en que falla el listado de wallets de Privy; crítica al tercero seguido (cada wallet pasa a buscarse sola, listando la app entera por wallet) | `privy.consecutiveIndexFailures`, `privy.fallbackLookups` |
+
+- **Si salta `watchdog-exit`**: el log de antes de la salida dice dónde se quedó. Railway reintenta `ON_FAILURE` hasta
+  10 veces seguidas (`restartPolicyMaxRetries`); un vigilante que se cuelga en cada arranque deja de reiniciarse
+  después. Lo que no ve: un bucle síncrono que nunca suelta el proceso (el reloj que lo comprueba es del mismo proceso).
+- **Si salta `dep-down:<dep>`**: llega una vez por caída y se borra sola con la primera respuesta. Las alertas
+  retenidas que sigan siendo verdad vuelven a salir en el barrido siguiente a la recuperación.
+- Con `dep-down` o `jupiter-budget`, el vigilante observa las peticiones a Jupiter desde el `fetch` global (su constructor de rutas no
+  acepta otro): solo mira el host `jup.ag`; el resto pasa sin tocarse y sin guardar la URL.
 
 ## Si algo falla
 

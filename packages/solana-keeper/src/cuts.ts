@@ -17,12 +17,12 @@
 // the link list, a wallet's Privy record, when the rankings are recomputed — and
 // never what is settled, for whom, or how much (ADR §6.2, L1b non-money).
 //
-// THE REST ARE, ONE TOKEN EACH, and the ADR's rule for them is that only one
-// soaks at a time (§6.1 rule 1): a money token changes whether, when or how a
-// buy is sent, so each has its own go gate and its rollback is removing it. They
-// are listed after the non-money three, in the order they are switched on
+// THE NEXT FOUR ARE, ONE TOKEN EACH, and the ADR's rule for them is that only
+// one soaks at a time (§6.1 rule 1): a money token changes whether, when or how
+// a buy is sent, so each has its own go gate and its rollback is removing it.
+// They are listed after the non-money three, in the order they are switched on
 // (the dispatcher plan §3.2: jupiter-key → rest-skip → invest-batch →
-// explicit-send).
+// explicit-send). The L1a tokens after them (OPS_TOKENS) are not cuts at all.
 //
 // `rest-skip` SOAKS AS A MONEY CUT (ADR §2.3.2, RT-24) although it builds and
 // sends nothing: it decides when a settle is LOOKED FOR, so a wrong memo would
@@ -38,6 +38,50 @@
 // NOR IS L2. Where the loss carries live (SIP_SOLANA_CARRY_STORE, ADR §4.6) has
 // three phases, off, dual and on, and is read here by the same rule: unset is
 // off, which is today, and anything unknown refuses to start.
+//
+// AND THE REST OF L1a RIDES THE SAME SWITCH (OPS_TOKENS below). The watchdog's
+// self-exit, the alerts by cause, the daily digest, the claim's regain page and
+// the four alerts on L1a's counters change WHAT WAKES SOMEBODY, and one of them
+// whether the process keeps running — behaviour, so each is off until named,
+// like every behaviour change on the dispatcher branch (ADR §6.1 rule 3). They
+// are not cost cuts and read no provider differently; they live in this list
+// because one strict, refuse-to-start list is the branch's rule for "dark until
+// the owner says so", and a second list with a second parser is a second place
+// for a typo to be accepted. Unlike the four money cuts, none of them is on the
+// money path: none decides what is settled, for whom, or how much.
+
+/**
+ * The rest of ADR L1a (§6.2 L1a, §6.3, §4.10, §3.11 "Health"), each its own token
+ * so each is its own rollback:
+ *
+ *   * `watchdog-exit` (RT-11): the process exits non-zero once its sweep has not
+ *     MOVED for /health's own bound, max(3 × sweepMs, 10 min), so Railway's
+ *     ON_FAILURE policy starts a fresh one (src/watchdog.ts).
+ *   * `dep-down` (RT-14): one `dep-down:<rpc|privy|jupiter|postgres>` page per
+ *     shared dependency that is down, instead of a generic sweep-failed and a
+ *     page per wallet; the per-wallet alerts that outage explains are held while
+ *     it lasts (src/dependency-watch.ts).
+ *   * `warn-digest` (RT-17): one message a day, at DIGEST_HOUR_UTC, of the
+ *     warnings that never left the box (src/warn-digest.ts).
+ *   * `claim-flap` (RT-18): the claim's takeovers, losses and regains on /status,
+ *     and a page when THIS process regains a claim it had lost
+ *     (src/claim-watch.ts).
+ *   * `privy-burn`, `jupiter-budget`, `rpc-fallback`, `privy-index`: the alerts
+ *     §6.3 hangs on L1a's counters, which L1a shipped without them
+ *     (src/usage-alerts.ts).
+ */
+export const OPS_TOKENS = [
+  "watchdog-exit",
+  "dep-down",
+  "warn-digest",
+  "claim-flap",
+  "privy-burn",
+  "jupiter-budget",
+  "rpc-fallback",
+  "privy-index",
+] as const;
+
+export type OpsToken = (typeof OPS_TOKENS)[number];
 
 /**
  * The cuts this build implements, in the ADR's rollout order.
@@ -75,6 +119,8 @@
  *     poll — with isLive() asked before EACH send, no wrap/convert/invest for
  *     75 s after taking the claim, and a SIGTERM drain; the bytes are Anchor's
  *     (src/explicit-send.ts).
+ *
+ * Then the rest of L1a, OPS_TOKENS (above), after the cuts.
  */
 export const CUT_TOKENS = [
   "gpa-v2",
@@ -84,6 +130,7 @@ export const CUT_TOKENS = [
   "rest-skip",
   "invest-batch",
   "explicit-send",
+  ...OPS_TOKENS,
 ] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];

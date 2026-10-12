@@ -4,7 +4,7 @@
 import { Redactor } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { ConfigError, describeConfig, loadConfig } from "../src/config.js";
-import { CUT_TOKENS, DISCOVERY_LKG_MAX_MS, readCuts, readDiscoveryLkgMs } from "../src/cuts.js";
+import { CUT_TOKENS, DISCOVERY_LKG_MAX_MS, OPS_TOKENS, readCuts, readDiscoveryLkgMs } from "../src/cuts.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 
 const dry = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({
@@ -31,8 +31,19 @@ describe("SIP_SOLANA_CUTS", () => {
     expect(config.discoveryLkgMs).toBe(0);
   });
 
-  it("implements the three non-money cuts of the ADR's L1b, then the money tokens built so far, in rollout order", () => {
-    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "rest-skip", "invest-batch", "explicit-send"]);
+  it("implements the three non-money cuts of the ADR's L1b, then the money tokens built so far, in rollout order, then the rest of L1a", () => {
+    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "rest-skip", "invest-batch", "explicit-send", ...OPS_TOKENS]);
+    // EACH OF L1a's REMAINING PIECES ITS OWN TOKEN, so each is its own rollback.
+    expect(OPS_TOKENS).toEqual([
+      "watchdog-exit",
+      "dep-down",
+      "warn-digest",
+      "claim-flap",
+      "privy-burn",
+      "jupiter-budget",
+      "rpc-fallback",
+      "privy-index",
+    ]);
     const read = readCuts("jupiter-key");
     expect("cuts" in read && [...read.cuts]).toEqual(["jupiter-key"]);
   });
@@ -42,6 +53,17 @@ describe("SIP_SOLANA_CUTS", () => {
     expect([...config.cuts]).toEqual(["gpa-v2", "rest-skip"]);
     for (const bad of ["rest_skip", "REST-SKIP", "restskip", "rest-skip,rest-skip"]) {
       expect(() => loadConfig(dry({ SIP_SOLANA_CUTS: bad }), new Redactor()), bad).toThrow(ConfigError);
+    }
+  });
+
+  it("reads every ops token like a cut, and none is on unless named", () => {
+    const all = loadConfig(dry({ SIP_SOLANA_CUTS: OPS_TOKENS.join(",") }), new Redactor());
+    expect([...all.cuts]).toEqual([...OPS_TOKENS]);
+    const none = loadConfig(dry(), new Redactor());
+    for (const token of OPS_TOKENS) expect(none.cuts.has(token), token).toBe(false);
+    // A NEAR MISS IS REFUSED, NOT IGNORED: the owner reads Railway and believes what it names.
+    for (const bad of ["watchdog", "dep_down", "digest", "claimflap", "Privy-Burn"]) {
+      expect(refusal(dry({ SIP_SOLANA_CUTS: bad })), bad).toMatch(/SIP_SOLANA_CUTS entry #1 is not a cut this keeper implements/);
     }
   });
 

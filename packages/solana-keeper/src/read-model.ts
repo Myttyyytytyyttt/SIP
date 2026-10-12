@@ -173,6 +173,33 @@ export interface InvestmentRow {
 
 type Warn = (message: string, fields?: Record<string, unknown>) => void;
 
+/**
+ * Told whether each round trip this read model made got an answer from the
+ * database (true) or not (false). For the `dep-down` token's Postgres watch
+ * (src/dependency-watch.ts) and nothing else: absent — every caller but the
+ * keeper with that token — nothing is told and nothing changes.
+ */
+export type DatabaseObserver = (answered: boolean) => void;
+
+/**
+ * SQLSTATE classes that mean the SERVER is in trouble rather than the request:
+ * connection exception (08), insufficient resources (53), operator intervention
+ * (57: an admin shutdown, a statement timeout) and system error (58).
+ */
+const SERVER_TROUBLE_CLASSES: ReadonlySet<string> = new Set(["08", "53", "57", "58"]);
+
+/**
+ * Whether a failed round trip still got an answer from the database. A
+ * pg.DatabaseError is the server replying — a missing column, a constraint —
+ * and that database is up, unless its SQLSTATE says the server itself is in
+ * trouble. Anything else (refused, reset, a connect or query timeout on this
+ * side) got no answer.
+ */
+export function databaseAnswered(error: unknown): boolean {
+  if (typeof pg.DatabaseError !== "function" || !(error instanceof pg.DatabaseError)) return false;
+  return typeof error.code !== "string" || !SERVER_TROUBLE_CLASSES.has(error.code.slice(0, 2));
+}
+
 /** Supabase terminates TLS with a chain Node rejects by default; encrypt with relaxed validation unless sslmode=disable. */
 export function sslFor(databaseUrl: string): false | { rejectUnauthorized: false } {
   try {
@@ -192,15 +219,41 @@ export class SolanaReadModel {
   readonly enabled: boolean;
   readonly #pool: pg.Pool | null;
   readonly #warn: Warn;
+  readonly #observe: DatabaseObserver | undefined;
 
-  private constructor(pool: pg.Pool | null, warn: Warn) {
+  private constructor(pool: pg.Pool | null, warn: Warn, observe?: DatabaseObserver) {
     this.#pool = pool;
     this.#warn = warn;
+    this.#observe = observe;
     this.enabled = pool !== null;
   }
 
-  static create(databaseUrl: Secret | null, warn: Warn): SolanaReadModel {
-    if (databaseUrl === null) return new SolanaReadModel(null, warn);
+  /** Tells the observer, if there is one, and can never throw into a caller. */
+  #saw(answered: boolean): void {
+    if (this.#observe === undefined) return;
+    try {
+      this.#observe(answered);
+    } catch {
+      // Observed or not, the read model carries on exactly as it would have.
+    }
+  }
+
+  /**
+   * A failed round trip, told as answered or not (databaseAnswered). LAZY: with
+   * no observer the error is not even looked at, so a keeper without dep-down
+   * runs exactly the catch it always ran.
+   */
+  #sawFailure(error: unknown): void {
+    if (this.#observe === undefined) return;
+    try {
+      this.#observe(databaseAnswered(error));
+    } catch {
+      // Observed or not, the read model carries on exactly as it would have.
+    }
+  }
+
+  static create(databaseUrl: Secret | null, warn: Warn, observe?: DatabaseObserver): SolanaReadModel {
+    if (databaseUrl === null) return new SolanaReadModel(null, warn, observe);
     const connectionString = databaseUrl.reveal();
     const pool = new pg.Pool({
       connectionString,
@@ -219,7 +272,7 @@ export class SolanaReadModel {
     // the pool; unhandled, that crashes the process — taking settlement down
     // for a feature that must never be able to.
     pool.on("error", (err) => warn("read-model idle pool error (ignored)", { detail: summarizeUpstreamError(err) }));
-    return new SolanaReadModel(pool, warn);
+    return new SolanaReadModel(pool, warn, observe);
   }
 
   /**
@@ -245,6 +298,8 @@ export class SolanaReadModel {
     try {
       client = await this.#pool.connect();
       const result = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1) AS locked", [key.toString()]);
+      // ANSWERED, WHETHER OR NOT THE LOCK WAS FREE: "another holds it" is the database working.
+      this.#saw(true);
       if (result.rows[0]?.locked === true) {
         const held = client;
         let released = false;
@@ -254,6 +309,7 @@ export class SolanaReadModel {
         // never-released connection emits 'error' with nobody listening —
         // which in Node is an uncaught exception that takes the keeper down.
         held.on("error", (err: Error) => {
+          this.#saw(false);
           this.#warn("the keeper claim's connection errored; the lock is no longer held", {
             detail: summarizeUpstreamError(err),
           });
@@ -279,6 +335,7 @@ export class SolanaReadModel {
       return { held: false };
     } catch (error) {
       client?.release();
+      this.#sawFailure(error);
       this.#warn("singleton claim failed — staying in dry run rather than acting unclaimed", {
         detail: summarizeUpstreamError(error),
       });
@@ -315,6 +372,8 @@ export class SolanaReadModel {
           WHERE to_regclass('${READ_MODEL_SCHEMA}.' || t.name) IS NULL`,
         [[...READ_MODEL_TABLES]],
       );
+      // ANSWERED: a schema with a table missing is a database that is up.
+      this.#saw(true);
       const missing = result.rows.map((row) => row.name);
       if (missing.length > 0) {
         return {
@@ -346,6 +405,7 @@ export class SolanaReadModel {
       }
       return { ok: true, detail: `on — ${READ_MODEL_SCHEMA} is reachable and complete` };
     } catch (error) {
+      this.#sawFailure(error);
       // UNREADABLE IS ITS OWN ANSWER, not "missing": one sends someone to
       // create a schema that already exists.
       return { ok: false, detail: `could not be checked — ${summarizeUpstreamError(error)}` };
@@ -453,6 +513,7 @@ export class SolanaReadModel {
           ORDER BY 2 DESC
           LIMIT ${LEADERBOARD_DAY_LIMIT}`,
       );
+      this.#saw(true);
       return result.rows.map((row) => ({
         subject: row.subject,
         day: row.day,
@@ -461,6 +522,7 @@ export class SolanaReadModel {
         volumeRaw: BigInt(row.volume_raw),
       }));
     } catch (error) {
+      this.#sawFailure(error);
       this.#warn("read-model leaderboard read failed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
       return null;
     } finally {
@@ -490,11 +552,13 @@ export class SolanaReadModel {
       client = await this.#pool.connect();
       const settled = await client.query<RawSettlementStatsRow>(GLOBAL_SETTLEMENT_STATS_SQL);
       const invested = await client.query<RawInvestmentStatsRow>(GLOBAL_INVESTMENT_STATS_SQL);
+      this.#saw(true);
       return {
         settlements: settled.rows.map(settlementStatsRow),
         investments: invested.rows.map(investmentStatsRow),
       };
     } catch (error) {
+      this.#sawFailure(error);
       this.#warn("read-model global stats read failed (settlement unaffected)", { detail: summarizeUpstreamError(error) });
       return null;
     } finally {
@@ -512,8 +576,10 @@ export class SolanaReadModel {
     try {
       client = await this.#pool.connect();
       await work(client);
+      this.#saw(true);
       return true;
     } catch (error) {
+      this.#sawFailure(error);
       this.#warn(`read-model ${what} write failed (settlement unaffected)`, { detail: summarizeUpstreamError(error) });
       return false;
     } finally {

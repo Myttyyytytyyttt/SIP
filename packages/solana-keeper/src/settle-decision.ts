@@ -741,6 +741,16 @@ export interface SettleAlertRule {
 export const SETTLE_RETRY_CRITICAL_AFTER = 3;
 
 /**
+ * The titles of the two pages a settle raises under `settle-failed:<wallet>`
+ * that are NOT a refusal: a RETRY that kept coming back, and a turn that threw.
+ * Named because the key is shared with a FAILED settle on purpose (settleThrewAlert
+ * says why), and src/dependency-watch.ts must tell them apart: a refusal is the
+ * wallet's own, the other two are what a shared outage looks like from one wallet.
+ */
+export const SETTLE_KEEPS_NOT_LANDING_TITLE = "A settlement keeps not landing";
+export const SETTLE_TURN_THREW_TITLE = "A settlement turn threw";
+
+/**
  * The outcome-to-alert rule for one wallet's settle turn, pure so a test can pin
  * it for every outcome.
  *
@@ -789,7 +799,7 @@ export function settleAlert(
           fire: {
             key: failed,
             severity: "critical",
-            title: "A settlement keeps not landing",
+            title: SETTLE_KEEPS_NOT_LANDING_TITLE,
             detail: `${consecutiveRetries} sweeps in a row: ${detail}`,
             context: { wallet, vault },
           },
@@ -851,7 +861,7 @@ export function settleThrewAlert(where: { readonly wallet: string; readonly vaul
     fire: {
       key: `settle-failed:${wallet}`,
       severity: "critical",
-      title: "A settlement turn threw",
+      title: SETTLE_TURN_THREW_TITLE,
       detail,
       context: { wallet, vault },
     },

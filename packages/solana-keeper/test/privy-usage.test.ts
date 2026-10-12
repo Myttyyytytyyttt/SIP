@@ -166,3 +166,40 @@ describe("the wallet index", () => {
     expect(usage.report(T0 + 1)).toMatchObject({ indexMs: 200, indexFailures: 2, consecutiveIndexFailures: 0, fallbackLookups: 1 });
   });
 });
+
+describe("onAnswer (dep-down's Privy watch)", () => {
+  it("is told each request's status, or 'unanswered' with what was thrown — after the fact, with the answer unchanged", async () => {
+    const told: (number | string)[] = [];
+    const usage = createPrivyUsage({ startedAt: T0, onAnswer: (answer) => void told.push(answer) });
+    const answer = new Response("{}", { status: 503 });
+    expect(await usage.fetch(async () => answer)(`${PRIVY_API_URL}/v1/wallets`)).toBe(answer);
+    expect(await usage.fetch(async () => new Response("{}", { status: 200 }))(`${PRIVY_API_URL}/v1/wallets`)).toBeInstanceOf(Response);
+    const failure = new TypeError("fetch failed");
+    let thrown: unknown;
+    const refused = createPrivyUsage({
+      startedAt: T0,
+      onAnswer: (kind, error) => {
+        told.push(kind);
+        thrown = error;
+      },
+    });
+    await expect(
+      refused.fetch(async () => {
+        throw failure;
+      })(`${PRIVY_API_URL}/v1/wallets`),
+    ).rejects.toBe(failure);
+    expect(told).toEqual([503, 200, "unanswered"]);
+    expect(thrown).toBe(failure);
+  });
+
+  it("cannot change an answer by throwing", async () => {
+    const usage = createPrivyUsage({
+      startedAt: T0,
+      onAnswer: () => {
+        throw new Error("observer broke");
+      },
+    });
+    const answer = new Response("{}", { status: 200 });
+    expect(await usage.fetch(async () => answer)(`${PRIVY_API_URL}/v1/wallets`)).toBe(answer);
+  });
+});
