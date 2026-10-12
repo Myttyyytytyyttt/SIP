@@ -23,9 +23,11 @@ import {
   cachedRentFloor,
   investLeavesSnapshotTrue,
   readSweepState,
+  restVerdictReadAt,
   settleLeavesSnapshotTrue,
   tokenAmountOf,
 } from "../src/invest-snapshot.js";
+import { BELL_ANSWER_MARGIN_MS, Doorbell, HOLD_MS, turnRests, type DoorLink } from "../src/doorbell.js";
 import type { InvestOutcome } from "../src/invest-tick.js";
 import { PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED } from "../src/pyth.js";
 import type { SettleOutcome } from "../src/settle-decision.js";
@@ -244,5 +246,59 @@ describe("which outcomes leave the snapshot of their vault true", () => {
       FAILED: false,
     };
     for (const [outcome, fresh] of Object.entries(table)) expect(investLeavesSnapshotTrue(outcome as InvestOutcome), outcome).toBe(fresh);
+  });
+});
+
+describe("a rest decided from the snapshot is dated by the batch, for the doorbell (review, 2026-10-12)", () => {
+  const T0 = Date.parse("2026-10-12T12:00:00Z");
+  const SWEEP = 60_000;
+  const links: DoorLink[] = Array.from({ length: 1_000 }, (_, i) => {
+    const id = String(i).padStart(4, "0");
+    return { link: `link-${id}`, wallet: `wallet-${id}`, vault: `vault-${id}` };
+  });
+  const deposited = links[500]!;
+
+  /**
+   * A trusted doorbell over a fleet big enough that the safety lane does not turn
+   * everyone every sweep; a sweep at T0 whose vault batch is read at T0; the
+   * owner's deposit rings the vault at T0 + 30 s; the link's turn begins at
+   * T0 + 90 s and its invest half comes out IDLE, read as `reads` says; and the
+   * lane the next select, at T0 + 240 s (sweeps that long happen at scale), puts it in.
+   */
+  function nextLane(reads: "snapshot" | "fresh" | undefined): string | null {
+    const bell = new Doorbell(true);
+    const boot = T0 - SWEEP;
+    for (const turn of bell.select({ links, now: boot, sweepMs: SWEEP, protocolPaused: false, live: true }).turns) {
+      bell.recordTurn(turn.link, turn.lane, true, boot, "IDLE/IDLE", boot);
+    }
+    bell.ingest([{ slot: 1, transaction: { signatures: ["an event, for trust"], message: { accountKeys: [] } } }], new Set(), boot);
+    expect(bell.trust(T0).trusted).toBe(true);
+    bell.select({ links, now: T0, sweepMs: SWEEP, protocolPaused: false, live: true });
+    const vaultReadAt = T0;
+    const rungAt = T0 + 30_000;
+    bell.ingest([{ slot: 2, transaction: { signatures: ["the deposit"], message: { accountKeys: [deposited.vault] } } }], new Set([deposited.vault]), rungAt);
+    const turnAt = T0 + 90_000;
+    expect(turnAt).toBeGreaterThanOrEqual(rungAt + BELL_ANSWER_MARGIN_MS);
+    const rests = turnRests({ settle: "IDLE", invest: "IDLE" });
+    expect(rests).toBe(true);
+    bell.recordTurn(deposited, "safety", rests, turnAt + 2_000, "IDLE/IDLE", restVerdictReadAt(turnAt, vaultReadAt, reads));
+    const nextAt = T0 + 240_000;
+    expect(nextAt).toBeGreaterThan(rungAt + HOLD_MS);
+    return bell.select({ links, now: nextAt, sweepMs: 240_000, protocolPaused: false, live: true }).turns.find((turn) => turn.link.link === deposited.link)?.lane ?? null;
+  }
+
+  it("leaves the bell ringing when the IDLE came from the batch read before it rang: the next sweep turns the link on fresh reads", () => {
+    expect(nextLane("snapshot")).toBe("bell");
+  });
+
+  it("lets a rest read after the ring answer it, as before the cut: fresh reads, or no invest-batch at all", () => {
+    for (const reads of ["fresh", undefined] as const) expect(nextLane(reads), String(reads)).not.toBe("bell");
+  });
+
+  it("is the batch's time only for a snapshot-decided turn, and never later than the turn's own start", () => {
+    expect(restVerdictReadAt(90, 10, "snapshot")).toBe(10);
+    expect(restVerdictReadAt(90, 120, "snapshot")).toBe(90);
+    expect(restVerdictReadAt(90, 10, "fresh")).toBe(90);
+    expect(restVerdictReadAt(90, 10, undefined)).toBe(90);
   });
 });

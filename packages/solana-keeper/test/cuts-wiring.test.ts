@@ -158,6 +158,14 @@ describe("invest-batch", () => {
   it("serves its counters only under the token", () => {
     expect(keeper).toContain("...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),");
   });
+
+  it("tells the doorbell the batch's time for a rest the snapshot decided, and the turn's start otherwise", () => {
+    expect(sweepBody).toContain("investReads = invest.reads;");
+    expect(sweepBody).toContain("const restReadAt = restVerdictReadAt(turnAt, vaultReadAt, investReads);");
+    expect(sweepBody).toMatch(/doorbell\.recordTurn\(door, lane, turnRests\(doorTurn\), Date\.now\(\), `[^`]+`, restReadAt\)/);
+    // ONE recordTurn, and the turn's own start reaches it only through restVerdictReadAt.
+    expect(keeper.match(/doorbell\.recordTurn\(/g)).toHaveLength(1);
+  });
 });
 
 describe("explicit-send", () => {

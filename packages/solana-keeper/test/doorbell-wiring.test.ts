@@ -166,7 +166,10 @@ describe("the doorbell's own alerts, and its route", () => {
 
   it("passes each turn's START to the doorbell, so a bell is answered only by a turn that began after it", () => {
     expect(sweepBody).toContain("const turnAt = Date.now();");
-    expect(sweepBody).toMatch(/doorbell\.recordTurn\(door, lane, turnRests\(doorTurn\), Date\.now\(\), `[^`]+`, turnAt\)/);
+    // THROUGH restVerdictReadAt: the turn's start, or the vault batch's when the
+    // invest-batch snapshot decided the rest (src/invest-snapshot.ts) — never later.
+    expect(sweepBody).toContain("const restReadAt = restVerdictReadAt(turnAt, vaultReadAt, investReads);");
+    expect(sweepBody).toMatch(/doorbell\.recordTurn\(door, lane, turnRests\(doorTurn\), Date\.now\(\), `[^`]+`, restReadAt\)/);
   });
 });
 

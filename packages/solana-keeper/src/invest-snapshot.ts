@@ -27,9 +27,21 @@
 // earlier in the same sweep is "dirty" (bin/keeper.mts) and gets no snapshot:
 // the batch was read before that SOL arrived. Invest decides from the vault's
 // OWN balances every turn — a manual deposit with no settle at all is bought
-// exactly as today (memory: keeper-user-ceiling-measured, the manual-deposit
-// trap) — because the snapshot holds the vault's own ATA balances, not a
-// verdict about the settle.
+// as today (memory: keeper-user-ceiling-measured, the manual-deposit trap) —
+// because the snapshot holds the vault's own ATA balances, not a verdict about
+// the settle.
+//
+// AND A REST DECIDED FROM IT IS DATED BY THE BATCH, NOT BY THE TURN (review,
+// 2026-10-12). The doorbell lets a resting turn answer a bell only when the turn
+// BEGAN BELL_ANSWER_MARGIN_MS after it rang (src/doorbell.ts), on the premise
+// that its reads came after its start. A snapshot's did not: they were taken
+// when the sweep's batch was, before the turn loop began. A deposit that rang
+// between the batch and the turn was then "answered" by an IDLE that could not
+// have seen it, the link rested, and the deposit waited for the safety lane — up
+// to SAFETY_PASS_MS instead of one sweep. So a turn whose invest half was decided
+// from the snapshot tells the doorbell the batch's time (restVerdictReadAt): the
+// bell it could not have seen keeps ringing, and the next sweep turns the link
+// on fresh reads.
 //
 // RENT (C2) is the one read the batch cannot carry: it is not an account. It is
 // asked once per (connection, size) and remembered, the same pattern as
@@ -42,7 +54,7 @@ import { SYSVAR_CLOCK_PUBKEY, SYSVAR_EPOCH_SCHEDULE_PUBKEY } from "@solana/web3.
 import { NATIVE_MINT, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { decodeVault, investmentPolicyAddress, type VaultState } from "./accounts.js";
 import { USDC_MINT } from "./invest-decision.js";
-import type { InvestOutcome } from "./invest-tick.js";
+import type { InvestOutcome, InvestResult } from "./invest-tick.js";
 import { PYTH_SOL_USD_FEED, PYTH_USDC_USD_FEED } from "./pyth.js";
 import type { SettleOutcome } from "./settle-decision.js";
 
@@ -197,6 +209,20 @@ export function cachedRentFloor(connection: Connection, size: number): Promise<n
   const forget = bySize;
   read.catch(() => forget.delete(size));
   return read;
+}
+
+/**
+ * When the reads behind a finished turn's resting verdict were taken, for the
+ * doorbell (Doorbell.recordTurn's `startedAt`): the earlier of the turn's start
+ * and the batch's, when the invest half was decided from the snapshot
+ * (InvestResult.reads === "snapshot"); the turn's start otherwise — a fresh
+ * invest read, a dirty vault, no batch, or no invest turn at all.
+ *
+ * WITHOUT THE invest-batch CUT `reads` is never set, and this is `turnAt`: the
+ * doorbell is told exactly what it was told before the cut existed.
+ */
+export function restVerdictReadAt(turnAt: number, batchReadAt: number, investReads: InvestResult["reads"]): number {
+  return investReads === "snapshot" ? Math.min(turnAt, batchReadAt) : turnAt;
 }
 
 /**

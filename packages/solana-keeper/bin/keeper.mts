@@ -78,8 +78,8 @@ import {
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { CrankSender, SIGTERM_DRAIN_MS } from "../src/explicit-send.js";
-import { runInvestTick } from "../src/invest-tick.js";
-import { investLeavesSnapshotTrue, readSweepState, settleLeavesSnapshotTrue, type InvestSnapshot } from "../src/invest-snapshot.js";
+import { runInvestTick, type InvestResult } from "../src/invest-tick.js";
+import { investLeavesSnapshotTrue, readSweepState, restVerdictReadAt, settleLeavesSnapshotTrue, type InvestSnapshot } from "../src/invest-snapshot.js";
 import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
 import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
@@ -1975,6 +1975,14 @@ async function sweep(): Promise<void> {
         settle: "THREW",
         invest: null,
       };
+      /**
+       * Where this turn's invest half read its at-rest state: "snapshot" when the
+       * invest-batch cut decided it from the sweep's batch, which was read before
+       * this turn began. The doorbell is told the batch's time for such a turn
+       * (restVerdictReadAt), so a bell that rang after the batch is not answered by
+       * a rest that could not have seen it. Never set without the cut.
+       */
+      let investReads: InvestResult["reads"];
       try {
         // Prefer Privy (no local key); fall back to a local keypair if present.
         // A resolution FAILURE is logged with its real reason and falls back.
@@ -2329,6 +2337,7 @@ async function sweep(): Promise<void> {
           // THE explicit-send CUT, only while its token is on (crankSender above).
           ...(crankSender === null ? {} : { sender: crankSender }),
         });
+        investReads = invest.reads;
         if (investSnapshots !== null) {
           if (!investLeavesSnapshotTrue(invest.outcome)) dirtyVaults.add(vaultAddr);
           if (investBatchStats !== null) {
@@ -2479,8 +2488,11 @@ async function sweep(): Promise<void> {
       }
       // WHAT THE DOORBELL LEARNS FROM THIS TURN, outside the try so a throw is
       // recorded too (as busy). A link turned only by the safety rotation that
-      // had work waiting and no bell is the evidence the webhook missed it.
-      if (doorbell.recordTurn(door, lane, turnRests(doorTurn), Date.now(), `${doorTurn.settle}/${doorTurn.invest ?? "none"}`, turnAt)) {
+      // had work waiting and no bell is the evidence the webhook missed it. A
+      // rest decided from the invest-batch snapshot is dated by the batch, not by
+      // this turn's start (restVerdictReadAt, src/invest-snapshot.ts).
+      const restReadAt = restVerdictReadAt(turnAt, vaultReadAt, investReads);
+      if (doorbell.recordTurn(door, lane, turnRests(doorTurn), Date.now(), `${doorTurn.settle}/${doorTurn.invest ?? "none"}`, restReadAt)) {
         log.warn("doorbell: a link the webhook never rang had work waiting (possible miss)", {
           wallet,
           vault: vaultAddr,
