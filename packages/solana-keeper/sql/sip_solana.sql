@@ -335,3 +335,12 @@ CREATE TABLE IF NOT EXISTS sip_solana.fleet (
   new_vault_system text        NOT NULL DEFAULT 'legacy' CHECK (new_vault_system IN ('legacy', 'queue'))
 );
 INSERT INTO sip_solana.fleet (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
+-- webhook_owner (plan P3a design detail 2): who keeps the Helius webhook.
+-- 'legacy' — the legacy profit keeper, as today — until the last vault moves
+-- to the queue (P3d); then 'scheduler', and only the lock-holding scheduler
+-- syncs it (src/scheduler.ts). Two writers of one webhook would undo each
+-- other's edits with PUTs, 100 credits each. An ALTER, so a database whose
+-- fleet row already exists gains it with the default.
+ALTER TABLE sip_solana.fleet
+  ADD COLUMN IF NOT EXISTS webhook_owner text NOT NULL DEFAULT 'legacy' CHECK (webhook_owner IN ('legacy', 'scheduler'));

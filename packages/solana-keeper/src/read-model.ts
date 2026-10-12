@@ -252,6 +252,18 @@ export class SolanaReadModel {
     }
   }
 
+  /**
+   * A read model over a pool somebody else owns and sizes: the dispatcher's
+   * scheduler (bin/scheduler.mts), whose rankings are read through its ONE
+   * pooled connection (SCHEDULER_POOL_MAX, src/dispatch-store.ts) rather than a
+   * pool of two of their own, which ADR §3.11's connection budget has no room
+   * for. Only the reads are meant here; close() would end the owner's pool and
+   * is never called on one. No legacy keeper builds one.
+   */
+  static overPool(pool: pg.Pool, warn: Warn): SolanaReadModel {
+    return new SolanaReadModel(pool, warn);
+  }
+
   static create(databaseUrl: Secret | null, warn: Warn, observe?: DatabaseObserver): SolanaReadModel {
     if (databaseUrl === null) return new SolanaReadModel(null, warn, observe);
     const connectionString = databaseUrl.reveal();

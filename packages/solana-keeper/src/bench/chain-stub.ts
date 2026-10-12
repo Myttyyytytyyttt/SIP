@@ -355,9 +355,10 @@ export class BenchChain {
         return { result: this.withContext(address === this.options.crank.toBase58() ? 5_000_000_000 : 2_000_000_000) };
       }
       case "getProgramAccounts": {
-        return {
-          result: this.links.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
-        };
+        const accounts = this.links.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) }));
+        // WITH ITS CONTEXT ONLY WHEN ASKED (the dispatcher's scheduler, src/discovery.ts
+        // discoverLinksWithContext): the legacy listing never asks, and is answered as before.
+        return { result: askedWithContext(params) ? this.withContext(accounts) : accounts };
       }
       case "getProgramAccountsV2": {
         if (this.options.speaksGpaV2 !== true) break;
@@ -437,11 +438,17 @@ export class BenchChain {
       paginationKey = base58(Buffer.from(`cursor:${start + page.length}`));
       this.v2Cursors.set(paginationKey, start + page.length);
     }
-    return {
-      result: {
-        accounts: page.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
-        paginationKey,
-      },
+    const result = {
+      accounts: page.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
+      paginationKey,
     };
+    // `withContext: true` wraps the same page under `value` (Helius's page), the scheduler's form only.
+    return { result: askedWithContext(params) ? this.withContext(result) : result };
   }
+}
+
+/** Whether a listing's options object asks for `withContext`. */
+function askedWithContext(params: readonly unknown[]): boolean {
+  const options = params[1];
+  return typeof options === "object" && options !== null && (options as { withContext?: unknown }).withContext === true;
 }

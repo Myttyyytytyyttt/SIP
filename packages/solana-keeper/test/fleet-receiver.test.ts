@@ -289,6 +289,19 @@ describe("the receiver behind the legacy route", () => {
     expect(receiver.status().authConfirmed).toBe(false);
   });
 
+  it("counts for the webhook sync as the legacy doorbell does: transactions accepted, 403s, and 403s since the last accepted one", async () => {
+    const { receiver } = setup();
+    receiver.reject();
+    receiver.reject();
+    expect(receiver.deliveryCounts()).toEqual({ accepted: 0, rejected: 2, rejectedSinceAccepted: 2 });
+    receiver.accept(body("solDepositToVault"));
+    receiver.accept(Buffer.from("[{}]"));
+    expect(receiver.deliveryCounts()).toEqual({ accepted: 1, rejected: 2, rejectedSinceAccepted: 0 });
+    receiver.reject();
+    expect(receiver.deliveryCounts()).toEqual({ accepted: 1, rejected: 3, rejectedSinceAccepted: 1 });
+    await receiver.idle();
+  });
+
   it("is confirmed by the webhook sync's word, as the legacy doorbell is", async () => {
     const { store, receiver } = setup();
     receiver.confirmAuthorization();

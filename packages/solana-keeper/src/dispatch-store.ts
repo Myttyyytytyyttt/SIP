@@ -11,7 +11,9 @@
 // THE FOUR STATEMENTS, as ADR §3.5 writes them:
 //
 //   CLAIM      up to `slots` due vaults of system 'queue' whose lease is free or
-//              expired, FOR UPDATE SKIP LOCKED, fence + 1, a 45 s lease.
+//              expired, FOR UPDATE SKIP LOCKED, fence + 1, a 45 s lease. Its
+//              own last vaults first only while they are fresh: a vault overdue
+//              past CLAIM_AFFINITY_GRACE_MINUTES is taken in due order.
 //   HEARTBEAT  one statement per process for every vault it holds, every 10 s, on
 //              a timer of its own; it renews only (holder, fence) pairs that are
 //              still this process's, and refuses past the 6-minute job ceiling.
@@ -131,6 +133,8 @@
 //     ONE (holder 1 + 1 pinned, standby 1). The pools here are sized to the
 //     table: SCHEDULER_POOL_MAX = 1, WORKER_POOL_MAX = 2.
 //   * COMPLETE's `$10` is a delay in seconds (the clock paragraph above says why).
+//   * CLAIM's affinity is bounded (CLAIM_AFFINITY_GRACE_MINUTES): the ADR's
+//     unbounded order starved a dead worker's vaults under a full-pass backlog.
 //   * The overlap audit counts a NULL plan_cleared_height as -1 (OVERLAP_AUDIT_SQL
 //     says why): the ADR's text compares it with `<=`, under which such a row
 //     drops out of the audit instead of failing it.
@@ -207,12 +211,36 @@ const LOSS_CARRY = `${READ_MODEL_SCHEMA}.loss_carry`;
 const WORKER = `${READ_MODEL_SCHEMA}.worker`;
 const RPC_USAGE = `${READ_MODEL_SCHEMA}.rpc_usage`;
 
-/** CLAIM (ADR §3.5): up to $2 free slots, for worker $1. */
+/**
+ * How long a due vault keeps its soft affinity: a job ceiling, six minutes.
+ * Within it CLAIM prefers the vaults this worker held last (the walk cache it
+ * keeps warm); past it a vault is taken strictly in due order, whoever held it.
+ *
+ * WHY THERE IS A BOUND (P3a-2, the scheduler track's starvation check). With
+ * affinity first and nothing else, a vault whose last holder is gone — killed,
+ * redeployed, scaled away, or SIGTERM'd after releasing it — is preferred by no
+ * worker, and under a saturated queue every live worker always has a vault of its
+ * own due: a full pass re-marks them all due on every tick of an untrusted
+ * doorbell. test/scheduler-pg.test.ts ran that and saw a third of the fleet
+ * never claimed in forty ticks. With the bound it is claimed within the grace
+ * plus its place in the backlog.
+ */
+export const CLAIM_AFFINITY_GRACE_MINUTES = JOB_CEILING_MINUTES;
+
+/**
+ * CLAIM (ADR §3.5): up to $2 free slots, for worker $1. The ADR's order —
+ * priority, then this worker's own last vaults, then due time — except that a
+ * vault overdue by more than CLAIM_AFFINITY_GRACE_MINUTES goes before every
+ * fresher one of its priority, oldest first, whatever its last holder.
+ */
 export const CLAIM_SQL = `WITH c AS (
   SELECT vault_addr FROM ${VAULT_WORK}
    WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp()
      AND (holder IS NULL OR lease_until < clock_timestamp())
-   ORDER BY priority, COALESCE(last_holder = $1, false) DESC, due_at
+   ORDER BY priority,
+            (due_at < clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES} minutes') DESC,
+            CASE WHEN due_at < clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES} minutes' THEN due_at END,
+            COALESCE(last_holder = $1, false) DESC, due_at
    LIMIT $2 FOR UPDATE SKIP LOCKED)
 UPDATE ${VAULT_WORK} w
    SET holder = $1, fence = w.fence + 1, claimed_at = clock_timestamp(),
