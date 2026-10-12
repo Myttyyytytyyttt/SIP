@@ -136,11 +136,11 @@ describe("the four statements, as ADR §3.5 writes them", () => {
     }
   });
 
-  it("CLAIM: due queue vaults only, free or expired, most urgent first and its own last vaults next, SKIP LOCKED, fence + 1", () => {
+  it("CLAIM: due queue vaults only, free or expired, most urgent first, its own last vaults with a bounded head start, SKIP LOCKED, fence + 1", () => {
     expect(CLAIM_SQL).toContain("WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp()");
     expect(CLAIM_SQL).toContain("AND (holder IS NULL OR lease_until < clock_timestamp())");
-    expect(CLAIM_SQL).toMatch(
-      /ORDER BY priority,\s+\(due_at < clock_timestamp\(\) - interval '6 minutes'\) DESC,\s+CASE WHEN due_at < clock_timestamp\(\) - interval '6 minutes' THEN due_at END,\s+COALESCE\(last_holder = \$1, false\) DESC, due_at/,
+    expect(CLAIM_SQL).toContain(
+      "ORDER BY priority, due_at - CASE WHEN last_holder = $1 THEN interval '300 seconds' ELSE interval '0 seconds' END, due_at",
     );
     expect(CLAIM_SQL).toContain("LIMIT $2 FOR UPDATE SKIP LOCKED)");
     expect(CLAIM_SQL).toContain("SET holder = $1, fence = w.fence + 1, claimed_at = clock_timestamp()");
@@ -728,10 +728,21 @@ describe("DARK: nothing a legacy keeper runs imports the store", () => {
     expect(importsStore("// SCHEDULER_POOL_MAX in src/dispatch-store.ts")).toBe(false);
   });
 
-  // THE DISPATCHER'S OWN FILES, and only they, since the scheduler (Q2) landed:
-  // its entry point and the modules only that entry point loads. Whether a
-  // process production starts can reach any of them is test/dispatch-dark.test.ts's.
-  const DISPATCHER_FILES = ["bin/scheduler.mts", "src/scheduler-pg.ts", "src/scheduler-select.ts", "src/scheduler.ts"];
+  // THE DISPATCHER'S OWN FILES, and only they: the scheduler's (Q2) entry point
+  // and the modules only it loads, and the worker's (Q3) job, loop, fence and
+  // takeover and its entry point. Whether a process production starts can reach
+  // any of them is test/dispatch-dark.test.ts's.
+  const DISPATCHER_FILES = [
+    "bin/scheduler.mts",
+    "bin/worker.mts",
+    "src/fenced-sender.ts",
+    "src/scheduler-pg.ts",
+    "src/scheduler-select.ts",
+    "src/scheduler.ts",
+    "src/worker-job.ts",
+    "src/worker-loop.ts",
+    "src/worker-takeover.ts",
+  ];
 
   it("is imported by no file under src/ or bin/ but the dispatcher's own", () => {
     const importers: string[] = [];

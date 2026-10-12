@@ -24,7 +24,7 @@ import { Keypair } from "@solana/web3.js";
 import pg from "pg";
 import { Secret } from "@sip/solana-log";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { CLAIM_AFFINITY_GRACE_MINUTES, DispatchStore, createDispatchPool } from "../src/dispatch-store.js";
+import { CLAIM_AFFINITY_SECONDS, DispatchStore, createDispatchPool } from "../src/dispatch-store.js";
 import { PgFleetStore } from "../src/fleet-pg.js";
 import {
   MARK_DUE_SQL,
@@ -490,24 +490,25 @@ describe.skipIf(!usable)("the scheduler on Postgres 16 (needs KEEPER_TEST_PG_URL
       }
       const unclaimed = vaults.filter((vault) => !firstClaim.has(vault));
       expect(unclaimed, "vaults never claimed").toEqual([]);
-      // THE BOUND: affinity's grace, then the backlog ahead of it at 4 claims a tick.
-      const bound = CLAIM_AFFINITY_GRACE_MINUTES + Math.ceil(vaults.length / 4) + 1;
+      // THE BOUND: affinity's head start (a tick is a minute), then the backlog ahead of it at 4 claims a tick.
+      const bound = Math.ceil(CLAIM_AFFINITY_SECONDS / 60) + Math.ceil(vaults.length / 4) + 1;
       expect(Math.max(...firstClaim.values())).toBeLessThanOrEqual(bound);
     });
 
-    it("keeps the soft affinity inside the grace: a worker's own fresh vault before another's older one, until that one is overdue", async () => {
+    it("keeps the soft affinity inside its head start: a worker's own fresh vault before another's older one, until that one is older by more", async () => {
+      const head = CLAIM_AFFINITY_SECONDS / 60;
       await queueRow("MINE", { last_holder: "'W1'", lane: "'new'", priority: "2", due_at: "clock_timestamp() - interval '1 minute'" });
       await queueRow("THEIRS", {
         last_holder: "'W2'",
         lane: "'new'",
         priority: "2",
-        due_at: `clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES - 1} minutes'`,
+        due_at: `clock_timestamp() - interval '${1 + head - 1} minutes'`,
       });
       await queueRow("OVERDUE", {
         last_holder: "'GONE'",
         lane: "'new'",
         priority: "2",
-        due_at: `clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES + 1} minutes'`,
+        due_at: `clock_timestamp() - interval '${1 + head + 1} minutes'`,
       });
       const w1 = new DispatchStore(pool(1), "W1");
       const order: string[] = [];

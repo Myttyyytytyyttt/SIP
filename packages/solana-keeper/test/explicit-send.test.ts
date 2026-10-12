@@ -17,6 +17,8 @@ import {
   QUIET_AFTER_TAKEOVER_MS,
   SEND_POLL_MS,
   SIGTERM_DRAIN_MS,
+  type CrankSendEnd,
+  type CrankSendGate,
   type SigningWallet,
 } from "../src/explicit-send.js";
 
@@ -277,5 +279,114 @@ describe("the SIGTERM drain", () => {
     sender.beginDrain();
     await expect(sender.idle()).resolves.toBe(true);
     expect(sender.status().drain).toMatchObject({ inFlightAtStart: 0, completed: true });
+  });
+});
+
+// ── the dispatcher's fence (CrankSenderOptions.gate) ───────────────────────────
+//
+// A worker's CrankSender carries a gate (src/fenced-sender.ts): asked after the
+// three questions and after signing, before the bytes leave. These pin the seam
+// itself, with a gate the test writes; the fence's own rules are
+// test/fenced-sender.test.ts's.
+describe("the dispatcher's gate", () => {
+  /** A gate that records what it was shown, in order with the chain's calls, and answers as told. */
+  function gate(chain: ReturnType<typeof scriptedChain>, answer: "admit" | "refuse" = "admit") {
+    const seen: { readonly blockhash: string; readonly lastValidBlockHeight: number; readonly signed: boolean; readonly sentBefore: number }[] = [];
+    const ends: CrankSendEnd[] = [];
+    const hook: CrankSendGate = {
+      admit: async (send) => {
+        const first = send.transaction instanceof Transaction ? send.transaction.signatures[0]?.signature : send.transaction.signatures[0];
+        seen.push({
+          blockhash: send.blockhash,
+          lastValidBlockHeight: send.lastValidBlockHeight,
+          signed: first !== null && first !== undefined && first.some((byte) => byte !== 0),
+          sentBefore: chain.raw.length,
+        });
+        if (answer === "refuse") throw new CrankSendRefused("fenced", "the fence refused this send");
+        return { ended: (end) => void ends.push(end) };
+      },
+    };
+    return { hook, seen, ends };
+  }
+
+  it("is shown the SIGNED transaction, its blockhash and last valid height, before the bytes leave — and told how it ended", async () => {
+    const chain = scriptedChain();
+    const fence = gate(chain);
+    const sender = new CrankSender({ connection: chain.connection, wallet, isLive: () => true, quietMs: 0, gate: fence.hook });
+    await sender.sendLegacy(transfer(), [crank]);
+    expect(fence.seen).toEqual([{ blockhash: BLOCKHASH, lastValidBlockHeight: 1_000, signed: true, sentBefore: 0 }]);
+    expect(chain.raw).toHaveLength(1);
+    expect(fence.ends).toEqual(["landed"]);
+    // THE ORDER IS P2's, THE GATE INSIDE IT: blockhash, then (gate), then the send and its polls.
+    expect(chain.calls.map((call) => call.method)).toEqual(["getLatestBlockhash", "sendRawTransaction", "getSignatureStatuses"]);
+  });
+
+  it("sends NOTHING when the gate refuses, and the refusal is the fence's, not one of the sender's three", async () => {
+    const chain = scriptedChain();
+    const fence = gate(chain, "refuse");
+    const sender = new CrankSender({ connection: chain.connection, wallet, isLive: () => true, quietMs: 0, gate: fence.hook });
+    const refused = await sender.sendLegacy(transfer(), [crank]).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(CrankSendRefused);
+    expect((refused as CrankSendRefused).reason).toBe("fenced");
+    expect(chain.raw).toHaveLength(0);
+    expect(chain.calls.map((call) => call.method)).toEqual(["getLatestBlockhash"]);
+    expect(sender.status()).toMatchObject({ sent: 0, inFlight: 0, refused: { notLive: 0, quiet: 0, draining: 0 } });
+  });
+
+  it("is never asked when one of the three questions already refused: a lost claim is not a gate", async () => {
+    const chain = scriptedChain();
+    const fence = gate(chain);
+    const sender = new CrankSender({ connection: chain.connection, wallet, isLive: () => false, quietMs: 0, gate: fence.hook });
+    await expect(sender.sendLegacy(transfer(), [crank])).rejects.toBeInstanceOf(CrankSendRefused);
+    expect(fence.seen).toHaveLength(0);
+    expect(chain.raw).toHaveLength(0);
+  });
+
+  it("tells the ticket `reverted`, `expired` and `unknown` as the watch saw them", async () => {
+    const reverted = scriptedChain({ statuses: [{ confirmationStatus: "confirmed", err: { InstructionError: [0, "Custom"] } }] });
+    const r = gate(reverted);
+    await new CrankSender({ connection: reverted.connection, wallet, isLive: () => true, quietMs: 0, gate: r.hook }).sendLegacy(transfer(), [crank]).catch(() => undefined);
+    expect(r.ends).toEqual(["reverted"]);
+
+    const expired = scriptedChain({ statuses: [null], finalizedHeight: () => 1_001 });
+    const e = gate(expired);
+    const time = clock();
+    await new CrankSender({ connection: expired.connection, wallet, isLive: () => true, quietMs: 0, gate: e.hook, now: time.now, sleep: time.sleep })
+      .sendLegacy(transfer(), [crank])
+      .catch(() => undefined);
+    expect(e.ends).toEqual(["expired"]);
+
+    // A NODE THAT REFUSED THE BYTES: whether they reached a leader is unknown, so the fence must wait it out.
+    const threw = scriptedChain({
+      onSend: () => {
+        throw new Error("node refused the bytes");
+      },
+    });
+    const t = gate(threw);
+    await new CrankSender({ connection: threw.connection, wallet, isLive: () => true, quietMs: 0, gate: t.hook }).sendLegacy(transfer(), [crank]).catch(() => undefined);
+    expect(t.ends).toEqual(["unknown"]);
+  });
+
+  it("keeps a drain waiting for a gate already asked: the in-flight count covers it", async () => {
+    const chain = scriptedChain();
+    let open!: () => void;
+    const held = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    const hook: CrankSendGate = {
+      admit: async () => {
+        await held;
+        return { ended: () => undefined };
+      },
+    };
+    const sender = new CrankSender({ connection: chain.connection, wallet, isLive: () => true, quietMs: 0, gate: hook });
+    const sending = sender.sendLegacy(transfer(), [crank]);
+    while (sender.status().inFlight === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+    sender.beginDrain();
+    const idle = sender.idle(60_000);
+    expect(sender.status().inFlight).toBe(1);
+    open();
+    await expect(sending).resolves.toBe("sig-1");
+    await expect(idle).resolves.toBe(true);
   });
 });

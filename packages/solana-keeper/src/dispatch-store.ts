@@ -12,8 +12,8 @@
 //
 //   CLAIM      up to `slots` due vaults of system 'queue' whose lease is free or
 //              expired, FOR UPDATE SKIP LOCKED, fence + 1, a 45 s lease. Its
-//              own last vaults first only while they are fresh: a vault overdue
-//              past CLAIM_AFFINITY_GRACE_MINUTES is taken in due order.
+//              own last vaults get a head start of CLAIM_AFFINITY_SECONDS on
+//              their due time, never precedence over an older vault past it.
 //   HEARTBEAT  one statement per process for every vault it holds, every 10 s, on
 //              a timer of its own; it renews only (holder, fence) pairs that are
 //              still this process's, and refuses past the 6-minute job ceiling.
@@ -133,7 +133,7 @@
 //     ONE (holder 1 + 1 pinned, standby 1). The pools here are sized to the
 //     table: SCHEDULER_POOL_MAX = 1, WORKER_POOL_MAX = 2.
 //   * COMPLETE's `$10` is a delay in seconds (the clock paragraph above says why).
-//   * CLAIM's affinity is bounded (CLAIM_AFFINITY_GRACE_MINUTES): the ADR's
+//   * CLAIM's affinity is bounded (CLAIM_AFFINITY_SECONDS): the ADR's
 //     unbounded order starved a dead worker's vaults under a full-pass backlog.
 //   * The overlap audit counts a NULL plan_cleared_height as -1 (OVERLAP_AUDIT_SQL
 //     says why): the ADR's text compares it with `<=`, under which such a row
@@ -210,37 +210,47 @@ const SEND_INTENT = `${READ_MODEL_SCHEMA}.send_intent`;
 const LOSS_CARRY = `${READ_MODEL_SCHEMA}.loss_carry`;
 const WORKER = `${READ_MODEL_SCHEMA}.worker`;
 const RPC_USAGE = `${READ_MODEL_SCHEMA}.rpc_usage`;
+const KEEPER_LINK = `${READ_MODEL_SCHEMA}.keeper_link`;
+const FLEET = `${READ_MODEL_SCHEMA}.fleet`;
 
 /**
- * How long a due vault keeps its soft affinity: a job ceiling, six minutes.
- * Within it CLAIM prefers the vaults this worker held last (the walk cache it
- * keeps warm); past it a vault is taken strictly in due order, whoever held it.
- *
- * WHY THERE IS A BOUND (P3a-2, the scheduler track's starvation check). With
- * affinity first and nothing else, a vault whose last holder is gone — killed,
- * redeployed, scaled away, or SIGTERM'd after releasing it — is preferred by no
- * worker, and under a saturated queue every live worker always has a vault of its
- * own due: a full pass re-marks them all due on every tick of an untrusted
- * doorbell. test/scheduler-pg.test.ts ran that and saw a third of the fleet
- * never claimed in forty ticks. With the bound it is claimed within the grace
- * plus its place in the backlog.
+ * How far ahead of its due time a worker's OWN last vault is taken (CLAIM's soft
+ * affinity, ADR §3.4: it keeps the in-memory walk cache warm). A HEAD START,
+ * NOT PRECEDENCE: the ADR's `COALESCE(last_holder = $1, false) DESC` put every
+ * own vault before every other of the same priority, so under a saturated queue
+ * — a full pass's backlog, or a fleet whose busy vaults come due faster than its
+ * slots turn them — a vault whose last holder is gone (released on SIGTERM, its
+ * worker replaced) or that never had one waited behind each worker's own vaults
+ * FOREVER (the P3a-1 note; Q3 checked it: test/worker-pg.test.ts). Ordered by
+ * due_at less this head start, an own vault still goes first when it came due
+ * up to five minutes after the other, and never later: no vault waits more than
+ * five minutes beyond its turn for affinity's sake. Five, so the order Q1 pinned
+ * (an own vault due 1 minute ago before another's due 5 minutes ago) holds.
  */
-export const CLAIM_AFFINITY_GRACE_MINUTES = JOB_CEILING_MINUTES;
+export const CLAIM_AFFINITY_SECONDS = 300;
 
 /**
  * CLAIM (ADR §3.5): up to $2 free slots, for worker $1. The ADR's order —
- * priority, then this worker's own last vaults, then due time — except that a
- * vault overdue by more than CLAIM_AFFINITY_GRACE_MINUTES goes before every
- * fresher one of its priority, oldest first, whatever its last holder.
+ * priority, then this worker's own last vaults, then due time — except that the
+ * affinity is a head start of CLAIM_AFFINITY_SECONDS on due_at, not precedence.
+ *
+ * TWO TRACKS FOUND THE SAME STARVATION (P3a-2). The scheduler track's check
+ * (test/scheduler-pg.test.ts: workers claiming by affinity, the scheduler
+ * re-marking every vault due on every tick of an untrusted doorbell, a third of
+ * the vaults last held by a worker that is gone) saw that third never claimed in
+ * forty ticks under the ADR's order; the workers' track saw the same with one
+ * orphan (test/worker-pg.test.ts). The scheduler track bounded it with a
+ * six-minute grace past which a vault went in strict due order; the merge keeps
+ * the workers' head start instead: it is continuous (no step at the grace), it
+ * keeps the order the scheduler track pinned (an orphan overdue past the bound
+ * first, then the claimer's own fresh vault, then another's older one), and
+ * test/memory-dispatch-store.ts mirrors it for the fast tests.
  */
 export const CLAIM_SQL = `WITH c AS (
   SELECT vault_addr FROM ${VAULT_WORK}
    WHERE system = 'queue' AND parked_reason IS NULL AND due_at <= clock_timestamp()
      AND (holder IS NULL OR lease_until < clock_timestamp())
-   ORDER BY priority,
-            (due_at < clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES} minutes') DESC,
-            CASE WHEN due_at < clock_timestamp() - interval '${CLAIM_AFFINITY_GRACE_MINUTES} minutes' THEN due_at END,
-            COALESCE(last_holder = $1, false) DESC, due_at
+   ORDER BY priority, due_at - CASE WHEN last_holder = $1 THEN interval '${CLAIM_AFFINITY_SECONDS} seconds' ELSE interval '0 seconds' END, due_at
    LIMIT $2 FOR UPDATE SKIP LOCKED)
 UPDATE ${VAULT_WORK} w
    SET holder = $1, fence = w.fence + 1, claimed_at = clock_timestamp(),
@@ -408,6 +418,21 @@ export const CARRY_UPSERT_SQL = `INSERT INTO ${LOSS_CARRY}
    written_fence = EXCLUDED.written_fence,
    send_intent_id = EXCLUDED.send_intent_id,
    written_at = clock_timestamp()`;
+
+/**
+ * A job's links (Q3): the addresses the scheduler's discovery holds for the vault
+ * and has not seen go, in link-address order. ADDRESSES ONLY: every field a
+ * settle reads comes from the job's own fresh read of each one (src/job-chain.ts),
+ * because a cached link is never trusted for an attestation (ADR §3.8 step 2).
+ */
+export const LINKS_OF_VAULT_SQL = `SELECT link_addr FROM ${KEEPER_LINK} WHERE vault_addr = $1 AND gone_at IS NULL ORDER BY link_addr`;
+
+/**
+ * A settlement a worker wrote into the history: the leaderboard is due again.
+ * The scheduler refreshes it at most once every 15 s while this is set (ADR §3.8
+ * step 8, owner decision 25), instead of after every SETTLED.
+ */
+export const BOARD_DIRTY_SQL = `UPDATE ${FLEET} SET board_dirty_at = clock_timestamp() WHERE id`;
 
 /** The process's own row: written at boot, beaten on its timer, closed on exit. */
 export const REGISTER_WORKER_SQL = `INSERT INTO ${WORKER} (worker_id, kind, version, started_at, heartbeat_at, slots)
@@ -898,6 +923,16 @@ export class DispatchStore {
   /** The process's row closed, on its way out. */
   async processStopped(): Promise<void> {
     await this.#one(WORKER_STOPPED_SQL, [this.holder]);
+  }
+
+  /** A job's link addresses (LINKS_OF_VAULT_SQL): never trusted beyond the address. */
+  async linksOf(vault: string): Promise<readonly string[]> {
+    return (await this.#one(LINKS_OF_VAULT_SQL, [vault])).map((row) => String(row["link_addr"]));
+  }
+
+  /** The leaderboard is due again (BOARD_DIRTY_SQL). */
+  async markBoardDirty(): Promise<void> {
+    await this.#one(BOARD_DIRTY_SQL, []);
   }
 
   #intentValues(intent: IntentDraft): unknown[] {

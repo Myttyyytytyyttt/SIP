@@ -45,10 +45,18 @@ const DISPATCHER_MODULES = [
   "src/scheduler-config.ts",
   "src/scheduler-board.ts",
   "src/lamports-filter.ts",
+  // Q3, the workers: the job, its loop, its fence, its takeover, its chain, its config, and the modules a job picks from.
+  "src/worker-job.ts",
+  "src/worker-loop.ts",
+  "src/worker-takeover.ts",
+  "src/worker-config.ts",
+  "src/fenced-sender.ts",
+  "src/job-chain.ts",
+  "src/settle-modules.ts",
 ] as const;
 
-/** bin/ files that are the dispatcher's own: the only ones allowed to reach the modules above (Q3 adds the worker's). */
-const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/scheduler.mts"];
+/** bin/ files that are the dispatcher's own: the only ones allowed to reach the modules above. */
+const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/scheduler.mts", "bin/worker.mts"];
 
 /** Relative specifiers, static (import/export … from, bare import) and dynamic. Type-only imports load nothing. */
 function relativeImports(text: string): string[] {
@@ -117,14 +125,27 @@ describe("DARK: no entry point production can start reaches a dispatcher module"
     for (const module of DISPATCHER_MODULES) expect(existsSync(resolve(KEEPER, module)), module).toBe(true);
   });
 
-  it("the scheduler's entry point is the dispatcher's, reaches its modules, and is not what the image runs", () => {
+  it("names every dispatcher entry point that exists, and the Dockerfile starts none of them", () => {
+    for (const entry of DISPATCHER_ENTRY_POINTS) expect(existsSync(resolve(KEEPER, entry)), entry).toBe(true);
+    const dockerfile = readFileSync(resolve(KEEPER, "Dockerfile"), "utf8");
+    const cmd = dockerfile.split("\n").filter((line) => /^\s*(CMD|ENTRYPOINT)\b/.test(line));
+    expect(cmd).toEqual(['CMD ["node_modules/.bin/tsx", "bin/keeper.mts"]']);
+    for (const entry of DISPATCHER_ENTRY_POINTS) expect(dockerfile).not.toContain(`"${entry}"`);
+    expect(dockerfile).not.toMatch(/scheduler\.mts|worker\.mts/);
+  });
+
+  it("the scheduler's entry point is the dispatcher's and reaches its modules", () => {
     const scheduler = reach(resolve(KEEPER, "bin/scheduler.mts"));
     for (const module of ["src/scheduler.ts", "src/scheduler-pg.ts", "src/dispatch-store.ts", "src/fleet-receiver.ts", "src/lamports-filter.ts"]) {
       expect(scheduler.has(resolve(KEEPER, module)), module).toBe(true);
     }
-    const dockerfile = readFileSync(resolve(KEEPER, "Dockerfile"), "utf8");
-    expect(dockerfile).toMatch(/^CMD \["node_modules\/\.bin\/tsx", "bin\/keeper\.mts"\]$/m);
-    expect(dockerfile).not.toMatch(/scheduler\.mts/);
+  });
+
+  it("walks the worker's graph too: bin/worker.mts loads the store, the job, the loop and the fence", () => {
+    const worker = reach(resolve(KEEPER, "bin/worker.mts"));
+    for (const module of ["src/dispatch-store.ts", "src/worker-job.ts", "src/worker-loop.ts", "src/fenced-sender.ts", "src/job-chain.ts"]) {
+      expect(worker.has(resolve(KEEPER, module)), module).toBe(true);
+    }
   });
 
   it.each(entries.map((file) => [rel(file), file] as const))("%s reaches none of them", (_name, file) => {

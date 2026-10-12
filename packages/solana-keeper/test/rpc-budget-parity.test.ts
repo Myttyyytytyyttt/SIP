@@ -94,10 +94,12 @@ function sources(dir: string): string[] {
 
 /**
  * The dispatcher's own entry points (test/dispatch-dark.test.ts keeps the same
- * list): production starts none of them, and they are the ONE place a budget is
- * passed — bin/scheduler.mts builds the scheduler's bucket.
+ * list): production starts none of them (that test holds it, and the
+ * Dockerfile's one CMD), and they are the ONE place a budget is passed —
+ * bin/scheduler.mts builds the scheduler's bucket, bin/worker.mts the worker's.
+ * "A legacy caller" is every other file.
  */
-const DISPATCHER_ENTRY_POINTS = new Set([resolve(KEEPER, "bin/scheduler.mts")]);
+const DISPATCHER_ENTRY_POINTS = new Set(["bin/scheduler.mts", "bin/worker.mts"].map((file) => resolve(KEEPER, file)));
 
 describe("no legacy caller can pass a budget", () => {
   it("hands poolFetch at most five arguments at every call outside the pool itself, and bin/keeper.mts exactly five", () => {
@@ -124,8 +126,14 @@ describe("no legacy caller can pass a budget", () => {
     }
   });
 
-  it("the scheduler's entry point is the one that does: its pool is handed the bucket, a sixth argument", () => {
+  it("the scheduler's entry point is one that does: its pool is handed the bucket, a sixth argument", () => {
     expect(poolFetchCalls(readFileSync(resolve(KEEPER, "bin/scheduler.mts"), "utf8"))).toEqual([6]);
+  });
+
+  it("and the worker, which production never starts, DOES hand its pool a budget: its sixth argument", () => {
+    const worker = readFileSync(resolve(KEEPER, "bin/worker.mts"), "utf8");
+    expect(poolFetchCalls(worker)).toEqual([6]);
+    expect(worker).toMatch(/new RpcBudget\(\{ ratePerSecond: floor\.floorRps, defaultLane: "hot", usage: collector \}\)/);
   });
 });
 

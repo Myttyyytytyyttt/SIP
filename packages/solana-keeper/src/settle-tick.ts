@@ -221,6 +221,71 @@ export interface SettleDeps {
    * it. A test holds that a throwing onSend leaves the outcome identical.
    */
   readonly onSend?: (send: SettleSend) => void;
+  /**
+   * THE DISPATCHER'S FENCE (src/fenced-sender.ts, ADR §3.6, §4.4 F1), a worker's
+   * only. ABSENT — as every legacy keeper leaves it — this turn is exactly what
+   * it was: the carry is written by `carries` or `carryStore` before the send,
+   * and a dry run returns its "would settle" without asking anyone.
+   *
+   * PRESENT, IT TAKES THE CARRY WRITE'S PLACE. The settle's GATE runs where the
+   * carry was written — after the shape check and the seat check, before the
+   * wallet signs or Privy is asked — and writes the PROFIT carry inside its own
+   * transaction (S-4); anything but `gated` ends the turn RETRY with nothing
+   * sent. The ticket it hands back is told the settle's id once it is known, and
+   * how the send ended. A DRY RUN ASKS IT TOO, which is the shadow world's whole
+   * point (plan P3a design detail 1): the would-be settle is gated, as a shadow
+   * intent, exactly where a live one would be, and still nothing is sent.
+   *
+   * IT CANNOT CHANGE WHAT IS SENT. Every byte is decided before it is asked,
+   * and a ticket's methods are told after the fact, inside a try of their own.
+   */
+  readonly fence?: SettleFence;
+}
+
+/** What the dispatcher's fence is told about one settle about to leave (SettleDeps.fence). */
+export interface SettleGateRequest {
+  readonly link: ManagedLink;
+  /** The mode the attestation charges in: whether a carry rides the gate (KeeperMode.carriesLosses). */
+  readonly mode: number;
+  /** The blockhash the settle is built over, and its last valid block height: when it can no longer land. */
+  readonly blockhash: string;
+  readonly lastValidBlockHeight: number;
+  /** settleIdempotencyKey: the settle's handle until Privy answers with its id. */
+  readonly idempotencyKey: string;
+  /** What settle_v2 moves for this base (expectedContribution's `paid`). */
+  readonly amountLamports: bigint;
+  /** The window's end slot: the frontier of the state the settle leaves. */
+  readonly endSlot: bigint;
+  /** The loss this settle hands to the window above it, or null — recorded either way, as recordCarry records it. */
+  readonly carry: LossCarry | null;
+  readonly validUntilSlot: bigint;
+  /** False for a dry run: a shadow worker's would-be settle, gated and never sent. */
+  readonly live: boolean;
+}
+
+/** What a settle's ticket is told, after the fact. Neither method can change the settle. */
+export interface SettleTicket {
+  /** The settle's id, once it is known: Privy's answer, or the local keypair's send. */
+  signed(signature: string): void;
+  /** How the send ended (SettleSend.ended), and the outcome this turn then reports. */
+  ended(ended: SettleSend["ended"], outcome: SettleOutcome): void;
+}
+
+export type SettleGateAnswer = { readonly kind: "gated"; readonly ticket: SettleTicket } | { readonly kind: "refused"; readonly detail: string };
+
+/** The dispatcher's fence as a settle turn sees it (src/fenced-sender.ts, JobFence.settleFence). */
+export interface SettleFence {
+  gate(request: SettleGateRequest): Promise<SettleGateAnswer>;
+}
+
+/** Tells the fence's ticket something, where nothing it does can reach the settle. */
+function tellTicket(ticket: SettleTicket | null, tell: (ticket: SettleTicket) => void): void {
+  if (ticket === null) return;
+  try {
+    tell(ticket);
+  } catch {
+    // The fence's record is the fence's; an intent it could not follow stays open for the successor.
+  }
 }
 
 /**
@@ -573,6 +638,24 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   if (belowReserve !== null) return { ...belowReserve, ...carried };
 
   if (!deps.live) {
+    // THE SHADOW WORLD'S GATE (SettleDeps.fence): the would-be settle is gated
+    // exactly where a live one is, and a refusal is this turn's answer. Without
+    // a fence a dry run asks nobody, as it never has.
+    if (deps.fence !== undefined) {
+      const gated = await deps.fence.gate({
+        link,
+        mode: inputs.mode,
+        blockhash,
+        lastValidBlockHeight,
+        idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot),
+        amountLamports: paid,
+        endSlot: decision.endSlot,
+        carry: decision.carry ?? null,
+        validUntilSlot: inputs.validUntilSlot,
+        live: false,
+      });
+      if (gated.kind !== "gated") return { outcome: "RETRY", detail: `DRY RUN — ${gated.detail}`, ...carried };
+    }
     const modeName = inputs.mode === MODE_VOLUME ? "VOLUME" : "PROFIT";
     return {
       outcome: "SETTLED",
@@ -671,7 +754,27 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // an earlier attempt from this state may have left a carry under the state this
   // settle leaves, for another window, and it must not net against this one. A dry
   // run and BELOW_RESERVE returned above, so neither records anything.
-  if (deps.carryStore === undefined) {
+  //
+  // UNDER THE DISPATCHER'S FENCE THE CARRY IS WRITTEN BY THE GATE, in the gate's
+  // own transaction (SettleDeps.fence, S-4): the intent and the carry commit
+  // together or not at all, and nothing leaves without both.
+  let ticket: SettleTicket | null = null;
+  if (deps.fence !== undefined) {
+    const gated = await deps.fence.gate({
+      link,
+      mode: inputs.mode,
+      blockhash,
+      lastValidBlockHeight,
+      idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot),
+      amountLamports: paid,
+      endSlot: decision.endSlot,
+      carry: decision.carry ?? null,
+      validUntilSlot: inputs.validUntilSlot,
+      live: true,
+    });
+    if (gated.kind !== "gated") return { outcome: "RETRY", detail: gated.detail, ...carried };
+    ticket = gated.ticket;
+  } else if (deps.carryStore === undefined) {
     recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null);
   } else {
     // IN `on`, NOTHING LEAVES UNLESS THE STORE HAS IT: a write it cannot make, or
@@ -703,18 +806,60 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     }
   } catch (error) {
     tellSend(deps, { route, mode: inputs.mode, submitMs: Date.now() - sentAt, confirmMs: null, ended: "threw" });
-    return unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
+    const threw = await unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
+    tellTicket(ticket, (fenced) => fenced.ended("threw", threw.outcome));
+    return threw;
   }
+  // THE SETTLE'S ID, the moment it is known: a successor can then ask about it by signature.
+  const sent = signature;
+  tellTicket(ticket, (fenced) => fenced.signed(sent));
 
   const submittedAt = Date.now();
   const landed = await landing(connection, signature);
+  const ended: SettleSend["ended"] = landed === null ? "unconfirmed" : landed.err === null ? "landed" : "reverted";
   tellSend(deps, {
     route,
     mode: inputs.mode,
     submitMs: submittedAt - sentAt,
     confirmMs: Date.now() - submittedAt,
-    ended: landed === null ? "unconfirmed" : landed.err === null ? "landed" : "reverted",
+    ended,
   });
+  const result = await settledFromLanding(connection, link, sent, landed, {
+    inputs,
+    measured,
+    expectation,
+    paid,
+    backlog,
+    applied,
+    passing,
+    carried,
+    refused,
+    unconfirmed,
+  });
+  tellTicket(ticket, (fenced) => fenced.ended(ended, result.outcome));
+  return result;
+}
+
+/** What a settle that was sent comes to: the landing poll's answer, then the receipt. Split out so the fence's ticket hears every way out. */
+async function settledFromLanding(
+  connection: Connection,
+  link: ManagedLink,
+  signature: string,
+  landed: { readonly err: TransactionError | null } | null,
+  context: {
+    readonly inputs: AttestationInputs;
+    readonly measured: { readonly txCount: number };
+    readonly expectation: string;
+    readonly paid: bigint;
+    readonly backlog: string;
+    readonly applied: string;
+    readonly passing: string;
+    readonly carried: Omit<SettleResult, "outcome" | "detail">;
+    readonly refused: (err: TransactionError, where: string, signature: string) => SettleResult;
+    readonly unconfirmed: (error: unknown, where: string, raw: string, signature?: string) => Promise<SettleResult>;
+  },
+): Promise<SettleResult> {
+  const { inputs, measured, expectation, paid, backlog, applied, passing, carried, refused, unconfirmed } = context;
   if (landed === null) {
     const waited = `${CONFIRM_TIMEOUT_MS / 1_000} s`;
     return unconfirmed(
