@@ -6,6 +6,7 @@
 
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
+import type { CreditGovernor } from "../src/credit-governor.js";
 import { DISCOVERY_STALE_ALERT_KEY } from "../src/discovery-lkg.js";
 import { DOORBELL_DEAF_ALERT_KEY } from "../src/doorbell.js";
 import { decideFleetHealth } from "../src/fleet-status.js";
@@ -432,6 +433,43 @@ describe("the reap, the quotas, the governor", () => {
     await b.scheduler.tick();
     expect(report).toMatchObject({ kind: "acted", quotaWorkers: 2 });
     expect(handOuts).toBe(1);
+  });
+});
+
+describe("the credit governor's lever reaches the vaults the workers rest (ADR §3.9)", () => {
+  it("at a stretched 60-minute pass every resting vault is turned once an hour by the rotation, not every 30 minutes by its own due time", async () => {
+    const SLOW_TICK = 15 * 60_000;
+    // 200 links: the safety slice's floor of 50 a tick is then exactly the pass's share, 200 × 15 / 60.
+    const r = rig(200);
+    r.store.webhookOwner = "scheduler";
+    const governor = {
+      safetyPassMs: 60 * 60_000,
+      verdict: null,
+      evaluate: async () => ({ alert: { fire: null, clear: false } }),
+    } as unknown as CreditGovernor;
+    const s = scheduler(r, "A", { doorbellSecret: true, governor, tickMs: SLOW_TICK });
+    const turns = new Map<string, number>();
+    /** The workers: every free due vault is claimed, and its job rests (completionFor's due time). */
+    const work = (): void => {
+      for (const [vault, row] of r.store.rows) {
+        if (row.system !== "queue" || row.held || row.dueAt > r.store.now) continue;
+        r.store.complete(vault, { claimedAt: r.store.now, doneAt: r.store.now, rests: true });
+        turns.set(vault, (turns.get(vault) ?? 0) + 1);
+      }
+    };
+    const tick = async (): Promise<void> => {
+      // A TRUSTED DOORBELL that rang nobody: only the safety slice selects.
+      r.store.evidence = { lastBellAt: r.store.now - 1, lastEchoAt: null, deafSince: null };
+      expect(await s.scheduler.tick()).toMatchObject({ kind: "acted" });
+      work();
+      r.store.now += SLOW_TICK;
+    };
+    await tick(); // the takeover's full pass
+    await tick();
+    turns.clear();
+    for (let i = 0; i < 8; i++) await tick(); // two hours
+    expect(turns.size).toBe(200);
+    expect(new Set(turns.values())).toEqual(new Set([2]));
   });
 });
 

@@ -70,14 +70,25 @@ import type { OwnerHistoryReader, PolicyBoundaryBook } from "./policy-boundary.j
 import type { SolanaWalletSubmitter } from "./privy-signer.js";
 import type { InvestmentRow, SettlementRow } from "./read-model.js";
 import type { RestBook } from "./rest-book.js";
+import { SAFETY_PASS_STEPS_MS } from "./credit-governor.js";
 import { keeperModeFor } from "./role-registry.js";
 import { activeBps, settleRetryStreak, type CarryBook } from "./settle-decision.js";
 import { settleModuleFor } from "./settle-modules.js";
 import { runSettleTick, type SettleDeps, type SettleResult } from "./settle-tick.js";
 import { legOutbox, resolvePriorIntents, waitForPlanFloor, type TakeoverStore } from "./worker-takeover.js";
 
-/** The 30-minute safety rotation: a vault that rests is due again then, unless a bell comes first (ADR §3.8). */
-export const REST_DUE_SECONDS = 30 * 60;
+/**
+ * A vault that rests is due again — as a BACKSTOP — after the longest safety
+ * pass the credit governor can set (SAFETY_PASS_STEPS_MS: 120 minutes). WHEN it
+ * is turned is the scheduler's: the safety slice rotates every queue link once a
+ * pass at the pass the governor allows NOW (30, 60 or 120 minutes), and a bell,
+ * a new link or a full pass brings it forward sooner; a due time only ever moves
+ * earlier (src/scheduler-pg.ts). A backstop at the 30-minute default — what Q3
+ * first wrote — turned every resting vault every 30 minutes whatever the pass,
+ * so stretching it to 60 or 120 minutes (the credit-burn lever, ADR §3.9) saved
+ * nothing on the vaults the workers had completed.
+ */
+export const REST_DUE_SECONDS = Math.max(...SAFETY_PASS_STEPS_MS) / 1_000;
 /** The longest a job waits for its plan floor before it completes and comes back: one blockhash life plus finality. */
 export const PLAN_FLOOR_WAIT_MAX_MS = 90_000;
 /** A refused basket waits 5 minutes, doubling with each refusal in a row, to an hour (ADR §3.7). */

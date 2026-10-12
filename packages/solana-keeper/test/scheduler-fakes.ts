@@ -13,6 +13,7 @@ import type { Lane } from "../src/dispatch-store.js";
 import { LANE_PRIORITY } from "../src/dispatch-store.js";
 import type { FleetRead, HookEvidence, LinkRow, LockState, ParkedVault, SchedulerLock, StaleIntent, VaultSystem, WebhookOwner, WorkRow } from "../src/scheduler-pg.js";
 import type { InvestRestVerdict, SchedulerChain, SchedulerStore } from "../src/scheduler.js";
+import { REST_DUE_SECONDS } from "../src/worker-job.js";
 
 /** One advisory lock, shared by every FakeLock built over it: the database's side. */
 export class LockServer {
@@ -102,7 +103,8 @@ export class MemoryStore implements SchedulerStore {
     row.held = false;
     row.lane = input.lane ?? (input.rests ? "safety" : "retry");
     row.priority = LANE_PRIORITY[(row.lane as Lane) ?? "safety"] ?? 4;
-    row.dueAt = input.dueAt ?? input.doneAt + 30 * 60_000;
+    // A RESTING JOB'S DUE TIME IS THE WORKER'S BACKSTOP (src/worker-job.ts, REST_DUE_SECONDS).
+    row.dueAt = input.dueAt ?? input.doneAt + (input.rests ? REST_DUE_SECONDS * 1_000 : 30 * 60_000);
   }
 
   async readFleet(): Promise<FleetRead> {

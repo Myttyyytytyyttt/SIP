@@ -15,6 +15,7 @@ import type { JobChain } from "../src/job-chain.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
+import { SAFETY_PASS_STEPS_MS } from "../src/credit-governor.js";
 import { REST_DUE_SECONDS, completionFor, readStreaks, runVaultJob } from "../src/worker-job.js";
 import { secondsUntilFinalizedPasses } from "../src/worker-takeover.js";
 import { MemoryDb, MemoryDispatchStore } from "./memory-dispatch-store.js";
@@ -361,6 +362,21 @@ describe("the rest of the job", () => {
     if (end.kind !== "complete") return;
     expect(end.completion).toMatchObject({ rests: false, lane: "busy", dueInSeconds: 0 });
     expect(end.report.settles).toEqual([]);
+  });
+});
+
+describe("a resting vault's next turn is the scheduler's, at whatever pass the credit governor allows", () => {
+  it("its due time is only a backstop, past the longest pass the governor can set, so stretching the pass saves turns", () => {
+    const resting = completionFor({
+      settles: [{ link: "L", wallet: "W", outcome: "IDLE", detail: "IDLE" }],
+      invest: { outcome: "IDLE", detail: "" },
+      wrapShort: false,
+      previous: readStreaks({}),
+      unfinished: false,
+    });
+    expect(resting.rests).toBe(true);
+    for (const pass of SAFETY_PASS_STEPS_MS) expect(resting.dueInSeconds * 1_000, `pass ${pass / 60_000} min`).toBeGreaterThanOrEqual(pass);
+    expect(resting.dueInSeconds).toBe(120 * 60);
   });
 });
 

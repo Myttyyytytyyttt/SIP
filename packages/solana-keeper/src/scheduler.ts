@@ -49,9 +49,12 @@
 // legacy keeper turned it every sweep; here its job's COMPLETE already set when
 // it is due again, by outcome (ADR §3.7: 15 s for finality, 60 s for a retry, 10
 // minutes for a missing signer, 5 for a refusal), and the scheduler leaves that
-// alone. A vault that RESTS is due again when its job said — the safety pass —
-// and the scheduler brings it forward for a bell, a new link, a full pass or the
-// safety slice. A due time only ever moves earlier (src/scheduler-pg.ts).
+// alone. A vault that RESTS has only a BACKSTOP from its job — the longest pass
+// the credit governor can set (src/worker-job.ts, REST_DUE_SECONDS) — and the
+// scheduler brings it forward for a bell, a new link, a full pass or the safety
+// slice, which rotates at the pass the governor allows now: a backstop at the
+// default pass would have turned every resting vault every 30 minutes whatever
+// the governor said. A due time only ever moves earlier (src/scheduler-pg.ts).
 //
 // ONE TICK AT A TIME: an overrunning tick makes the next one a skip, counted;
 // a skip does not move /health's clock, a tick that runs does. A tick blocked on
