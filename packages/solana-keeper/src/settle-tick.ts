@@ -144,7 +144,8 @@ export interface SettleDeps {
    */
   readonly protocolPaused: boolean;
   /**
-   * The modes THIS keeper settles, keeperModes(role) in production: exactly one.
+   * The modes THIS keeper settles, its role profile's `settles` in production
+   * (src/role-registry.ts): exactly one.
    * REQUIRED, like the mode in MeasurementContext: a default could hand a VOLUME
    * vault to the profit keeper, and two keepers would settle one link.
    */

@@ -89,14 +89,15 @@ import {
 import { SolanaReadModel } from "../src/read-model.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { seatCheck, seatCheckNotice } from "../src/seat-check.js";
-import { activeBps, keeperModes, measurementStart, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
-import { runSettleTick, type SettleOutcome } from "../src/settle-tick.js";
+import { activeBps, measurementStart, settleAlert, settleThrewAlert, type CarryBook } from "../src/settle-decision.js";
+import { runSettleTick, type SettleDeps, type SettleOutcome } from "../src/settle-tick.js";
 import { loadLocalSigners, type LocalSigners } from "../src/signers.js";
-import { KeeperClaim, advisoryKeyFor, lockNameFor } from "../src/singleton.js";
+import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
-import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+import { MODE_PROFIT } from "../src/program-scripts.js";
+import { measuredBase, resolvesSignerFor, roleProfile, unreachable } from "../src/role-registry.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
 import { computeLeaderboard } from "../src/leaderboard.js";
@@ -179,6 +180,16 @@ try {
 // never read; armed, config.ts already holds what it needs.
 for (const name of SIGNING_SECRET_VARS) delete process.env[name];
 for (const warning of config.warnings) log.warn("configuration warning", { detail: warning });
+
+/**
+ * WHAT THIS KEEPER DOES, AS DATA (src/role-registry.ts). Every place below that
+ * differs between the keepers reads it here — the alert prefix, the lock, the
+ * crank alert, whose signer is resolved, which modes are settled and measured
+ * how, who invests, the banner — rather than comparing the role to a literal.
+ * A two-way comparison sends any role it was not written for into its else
+ * branch, which here was the profit keeper's: its lock, its settles, its buying.
+ */
+const profile = roleProfile(config.role);
 
 const programId = new PublicKey(config.programId);
 const TRADING_LINK_DISC = accountDiscriminator("TradingLink");
@@ -293,8 +304,9 @@ const alerter = createAlerter({
   minSeverity: config.alertMinSeverity,
   destination: config.alertChatId === null ? { kind: "webhook" } : { kind: "telegram", chatId: config.alertChatId },
   links: { statusUrl: config.statusUrl },
-  // THE VOLUME KEEPER SAYS WHO IT IS in the one chat both keepers send to.
-  ...(config.role === "volume" ? { titlePrefix: "[volume] " } : {}),
+  // A KEEPER OTHER THAN THE PROFIT ONE SAYS WHO IT IS in the one chat both keepers
+  // send to (its profile's alertTitlePrefix; the profit keeper's titles go as fired).
+  ...(profile.alertTitlePrefix === null ? {} : { titlePrefix: profile.alertTitlePrefix }),
   log: (severity, line) => log[severity === "critical" ? "error" : "warn"](`alert ${severity}`, { detail: line }),
   // THE BODY LEAVES THE BOX, SO IT PASSES WHAT A LOG LINE PASSES. alerts.ts
   // builds its webhook payload itself and POSTs it raw; only the line above goes
@@ -907,9 +919,9 @@ const claim: KeeperClaim = new KeeperClaim({
   // operator running two armed instances without one should know it is on them.
   unenforced: !readModel.enabled,
   attempt: () =>
-    // EACH ROLE ITS OWN LOCK (lockNameFor): the volume keeper never waits on, or
-    // takes over, the profit keeper's.
-    readModel.claimSingleton(advisoryKeyFor(lockNameFor(config.role)), () => {
+    // EACH ROLE ITS OWN LOCK (its profile's lockName): the volume keeper never waits
+    // on, or takes over, the profit keeper's.
+    readModel.claimSingleton(advisoryKeyFor(profile.lockName), () => {
       claim.release();
       // /status stops saying "live" now, not at the next sweep. The remaining
       // turns of a sweep in progress ask isLive() again and act dry.
@@ -931,7 +943,7 @@ const claim: KeeperClaim = new KeeperClaim({
 });
 
 const liveBlocker = (): string | null =>
-  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: lockNameFor(config.role) });
+  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName });
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
 
@@ -1291,9 +1303,9 @@ async function sweep(): Promise<void> {
     // green. Read from config.keeper's balance, reported in /status, and warned
     // about BEFORE it bites.
     const keeperKey = health.crank.pubkey;
-    // THE PROFIT KEEPER'S CONDITION: it is the one that spends the crank. The volume
-    // keeper holds the same key and never cranks, so it does not page for it too.
-    if (config.role === "profit" && keeperKey !== null && snapshot.crankLamports !== null) {
+    // THE PROFIT KEEPER'S CONDITION (crankAlert): it is the one that spends the crank.
+    // The volume keeper holds the same key and never cranks, so it does not page for it too.
+    if (profile.crankAlert && keeperKey !== null && snapshot.crankLamports !== null) {
       const crankLamports = snapshot.crankLamports;
       if (crankLamports < 20_000_000n) {
         changes.change("crank-balance", "crank is running low — investing stops when it empties", { crank: keeperKey, lamports: crankLamports });
@@ -1379,8 +1391,9 @@ async function sweep(): Promise<void> {
         let route = "not resolved (dry run)";
         // THE VOLUME KEEPER RESOLVES NO SIGNER FOR A VAULT IT DOES NOT SETTLE: it would
         // only repeat the profit keeper's seat alerts for the same wallet and spend
-        // Privy calls on a turn that stops at the mode. Unread vaults are resolved.
-        const settlesThisVault = config.role === "profit" || vaults === null || vaults.get(vaultAddr)?.skimMode === MODE_VOLUME;
+        // Privy calls on a turn that stops at the mode. Unread vaults are resolved, by
+        // every keeper; the rest is the profile's signerScope (resolvesSignerFor).
+        const settlesThisVault = vaults === null || resolvesSignerFor(profile, vaults.get(vaultAddr)?.skimMode);
         if (config.signing !== null && !settlesThisVault) route = "not resolved (the profit keeper settles this vault)";
         if (config.signing !== null && settlesThisVault) {
           walletSigner = localSigners?.signers.get(wallet) ?? null;
@@ -1477,9 +1490,18 @@ async function sweep(): Promise<void> {
         // counts what each transaction traded (src/measure-volume.ts), the base
         // charges what came after the last change of mode or rate at the vault's
         // cadence (src/volume-base.ts). The profit keeper passes neither.
-        const volumeTurn =
-          config.role === "volume" && vaultState !== null && vaultState.skimMode === MODE_VOLUME
-            ? {
+        // WHICH ONE A TURN GETS is the vault's mode's base source, and only when this
+        // keeper's profile settles that mode (measuredBase): a vault it does not
+        // settle stops at the mode before anything is measured.
+        let volumeTurn: Pick<SettleDeps, "volumeProbe" | "volumeBase"> = {};
+        if (vaultState !== null) {
+          const base = measuredBase(profile, vaultState.skimMode);
+          switch (base) {
+            case null:
+            case "balance-chain":
+              break;
+            case "trade-notional":
+              volumeTurn = {
                 volumeProbe: tradeNotional,
                 volumeBase: createVolumeBase({
                   volumeBps: vaultState.volumeBps,
@@ -1494,8 +1516,12 @@ async function sweep(): Promise<void> {
                     }),
                   nowSeconds: () => Date.now() / 1000,
                 }),
-              }
-            : {};
+              };
+              break;
+            default:
+              unreachable(base);
+          }
+        }
         const settle = await runSettleTick({
           connection,
           program,
@@ -1506,8 +1532,8 @@ async function sweep(): Promise<void> {
           live: settleTurn.live,
           protocolPaused,
           carries: settleCarries,
-          // EXACTLY ONE KEEPER SETTLES EACH MODE (keeperModes).
-          settles: keeperModes(config.role),
+          // EXACTLY ONE KEEPER SETTLES EACH MODE (its profile's settles).
+          settles: profile.settles,
           ...volumeTurn,
           walkCache,
         });
@@ -1621,12 +1647,18 @@ async function sweep(): Promise<void> {
         // Its /status row says what it did instead: a VOLUME vault's settle, or a
         // PROFIT vault's preview of what VOLUME mode would charge.
         investing: {
-        if (config.role === "volume") {
+        if (!profile.invests) {
           let detail = settle.detail;
-          // THE PREVIEW IS A DRY RUN'S ONLY. It walks a span the profit keeper
-          // settles, on the same Helius account; an acting volume keeper's job is to
-          // settle VOLUME vaults, and it does not spend reads describing the others.
-          if (!settleTurn.live && vaultState !== null && vaultState.skimMode === MODE_PROFIT && settle.outcome === "UNSUPPORTED_MODE") {
+          // THE PREVIEW IS A DRY RUN'S ONLY (dryRunPreview). It walks a span the profit
+          // keeper settles, on the same Helius account; an acting volume keeper's job is
+          // to settle VOLUME vaults, and it does not spend reads describing the others.
+          if (
+            profile.dryRunPreview &&
+            !settleTurn.live &&
+            vaultState !== null &&
+            vaultState.skimMode === MODE_PROFIT &&
+            settle.outcome === "UNSUPPORTED_MODE"
+          ) {
             try {
               detail = await previewVolume({ connection, program, link, vault: vaultState, book: volumePreviews });
               // AND THE LAST SETTLED WINDOW: the pending span is usually empty, because
@@ -1638,7 +1670,7 @@ async function sweep(): Promise<void> {
             }
           }
           doorTurn = { settle: settle.outcome, invest: null };
-          health.wallets[wallet] = { settle: settle.outcome, invest: "none (volume keeper)", signing: route, detail, at: new Date().toISOString() };
+          health.wallets[wallet] = { settle: settle.outcome, invest: profile.notInvesting, signing: route, detail, at: new Date().toISOString() };
           break investing;
         }
         // Asked again: the settle turn above can take long enough for the claim
@@ -1987,7 +2019,7 @@ log.info("keeper starting", {
   attester: health.config?.attester ?? null,
   crank: health.crank.pubkey,
   config: health.config === null ? (initial.configReadable ? "does not exist" : "unreadable") : "read",
-  role: config.role === "volume" ? "volume keeper — settles VOLUME vaults only, never invests" : "profit keeper — settles PROFIT vaults, invests every vault",
+  role: profile.banner,
   endpoints: config.rpcUrls.length,
   sweepMs: config.sweepMs,
   pools: config.pools.size,

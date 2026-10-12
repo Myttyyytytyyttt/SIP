@@ -35,6 +35,7 @@ import { accountDiscriminator, idl } from "../src/idl.js";
 import { assertSettleShape, type SolanaWalletSubmitter } from "../src/privy-signer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION, WalkCache } from "../src/measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, attestationMessage } from "../src/program-scripts.js";
+import { KEEPER_ROLES, rolesSettling } from "../src/role-registry.js";
 import { attestationInputs, keeperModes, type CarryBook, type LossCarry } from "../src/settle-decision.js";
 import { CONFIRM_POLL_MS, CONFIRM_TIMEOUT_MS, runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
 import { createVolumeBase } from "../src/volume-base.js";
@@ -245,6 +246,26 @@ describe("one keeper per mode, before any RPC call", () => {
         expect(result.detail).toMatch(says);
         expect(c.calls, `${role} keeper, live ${live}`).toEqual([]);
         expect(c.sent).toEqual([]);
+      }
+    }
+  });
+
+  // THE REGISTRY'S OTHER HALF (src/role-registry.ts): a byte no profile settles —
+  // today every byte above VOLUME, tomorrow a new mode before its profile ships —
+  // stops every keeper before its first request, live or dry, and nothing is signed.
+  it("registry: a byte no profile serves is UNSUPPORTED_MODE before any RPC", async () => {
+    for (const role of KEEPER_ROLES) {
+      for (const skimMode of [2, 3, 7, 255]) {
+        expect(rolesSettling(skimMode), `skim_mode ${skimMode}`).toEqual([]);
+        for (const live of [true, false]) {
+          const c = chain();
+          const result = await runSettleTick(
+            c.deps({ settles: keeperModes(role), vault: { ...vault, skimMode }, ...(live ? {} : { live: false, attester: null, walletSigner: null }) }),
+          );
+          expect(result.outcome, `${role} keeper, skim_mode ${skimMode}, live ${live}`).toBe("UNSUPPORTED_MODE");
+          expect(c.calls, `${role} keeper, skim_mode ${skimMode}, live ${live}`).toEqual([]);
+          expect(c.sent).toEqual([]);
+        }
       }
     }
   });

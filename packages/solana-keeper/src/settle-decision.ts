@@ -25,6 +25,10 @@ import type { Alert } from "./alerts.js";
 import type { ManagedLink } from "./discovery.js";
 import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, SIGNATURE_PAGE_LIMIT, type WindowMeasurement } from "./measure-window.js";
 import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "./program-scripts.js";
+import { ROLE_PROFILES, keeperModeFor, rolesSettling, type KeeperRole } from "./role-registry.js";
+
+/** Which keeper this process is: SIP_SOLANA_ROLE (config.ts). Its profile is src/role-registry.ts's. */
+export type { KeeperRole } from "./role-registry.js";
 
 export type SettleOutcome =
   /** Nothing new since the frontier. The resting state of a linked wallet. */
@@ -161,7 +165,10 @@ export function modeDecision(
   vault: Pick<VaultState, "skimMode">,
   settles: readonly number[],
 ): { readonly outcome: "UNSUPPORTED_MODE"; readonly detail: string } | null {
-  if (vault.skimMode !== MODE_PROFIT && vault.skimMode !== MODE_VOLUME) {
+  // KNOWN MEANS A ROW IN THE MODE REGISTRY (src/role-registry.ts), which holds
+  // exactly the bytes a sip-vault version defines.
+  const mode = keeperModeFor(vault.skimMode);
+  if (mode === null) {
     return {
       outcome: "UNSUPPORTED_MODE",
       detail: `this vault reports skim_mode ${vault.skimMode}, which no sip-vault version defines; nothing is attested`,
@@ -170,28 +177,29 @@ export function modeDecision(
   // ONE KEEPER SETTLES EACH MODE (keeperModes). The other mode's vault is not
   // this keeper's to measure or attest, and it rests here before any RPC call; its
   // savings are still invested by the profit keeper, which invests every vault.
+  // THE KEEPER NAMED IS THE ONE WHOSE PROFILE SETTLES THE BYTE, read from the
+  // registry rather than inferred as "the other one": with two roles the two
+  // readings agree, and with a third only this one is true.
   if (!settles.includes(vault.skimMode)) {
+    const settledBy = rolesSettling(vault.skimMode)[0];
     return {
       outcome: "UNSUPPORTED_MODE",
       detail:
-        vault.skimMode === MODE_VOLUME
-          ? "this vault saves in VOLUME mode, which the volume keeper settles; this keeper does not measure or attest it"
-          : "this vault saves in PROFIT mode, which the profit keeper settles; this keeper does not measure or attest it",
+        settledBy === undefined
+          ? `this vault saves in ${mode.name} mode, which no keeper settles yet; nothing is attested`
+          : `this vault saves in ${mode.name} mode, which the ${settledBy} keeper settles; this keeper does not measure or attest it`,
     };
   }
   return null;
 }
 
-/** Which keeper this process is: SIP_SOLANA_ROLE (config.ts). */
-export type KeeperRole = "profit" | "volume";
-
 /**
- * The modes a keeper of this role settles: EXACTLY ONE EACH, so exactly one
- * service settles each link. The profit keeper also invests every vault; the
- * volume keeper never invests.
+ * The modes a keeper of this role settles: its profile's (src/role-registry.ts).
+ * EXACTLY ONE EACH today, so exactly one service settles each link. The profit
+ * keeper also invests every vault; the volume keeper never invests.
  */
 export function keeperModes(role: KeeperRole): readonly number[] {
-  return role === "volume" ? [MODE_VOLUME] : [MODE_PROFIT];
+  return ROLE_PROFILES[role].settles;
 }
 
 /**

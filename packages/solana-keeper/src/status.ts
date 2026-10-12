@@ -22,6 +22,7 @@ import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
 import { SERVICE } from "./keeper-log.js";
 import type { AuthorizationKeyCheck } from "./privy-authorization-key.js";
+import type { KeeperRole } from "./role-registry.js";
 import type { SeatCheck } from "./seat-check.js";
 
 export interface WalletStatus {
@@ -295,8 +296,8 @@ export interface KeeperStatus {
    * once and then goes quiet, but /status always shows its current condition.
    */
   wallets: Record<string, WalletStatus>;
-  /** Which keeper this is (SIP_SOLANA_ROLE): "profit" or "volume". */
-  role?: "profit" | "volume";
+  /** Which keeper this is (SIP_SOLANA_ROLE): a row of src/role-registry.ts, "profit" or "volume" today. */
+  role?: KeeperRole;
   /** Every loss carried forward and not yet handed on — what a restart would drop. */
   pendingCarries: readonly PendingCarry[];
   /** Folded in at render from the doorbell and its webhook sync, like pendingCarries. */

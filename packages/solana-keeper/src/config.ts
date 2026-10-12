@@ -43,7 +43,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
-import type { KeeperRole } from "./settle-decision.js";
+import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, type KeeperRole } from "./role-registry.js";
 
 /**
  * The literal acknowledgement that arms the keeper. Nothing else does.
@@ -98,11 +98,15 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
  * keeper, and anything else refuses to start. A misspelt role is not a default: a volume
  * service that silently started as a second profit keeper would compete for the
  * profit keeper's lock and invest.
+ *
+ * A ROLE IS A ROW OF THE REGISTRY (src/role-registry.ts), read by exact name and
+ * own keys only — "constructor" is not a keeper — so the value this accepts and
+ * the profile every call site reads can never disagree.
  */
 export function readRole(raw: string | undefined): { readonly role: KeeperRole } | { readonly problem: string } {
   const value = raw?.trim();
-  if (value === undefined || value === "" || value === "profit") return { role: "profit" };
-  if (value === "volume") return { role: "volume" };
+  if (value === undefined || value === "") return { role: DEFAULT_KEEPER_ROLE };
+  if (isKeeperRole(value)) return { role: value };
   return { problem: `SIP_SOLANA_ROLE must be unset or "profit" (the profit keeper), or exactly "volume"; it holds ${shape(value)}.` };
 }
 
@@ -799,25 +803,28 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
 
   // --- which keeper this is ------------------------------------------------------
   const roleRead = readRole(env["SIP_SOLANA_ROLE"]);
-  const role: KeeperRole = "role" in roleRead ? roleRead.role : "profit";
+  const role: KeeperRole = "role" in roleRead ? roleRead.role : DEFAULT_KEEPER_ROLE;
   if ("problem" in roleRead) problems.push(roleRead.problem);
+  const { doorbellAllowed } = ROLE_PROFILES[role];
 
   // --- the doorbell: every value optional, none of them a problem ----------------
-  // THE VOLUME KEEPER RUNS NONE OF IT. The doorbell manages a Helius webhook for
-  // this service's own URL, and one per deployment is the profit keeper's; the
-  // volume keeper turns every link every sweep, as the profit keeper did before it.
+  // ONLY THE ROLE ALLOWED IT RUNS ANY OF IT (doorbellAllowed: the profit keeper).
+  // The doorbell manages a Helius webhook for this service's own URL, and one per
+  // deployment is the profit keeper's; the volume keeper turns every link every
+  // sweep, as the profit keeper did before it.
   const doorbellRead = readDoorbell(env, { rpcEntries, publicDomain, redactor, warnings });
-  const doorbell: typeof doorbellRead =
-    role === "volume" ? { doorbellSecret: null, heliusApiKey: null, heliusApiKeySource: "none", doorbellUrl: null } : doorbellRead;
-  // A DOORBELL SECRET ON A VOLUME KEEPER REFUSES TO START. The profit keeper is the
-  // service that holds one; SIP_SOLANA_ROLE=volume set on IT by mistake would stop
-  // every PROFIT settle and every purchase quietly, each vault resting where no
-  // alert fires. Refused, the new deploy fails its healthcheck and Railway keeps
-  // the one before it running.
-  if (role === "volume" && env["SIP_SOLANA_DOORBELL_SECRET"] !== undefined) {
+  const doorbell: typeof doorbellRead = doorbellAllowed
+    ? doorbellRead
+    : { doorbellSecret: null, heliusApiKey: null, heliusApiKeySource: "none", doorbellUrl: null };
+  // A DOORBELL SECRET ON A ROLE THAT RUNS NO DOORBELL REFUSES TO START. The profit
+  // keeper is the service that holds one; SIP_SOLANA_ROLE=volume set on IT by
+  // mistake would stop every PROFIT settle and every purchase quietly, each vault
+  // resting where no alert fires. Refused, the new deploy fails its healthcheck
+  // and Railway keeps the one before it running.
+  if (!doorbellAllowed && env["SIP_SOLANA_DOORBELL_SECRET"] !== undefined) {
     problems.push(
-      "SIP_SOLANA_ROLE is volume but SIP_SOLANA_DOORBELL_SECRET is set, and only the profit keeper holds that secret: " +
-        "if this is the profit keeper, delete SIP_SOLANA_ROLE; if it is the volume keeper, delete SIP_SOLANA_DOORBELL_SECRET.",
+      `SIP_SOLANA_ROLE is ${role} but SIP_SOLANA_DOORBELL_SECRET is set, and only the profit keeper holds that secret: ` +
+        `if this is the profit keeper, delete SIP_SOLANA_ROLE; if it is the ${role} keeper, delete SIP_SOLANA_DOORBELL_SECRET.`,
     );
   }
 

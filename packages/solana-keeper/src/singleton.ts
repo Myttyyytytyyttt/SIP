@@ -16,21 +16,24 @@
 // That test is the one that would have caught it.
 
 import { createHash } from "node:crypto";
-
-/** The advisory lock's NAME. Its key is derived, never typed as a number. */
-export const KEEPER_LOCK_NAME = "sip-solana-keeper";
+import { ROLE_PROFILES, type KeeperRole } from "./role-registry.js";
 
 /**
- * The volume keeper's lock: ANOTHER NAME, so the two services on one database
- * each hold their own. Under one name the volume keeper would never act while
- * the profit keeper held it, and during a handover it could take the profit
- * keeper's place. Each lock still keeps two replicas of one role from acting.
+ * The advisory locks' NAMES. Their keys are derived, never typed as a number.
+ * They live in the role registry now, beside everything else that differs
+ * between the keepers, and are re-exported here where every reader already
+ * imports them; test/role-registry.test.ts pins both, and their keys, to the
+ * bytes they held before they moved.
  */
-export const VOLUME_KEEPER_LOCK_NAME = "sip-solana-volume-keeper";
+export { KEEPER_LOCK_NAME, VOLUME_KEEPER_LOCK_NAME } from "./role-registry.js";
 
-/** The lock a keeper of this role claims. */
-export function lockNameFor(role: "profit" | "volume"): string {
-  return role === "volume" ? VOLUME_KEEPER_LOCK_NAME : KEEPER_LOCK_NAME;
+/**
+ * The lock a keeper of this role claims: its profile's (src/role-registry.ts).
+ * It used to be "volume, else profit" here, which is the line that would have
+ * handed a third role the profit keeper's lock.
+ */
+export function lockNameFor(role: KeeperRole): string {
+  return ROLE_PROFILES[role].lockName;
 }
 
 /**
