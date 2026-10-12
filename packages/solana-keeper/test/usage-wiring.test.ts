@@ -64,6 +64,23 @@ describe("the Privy meter", () => {
     expect(fallback).toBeLessThan(keeper.indexOf("const resolution = await createPrivySolanaSigner("));
   });
 
+  it("times the privy-address book's prepare as the same phase, and never reports it as an index build", () => {
+    // L1a AND THE CUTS MEET HERE: under privy-address the Privy phase is the
+    // book's prepare. It is still this sweep's Privy time (lastSweepPhaseMs,
+    // turnTimes), but it built no listing, so privy.indexMs and the index
+    // failure counters stay the listing's alone.
+    const start = keeper.indexOf("const privyIndexAt = Date.now();");
+    const block = keeper.slice(start, keeper.indexOf("// THE CRANK PAYS FOR EVERY MOVE", start));
+    const bookAt = block.indexOf("if (privyBook !== null) {");
+    expect(bookAt).toBeGreaterThan(block.indexOf("try {"));
+    expect(bookAt).toBeLessThan(block.indexOf("} finally {"));
+    const book = block.slice(bookAt, block.indexOf("} else {", bookAt));
+    expect(book).toContain("await privyBook.prepare(resolving, Date.now());");
+    expect(book).not.toContain("indexBuilt");
+    expect(block).toContain("let indexBuilt: boolean | null = null;");
+    expect(block.slice(block.indexOf("} finally {"))).toContain("if (indexBuilt !== null) privyUsage.indexBuilt(privyIndexMs, indexBuilt);");
+  });
+
   it("counts a settle signature from the settle's own report of its send, by mode", () => {
     expect(keeper).toContain("onSend: noteSettleSend,");
     const note = body("function noteSettleSend(");
