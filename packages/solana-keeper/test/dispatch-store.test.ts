@@ -726,7 +726,7 @@ describe("DARK: nothing a legacy keeper runs imports the store", () => {
     expect(importsStore("// SCHEDULER_POOL_MAX in src/dispatch-store.ts")).toBe(false);
   });
 
-  it("is imported by no file under src/ or bin/", () => {
+  it("is imported by no file under src/ or bin/ but the dispatcher's own workers (Q3)", () => {
     const importers: string[] = [];
     for (const dir of ["src", "bin"]) {
       for (const name of readdirSync(fileURLToPath(new URL(`${dir}/`, PACKAGE)))) {
@@ -734,6 +734,8 @@ describe("DARK: nothing a legacy keeper runs imports the store", () => {
         if (importsStore(source(`${dir}/${name}`))) importers.push(`${dir}/${name}`);
       }
     }
-    expect(importers).toEqual([]);
+    // THE WORKER'S JOB, LOOP, FENCE AND TAKEOVER, AND ITS ENTRY POINT — each of them dark itself
+    // (test/dispatch-dark.test.ts walks every legacy entry point's graph and finds none of them).
+    expect(importers.sort()).toEqual(["bin/worker.mts", "src/fenced-sender.ts", "src/worker-job.ts", "src/worker-loop.ts", "src/worker-takeover.ts"]);
   });
 });

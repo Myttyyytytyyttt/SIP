@@ -48,6 +48,16 @@
 // NOTHING HERE DECIDES WHAT TO BUY, and nothing here holds a key of its own: the
 // crank is handed in per send, as it was handed to Anchor. Moving the Keypair
 // itself behind this seam is the dispatcher's fenced sender (ADR §3.6, P3).
+//
+// AND THE DISPATCHER'S FENCE ASKS HERE TOO, ONLY WHEN A WORKER HANDS ONE IN
+// (`gate`, src/fenced-sender.ts; ADR §3.6, §4.4 F1). The order becomes P2's
+// order plus the store's gate — blockhash → build → sign → ASK → GATE → send
+// the signed bytes → poll — so the one crank sendRawTransaction in the keeper
+// stays this file's, and a worker cannot send around its fence. The gate sees
+// the signed transaction after the three questions above and before the bytes
+// leave; a gate that throws drops them. Every legacy keeper builds its sender
+// without one (bin/keeper.mts), and without one this file sends exactly as it
+// did: the same requests in the same order, the same counters, the same words.
 
 import {
   type Commitment,
@@ -78,8 +88,11 @@ const HEIGHT_EVERY_POLLS = 4;
  */
 export const SEND_WATCH_CEILING_MS = 120_000;
 
-/** Why a send was not made. Every one of them is BEFORE the bytes leave: nothing was sent. */
-export type SendRefusalReason = "not-live" | "quiet" | "draining";
+/**
+ * Why a send was not made. Every one of them is BEFORE the bytes leave: nothing was sent.
+ * `fenced` is the dispatcher's gate's (CrankSendGate), and only a worker's sender has one.
+ */
+export type SendRefusalReason = "not-live" | "quiet" | "draining" | "fenced";
 
 /**
  * A crank send this process refused to make. Thrown AFTER the transaction was
@@ -115,6 +128,44 @@ export interface CrankSenderStatus {
   readonly drain: { readonly startedAt: string; readonly inFlightAtStart: number; readonly waitedMs: number | null; readonly completed: boolean | null } | null;
 }
 
+/**
+ * One crank send as the dispatcher's fence is shown it: SIGNED, with the
+ * blockhash it was signed over and that blockhash's last valid block height,
+ * and NOT YET SENT. The first signature is the transaction's id.
+ */
+export interface SignedCrankSend {
+  readonly transaction: Transaction | VersionedTransaction;
+  readonly blockhash: string;
+  readonly lastValidBlockHeight: number;
+}
+
+/**
+ * How a send that LEFT ended, as the watch below saw it:
+ *   * landed   — confirmed with no error;
+ *   * reverted — confirmed with an error: it landed and changed nothing;
+ *   * expired  — the finalized height passed its last valid block height
+ *                without it: it never landed and never will;
+ *   * unknown  — the node refused the bytes or never answered, or the watch
+ *                ran out of time first: it may still land, until its last
+ *                valid block height says otherwise.
+ */
+export type CrankSendEnd = "landed" | "reverted" | "expired" | "unknown";
+
+/** What a gate hands back for bytes it let through: told once how the send ended. */
+export interface CrankSendTicket {
+  ended(end: CrankSendEnd): void | Promise<void>;
+}
+
+/**
+ * The dispatcher's fence (src/fenced-sender.ts): asked after the three questions
+ * and before the bytes leave. It resolves a ticket to let them go, and throws —
+ * CrankSendRefused("fenced", …) for a refusal it can name — to drop them. A
+ * throw of any kind sends nothing.
+ */
+export interface CrankSendGate {
+  admit(send: SignedCrankSend): Promise<CrankSendTicket>;
+}
+
 /** The wallet Anchor's provider signs with: the second signature on every crank transaction, as Anchor adds it. */
 export interface SigningWallet {
   readonly publicKey: PublicKey;
@@ -131,6 +182,12 @@ export interface CrankSenderOptions {
   readonly now?: () => number;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly quietMs?: number;
+  /**
+   * THE DISPATCHER'S FENCE, a worker's only (CrankSendGate). Absent — as every
+   * legacy keeper leaves it — nothing is asked between the three questions and
+   * the send.
+   */
+  readonly gate?: CrankSendGate;
 }
 
 /**
@@ -146,6 +203,7 @@ export class CrankSender {
   readonly #now: () => number;
   readonly #sleep: (ms: number) => Promise<void>;
   readonly #quietMs: number;
+  readonly #gate: CrankSendGate | undefined;
   /** A NEW PROCESS IS A NEW HOLDER: the quiet period starts at construction, as at every takeover. */
   #quietUntil: number;
   #draining = false;
@@ -163,6 +221,7 @@ export class CrankSender {
     this.#now = options.now ?? (() => Date.now());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#quietMs = options.quietMs ?? QUIET_AFTER_TAKEOVER_MS;
+    this.#gate = options.gate;
     this.#quietUntil = this.#now() + this.#quietMs;
   }
 
@@ -236,7 +295,7 @@ export class CrankSender {
     transaction.recentBlockhash = blockhash;
     for (const signer of signers) transaction.partialSign(signer);
     const signed = await this.#wallet.signTransaction(transaction);
-    return this.#sendSigned(signed.serialize(), lastValidBlockHeight);
+    return this.#sendSigned(signed.serialize(), signed, blockhash, lastValidBlockHeight);
   }
 
   /**
@@ -250,7 +309,7 @@ export class CrankSender {
     const transaction = build(blockhash);
     transaction.sign([...signers]);
     const signed = await this.#wallet.signTransaction(transaction);
-    return this.#sendSigned(signed.serialize(), lastValidBlockHeight);
+    return this.#sendSigned(signed.serialize(), signed, blockhash, lastValidBlockHeight);
   }
 
   /** The question between "signed" and "sent". A refusal throws here, and the bytes go nowhere. */
@@ -272,21 +331,48 @@ export class CrankSender {
     }
   }
 
-  async #sendSigned(raw: Buffer | Uint8Array, lastValidBlockHeight: number): Promise<string> {
+  async #sendSigned(
+    raw: Buffer | Uint8Array,
+    signed: Transaction | VersionedTransaction,
+    blockhash: string,
+    lastValidBlockHeight: number,
+  ): Promise<string> {
     this.#ask();
     this.#inFlight += 1;
+    /** Handed back by the fence, when there is one and it let these bytes through. */
+    let ticket: CrankSendTicket | null = null;
+    /** How the send ended, for the ticket: unknown until the watch says otherwise. */
+    let end: CrankSendEnd = "unknown";
     try {
+      // THE FENCE, INSIDE THE IN-FLIGHT COUNT: a drain waits for a gate that has
+      // begun as it waits for a send. Its throw is the refusal, and the bytes go
+      // nowhere. `raw` IS `signed` serialized: the bytes the fence judged.
+      if (this.#gate !== undefined) ticket = await this.#gate.admit({ transaction: signed, blockhash, lastValidBlockHeight });
       // ANCHOR'S OWN SEND OPTIONS, so the request is the one it made: preflight
       // at the provider's commitment, no skip, no retry override.
       const signature = await this.#connection.sendRawTransaction(raw, { preflightCommitment: "confirmed" });
       this.#counts.sent += 1;
       const sentAt = this.#now();
-      const status = await this.#watch(signature, lastValidBlockHeight);
-      if (status.err !== null) {
+      const watched = await this.#watch(signature, lastValidBlockHeight);
+      if (watched.kind === "expired") {
+        end = "expired";
+        this.#counts.expired += 1;
+        throw new Error(
+          `crank transaction ${signature} did not land: the finalized block height ${watched.height} has passed its last valid ` +
+            `block height ${lastValidBlockHeight}, so it never will`,
+        );
+      }
+      if (watched.kind === "ceiling") {
+        this.#counts.expired += 1;
+        throw new Error(`crank transaction ${signature} was not confirmed within ${SEND_WATCH_CEILING_MS / 1_000} s`);
+      }
+      if (watched.err !== null) {
+        end = "reverted";
         this.#counts.reverted += 1;
         // ANCHOR'S WORDING, so a FAILED detail reads the same either way.
-        throw new Error(`Raw transaction ${signature} failed (${JSON.stringify({ err: status.err })})`);
+        throw new Error(`Raw transaction ${signature} failed (${JSON.stringify({ err: watched.err })})`);
       }
+      end = "landed";
       this.#counts.landed += 1;
       try {
         this.#onConfirmed?.(this.#now() - sentAt);
@@ -295,6 +381,16 @@ export class CrankSender {
       }
       return signature;
     } finally {
+      // TOLD BEFORE THE IN-FLIGHT COUNT DROPS, so a drain that waits for idle
+      // also waits for the fence to have heard how its send ended. Its throw is
+      // its own: the send's outcome above is already decided.
+      if (ticket !== null) {
+        try {
+          await ticket.ended(end);
+        } catch {
+          // The fence's record of the end is the fence's to keep; a successor resolves what it could not.
+        }
+      }
       this.#inFlight -= 1;
       if (this.#inFlight === 0) for (const wake of this.#idleWaiters.splice(0)) wake();
     }
@@ -311,27 +407,23 @@ export class CrankSender {
    * Inside the window the status is asked without history (standard credit);
    * once past it, once WITH history, before "expired" is said.
    */
-  async #watch(signature: string, lastValidBlockHeight: number): Promise<{ readonly err: SignatureStatus["err"] }> {
+  async #watch(
+    signature: string,
+    lastValidBlockHeight: number,
+  ): Promise<{ readonly kind: "seen"; readonly err: SignatureStatus["err"] } | { readonly kind: "expired"; readonly height: number } | { readonly kind: "ceiling" }> {
     const deadline = this.#now() + SEND_WATCH_CEILING_MS;
     for (let poll = 1; ; poll++) {
       const seen = await this.#status(signature, false);
-      if (seen !== null) return seen;
+      if (seen !== null) return { kind: "seen", err: seen.err };
       if (poll % HEIGHT_EVERY_POLLS === 0) {
         const height = await this.#height("finalized");
         if (height !== null && height > lastValidBlockHeight) {
           const last = await this.#status(signature, true);
-          if (last !== null) return last;
-          this.#counts.expired += 1;
-          throw new Error(
-            `crank transaction ${signature} did not land: the finalized block height ${height} has passed its last valid ` +
-              `block height ${lastValidBlockHeight}, so it never will`,
-          );
+          if (last !== null) return { kind: "seen", err: last.err };
+          return { kind: "expired", height };
         }
       }
-      if (this.#now() >= deadline) {
-        this.#counts.expired += 1;
-        throw new Error(`crank transaction ${signature} was not confirmed within ${SEND_WATCH_CEILING_MS / 1_000} s`);
-      }
+      if (this.#now() >= deadline) return { kind: "ceiling" };
       await this.#sleep(SEND_POLL_MS);
     }
   }

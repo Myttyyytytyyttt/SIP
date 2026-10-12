@@ -66,7 +66,9 @@ import {
   SLOT_USER_TRANSFER_AUTHORITY,
 } from "@sip/solana-program/jupiter-route";
 import { runSettleTick } from "../src/settle-tick.js";
+import { JobFence } from "../src/fenced-sender.js";
 import { FakeLedger, chained } from "./fake-ledger.js";
+import { MemoryDb, MemoryDispatchStore } from "./memory-dispatch-store.js";
 
 // THE SETTLE TICK ITSELF, NOT ONE KEEPER'S SHARE OF IT: these turns settle both modes, as one keeper did before
 // SIP_SOLANA_ROLE split them (keeperModes pins that split on its own).
@@ -2930,6 +2932,83 @@ describe("the ticks' first steps, over the same bytes", () => {
       expect(held.detail).toContain("draining after SIGTERM");
       expect(urls).toHaveLength(0);
       expect(vault.raw).toHaveLength(0);
+    });
+
+    // ── the dispatcher's fenced sender: the same sender plus the job's gate (src/fenced-sender.ts) ──
+    //
+    // A worker hands runInvestTick a CrankSender whose gate is its job's fence.
+    // Through a WHOLE turn: the four transactions are today's bytes, and each one
+    // left only after its intent row was committed — wrap, convert, then each leg.
+    /** The vault claimed by a worker in the store model, and that job's fence. */
+    async function fenced(chainVault: PublicKey, mayAct: () => string | null = () => null) {
+      const db = new MemoryDb();
+      db.addVault(chainVault.toBase58());
+      const store = new MemoryDispatchStore(db, "worker-a");
+      const [claimed] = await store.claim(1);
+      const fence = new JobFence({ store, vault: chainVault.toBase58(), fence: claimed!.fence, planClearedHeight: null, programId, confirmedHeight: async () => 0n, mayAct });
+      return { db, store, fence };
+    }
+
+    it("the fenced sender: today's four transactions, byte for byte, each gated — wrap, convert, leg, leg — before it leaves", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      const today = await runInvestTick(vault.deps);
+      const todayBytes = [...vault.raw];
+      expect(today.outcome).toBe("INVESTED");
+
+      vault.reset();
+      const job = await fenced(vault.deps.vault);
+      const wallet = (vault.deps.program.provider as anchor.AnchorProvider).wallet;
+      const rowsAtSend: number[] = [];
+      const watched = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          if (prop !== "sendRawTransaction") return value;
+          return async (...args: unknown[]) => (rowsAtSend.push(job.db.intents.length), (value as (...a: unknown[]) => Promise<string>)(...args));
+        },
+      }) as Connection;
+      const sender = new CrankSender({ connection: watched, wallet, isLive: () => true, quietMs: 0, gate: job.fence.crankGate() });
+      const result = await runInvestTick({ ...vault.deps, sender });
+      expect(result.outcome).toBe("INVESTED");
+      expect(vault.raw).toEqual(todayBytes);
+      expect(rowsAtSend).toEqual([1, 2, 3, 4]);
+      expect(job.db.intents.map((row) => row.kind)).toEqual(["wrap", "convert", "invest", "invest"]);
+      expect(job.db.intents.every((row) => row.fence === 1n && row.signature !== null)).toBe(true);
+      // THE TWO LEGS LANDED AND WAIT FOR THEIR HISTORY ROWS (the job's outbox); the wrap and the convert are resolved.
+      await job.fence.settled();
+      expect(job.db.intents.map((row) => row.state)).toEqual(["landed", "landed", "intent", "intent"]);
+      expect(job.fence.landedAwaitingHistory()).toHaveLength(2);
+    });
+
+    it("the fenced sender: a lease lost after the wrap — the convert is signed, refused at the gate, and nothing after it is sent", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      const job = await fenced(vault.deps.vault);
+      const wallet = (vault.deps.program.provider as anchor.AnchorProvider).wallet;
+      // ANOTHER WORKER TAKES THE VAULT the moment the wrap's bytes have left.
+      const takeover = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          if (prop !== "sendRawTransaction") return value;
+          return async (...args: unknown[]) => {
+            const signature = await (value as (...a: unknown[]) => Promise<string>)(...args);
+            const row = job.db.vaults.get(vault.deps.vault.toBase58())!;
+            row.holder = "worker-b";
+            row.fence += 1n;
+            return signature;
+          };
+        },
+      }) as Connection;
+      const sender = new CrankSender({ connection: takeover, wallet, isLive: () => true, quietMs: 0, gate: job.fence.crankGate() });
+      const result = await runInvestTick({ ...vault.deps, sender });
+      expect(vault.raw).toHaveLength(1);
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("the dispatcher's fence refused this convert");
+      expect(job.db.gateCalls.map((call) => [call.draft.kind, call.answer])).toEqual([
+        ["wrap", "gated"],
+        ["convert", "refused"],
+      ]);
+      expect(job.fence.lostReason).not.toBeNull();
     });
   });
 });

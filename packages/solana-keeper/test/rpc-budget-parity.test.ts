@@ -92,6 +92,13 @@ function sources(dir: string): string[] {
     .map((name) => resolve(KEEPER, dir, name));
 }
 
+/**
+ * The dispatcher's own entry points: they build a budget on purpose. Production
+ * starts none of them (test/dispatch-dark.test.ts holds that, and the Dockerfile's
+ * one CMD), so "a legacy caller" is every other file.
+ */
+const DISPATCHER_ENTRY_POINTS = new Set(["bin/worker.mts"].map((file) => resolve(KEEPER, file)));
+
 describe("no legacy caller can pass a budget", () => {
   it("hands poolFetch at most five arguments at every call outside the pool itself, and bin/keeper.mts exactly five", () => {
     const counted = poolFetchCalls("x(poolFetch(a, (m, f) => { g(m, f); }, undefined, (at) => { h = at; }, meter,\n));");
@@ -99,7 +106,7 @@ describe("no legacy caller can pass a budget", () => {
     expect(poolFetchCalls("poolFetch(urls)")).toEqual([1]);
     let calls = 0;
     for (const file of [...sources("bin"), ...sources("src")]) {
-      if (file.endsWith("rpc-pool.ts")) continue;
+      if (file.endsWith("rpc-pool.ts") || DISPATCHER_ENTRY_POINTS.has(file)) continue;
       for (const args of poolFetchCalls(readFileSync(file, "utf8"))) {
         calls += 1;
         expect(args, file).toBeLessThanOrEqual(5);
@@ -111,9 +118,16 @@ describe("no legacy caller can pass a budget", () => {
 
   it("imports none of the dispatcher's budget modules from any entry point production starts", () => {
     for (const file of sources("bin")) {
+      if (DISPATCHER_ENTRY_POINTS.has(file)) continue;
       const text = readFileSync(file, "utf8");
       expect(text, file).not.toMatch(/rpc-budget|rpc-quota|credit-governor/);
     }
+  });
+
+  it("and the worker, which production never starts, DOES hand its pool a budget: its sixth argument", () => {
+    const worker = readFileSync(resolve(KEEPER, "bin/worker.mts"), "utf8");
+    expect(poolFetchCalls(worker)).toEqual([6]);
+    expect(worker).toMatch(/new RpcBudget\(\{ ratePerSecond: floor\.floorRps, defaultLane: "hot", usage: collector \}\)/);
   });
 });
 

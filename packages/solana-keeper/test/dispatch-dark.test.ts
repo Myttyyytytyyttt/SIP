@@ -37,10 +37,18 @@ const DISPATCHER_MODULES = [
   "src/fleet-alerts.ts",
   "src/rpc-quota.ts",
   "src/credit-governor.ts",
+  // Q3, the workers: the job, its loop, its fence, its takeover, its chain, its config, and the modules a job picks from.
+  "src/worker-job.ts",
+  "src/worker-loop.ts",
+  "src/worker-takeover.ts",
+  "src/worker-config.ts",
+  "src/fenced-sender.ts",
+  "src/job-chain.ts",
+  "src/settle-modules.ts",
 ] as const;
 
-/** bin/ files that are the dispatcher's own (none yet: Q2 and Q3 add theirs). */
-const DISPATCHER_ENTRY_POINTS: readonly string[] = [];
+/** bin/ files that are the dispatcher's own: Q3's worker (Q2 adds the scheduler's). */
+const DISPATCHER_ENTRY_POINTS: readonly string[] = ["bin/worker.mts"];
 
 /** Relative specifiers, static (import/export … from, bare import) and dynamic. Type-only imports load nothing. */
 function relativeImports(text: string): string[] {
@@ -107,6 +115,21 @@ describe("DARK: no entry point production can start reaches a dispatcher module"
     expect(keeper.has(resolve(KEEPER, "src/rpc-pool.ts"))).toBe(true);
     expect(keeper.has(resolve(KEEPER, "src/rpc-budget.ts"))).toBe(true);
     for (const module of DISPATCHER_MODULES) expect(existsSync(resolve(KEEPER, module)), module).toBe(true);
+  });
+
+  it("names every dispatcher entry point that exists, and the Dockerfile starts none of them", () => {
+    for (const entry of DISPATCHER_ENTRY_POINTS) expect(existsSync(resolve(KEEPER, entry)), entry).toBe(true);
+    const dockerfile = readFileSync(resolve(KEEPER, "Dockerfile"), "utf8");
+    const cmd = dockerfile.split("\n").filter((line) => /^\s*(CMD|ENTRYPOINT)\b/.test(line));
+    expect(cmd).toEqual(['CMD ["node_modules/.bin/tsx", "bin/keeper.mts"]']);
+    for (const entry of DISPATCHER_ENTRY_POINTS) expect(dockerfile).not.toContain(`"${entry}"`);
+  });
+
+  it("walks the worker's graph too: bin/worker.mts loads the store, the job, the loop and the fence", () => {
+    const worker = reach(resolve(KEEPER, "bin/worker.mts"));
+    for (const module of ["src/dispatch-store.ts", "src/worker-job.ts", "src/worker-loop.ts", "src/fenced-sender.ts", "src/job-chain.ts"]) {
+      expect(worker.has(resolve(KEEPER, module)), module).toBe(true);
+    }
   });
 
   it.each(entries.map((file) => [rel(file), file] as const))("%s reaches none of them", (_name, file) => {

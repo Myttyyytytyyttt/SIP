@@ -252,6 +252,16 @@ export class SolanaReadModel {
     }
   }
 
+  /**
+   * The history writer over a pool someone else owns: a dispatcher worker's
+   * (src/dispatch-store.ts, createDispatchPool), whose two connections are the
+   * replica's whole budget (ADR §3.11), so its history rows ride them rather
+   * than open two more. Never called by a legacy keeper, which keeps create().
+   */
+  static overPool(pool: pg.Pool, warn: Warn, observe?: DatabaseObserver): SolanaReadModel {
+    return new SolanaReadModel(pool, warn, observe);
+  }
+
   static create(databaseUrl: Secret | null, warn: Warn, observe?: DatabaseObserver): SolanaReadModel {
     if (databaseUrl === null) return new SolanaReadModel(null, warn, observe);
     const connectionString = databaseUrl.reveal();

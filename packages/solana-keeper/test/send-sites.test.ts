@@ -123,3 +123,32 @@ describe("send-sites", () => {
     expect(send.indexOf("this.#ask();")).toBeLessThan(send.indexOf("sendRawTransaction("));
   });
 });
+
+// ── a worker's sends: A1, "every send passes the gate" (ADR §4.4, S-8) ────────
+//
+// The scan above says no file sends around the two seams. These say a worker
+// never hands either seam out WITHOUT its fence: every CrankSender a job builds
+// carries the job's gate, and every settle turn it runs carries the job's
+// settle fence. Production's legacy keeper builds neither (bin/keeper.mts never
+// imports the fence; test/dispatch-dark.test.ts).
+describe("send-sites: a worker job never sends around its fence", () => {
+  const job = code(readFileSync(resolve(KEEPER, "src/worker-job.ts"), "utf8"));
+  const worker = code(readFileSync(resolve(KEEPER, "bin/worker.mts"), "utf8"));
+
+  it("builds exactly one CrankSender, and it carries the job's gate", () => {
+    const built = [...job.matchAll(/new CrankSender\(\{([\s\S]*?)\}\);/g)].map((match) => match[1]!);
+    expect(built).toHaveLength(1);
+    expect(built[0]).toContain("gate: fence.crankGate()");
+    expect(worker).not.toMatch(/new CrankSender\(/);
+  });
+
+  it("runs every settle with the job's fence, and the invest only with the fenced sender or none", () => {
+    const settles = [...job.matchAll(/result = await settle\(\{([\s\S]*?)\n {6}\}\);/g)].map((match) => match[1]!);
+    expect(settles).toHaveLength(1);
+    expect(settles[0]).toContain("fence: fence.settleFence(),");
+    const invests = [...job.matchAll(/await invest\(\{([\s\S]*?)\n {6}\}\);/g)].map((match) => match[1]!);
+    expect(invests).toHaveLength(1);
+    expect(invests[0]).toContain("...(sender === undefined ? {} : { sender }),");
+    expect(invests[0]).not.toMatch(/sender: (?!.*sender \})/);
+  });
+});

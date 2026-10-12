@@ -206,6 +206,8 @@ const SEND_INTENT = `${READ_MODEL_SCHEMA}.send_intent`;
 const LOSS_CARRY = `${READ_MODEL_SCHEMA}.loss_carry`;
 const WORKER = `${READ_MODEL_SCHEMA}.worker`;
 const RPC_USAGE = `${READ_MODEL_SCHEMA}.rpc_usage`;
+const KEEPER_LINK = `${READ_MODEL_SCHEMA}.keeper_link`;
+const FLEET = `${READ_MODEL_SCHEMA}.fleet`;
 
 /** CLAIM (ADR §3.5): up to $2 free slots, for worker $1. */
 export const CLAIM_SQL = `WITH c AS (
@@ -380,6 +382,21 @@ export const CARRY_UPSERT_SQL = `INSERT INTO ${LOSS_CARRY}
    written_fence = EXCLUDED.written_fence,
    send_intent_id = EXCLUDED.send_intent_id,
    written_at = clock_timestamp()`;
+
+/**
+ * A job's links (Q3): the addresses the scheduler's discovery holds for the vault
+ * and has not seen go, in link-address order. ADDRESSES ONLY: every field a
+ * settle reads comes from the job's own fresh read of each one (src/job-chain.ts),
+ * because a cached link is never trusted for an attestation (ADR §3.8 step 2).
+ */
+export const LINKS_OF_VAULT_SQL = `SELECT link_addr FROM ${KEEPER_LINK} WHERE vault_addr = $1 AND gone_at IS NULL ORDER BY link_addr`;
+
+/**
+ * A settlement a worker wrote into the history: the leaderboard is due again.
+ * The scheduler refreshes it at most once every 15 s while this is set (ADR §3.8
+ * step 8, owner decision 25), instead of after every SETTLED.
+ */
+export const BOARD_DIRTY_SQL = `UPDATE ${FLEET} SET board_dirty_at = clock_timestamp() WHERE id`;
 
 /** The process's own row: written at boot, beaten on its timer, closed on exit. */
 export const REGISTER_WORKER_SQL = `INSERT INTO ${WORKER} (worker_id, kind, version, started_at, heartbeat_at, slots)
@@ -870,6 +887,16 @@ export class DispatchStore {
   /** The process's row closed, on its way out. */
   async processStopped(): Promise<void> {
     await this.#one(WORKER_STOPPED_SQL, [this.holder]);
+  }
+
+  /** A job's link addresses (LINKS_OF_VAULT_SQL): never trusted beyond the address. */
+  async linksOf(vault: string): Promise<readonly string[]> {
+    return (await this.#one(LINKS_OF_VAULT_SQL, [vault])).map((row) => String(row["link_addr"]));
+  }
+
+  /** The leaderboard is due again (BOARD_DIRTY_SQL). */
+  async markBoardDirty(): Promise<void> {
+    await this.#one(BOARD_DIRTY_SQL, []);
   }
 
   #intentValues(intent: IntentDraft): unknown[] {

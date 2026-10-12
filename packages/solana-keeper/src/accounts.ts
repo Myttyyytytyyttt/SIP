@@ -201,6 +201,19 @@ export async function readProtocolConfig(program: anchor.Program): Promise<Proto
   const address = configAddress(program.programId);
   const decoded = await client(program, "protocolConfig").fetchNullable(address);
   if (decoded === null) return null;
+  return protocolConfigState(address, decoded);
+}
+
+/**
+ * The config from account data already in hand: a dispatcher job reads it in
+ * the same request as its vault and links (src/job-chain.ts). The same fields,
+ * checked the same way, as readProtocolConfig.
+ */
+export function decodeProtocolConfig(program: anchor.Program, address: PublicKey, data: Buffer): ProtocolConfigState {
+  return protocolConfigState(address, program.coder.accounts.decode("protocolConfig", data));
+}
+
+function protocolConfigState(address: PublicKey, decoded: unknown): ProtocolConfigState {
   const f = fields("ProtocolConfig", decoded);
   return {
     address,
