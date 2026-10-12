@@ -222,10 +222,21 @@ export class JupiterBackoffError extends Error {
  * outstanding; the bookkeeping still counts outstanding reservations, so two
  * concurrent turns — the dispatcher's workers reuse this — cannot both be
  * granted the same calls.
+ *
+ * THE DISPATCHER'S WORKERS SHARE ONE ORGANISATION'S MINUTE, so each is handed a
+ * share of it (worker.jup_quota, src/rpc-quota.ts) and RETUNES its pacer to that
+ * share (retune). The share is what the budget check and the spacing use; the
+ * minute the pacer was built with stays the ceiling, and NEVER-FITS still
+ * compares against it — a basket the whole organisation's minute can cover is
+ * not one that can never be bought, only one this worker's share is too small
+ * for, and it is deferred, not refused. A legacy keeper never retunes, so its
+ * share IS its ceiling and every answer is the one it gave before.
  */
 export class JupiterPacer {
-  readonly perMinute: number;
-  readonly minGapMs: number;
+  /** The minute the pacer was built with: the plan's whole budget, and the never-fits bound. */
+  readonly ceilingPerMinute: number;
+  #perMinute: number;
+  #minGapMs: number;
   readonly #now: () => number;
   readonly #sleep: (ms: number) => Promise<void>;
   /** When each call of the last minute left, oldest first. */
@@ -244,10 +255,37 @@ export class JupiterPacer {
 
   constructor(options: { readonly perMinute: number; readonly now?: () => number; readonly sleep?: (ms: number) => Promise<void> }) {
     if (!Number.isSafeInteger(options.perMinute) || options.perMinute < 1) throw new Error("a Jupiter pacer needs a whole, positive number of calls a minute");
-    this.perMinute = options.perMinute;
-    this.minGapMs = minGapMsFor(options.perMinute);
+    this.ceilingPerMinute = options.perMinute;
+    this.#perMinute = options.perMinute;
+    this.#minGapMs = minGapMsFor(options.perMinute);
     this.#now = options.now ?? (() => Date.now());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  /** The calls a minute this pacer grants now: its share once retuned, its ceiling until then. */
+  get perMinute(): number {
+    return this.#perMinute;
+  }
+
+  /** The spacing between two calls at the current share. */
+  get minGapMs(): number {
+    return this.#minGapMs;
+  }
+
+  /**
+   * A new share of the organisation's minute, from this worker's row
+   * (QuotaFollower, src/rpc-quota.ts). Whole calls from 1 to the ceiling; above
+   * the ceiling it is the ceiling, and anything that is not a positive number is
+   * refused and changes nothing. Calls already made stay in the window and
+   * reservations already granted stay granted: a smaller share defers the NEXT
+   * turn, it never takes calls back from a turn halfway through its basket.
+   */
+  retune(perMinute: number): boolean {
+    if (!Number.isFinite(perMinute) || perMinute < 1) return false;
+    const share = Math.min(this.ceilingPerMinute, Math.floor(perMinute));
+    this.#perMinute = share;
+    this.#minGapMs = minGapMsFor(share);
+    return true;
   }
 
   #prune(now: number): void {
@@ -273,10 +311,10 @@ export class JupiterPacer {
     const now = this.#now();
     this.#reservations += 1;
     this.#prune(now);
-    if (calls > this.perMinute) {
+    if (calls > this.ceilingPerMinute) {
       return this.#defer(now, "never-fits", null,
         `this basket needs ${calls} Jupiter calls per buying turn (6 per leg, and 6 for the convert) and this keeper's budget is ` +
-          `${this.perMinute} a minute, so it can never be bought at this budget — raise SIP_SOLANA_JUPITER_CALLS_PER_MINUTE with a ` +
+          `${this.ceilingPerMinute} a minute, so it can never be bought at this budget — raise SIP_SOLANA_JUPITER_CALLS_PER_MINUTE with a ` +
           "paid key, or hold fewer stocks; nothing was quoted, wrapped or sent");
     }
     if (now < this.#blockedUntil) {
@@ -294,8 +332,9 @@ export class JupiterPacer {
       const short = used + calls - this.perMinute;
       const leaving = this.#spent[short - 1];
       const wait = leaving === undefined ? JUPITER_WINDOW_MS : leaving + JUPITER_WINDOW_MS - now;
+      const share = this.perMinute === this.ceilingPerMinute ? "" : ` (this worker's share of the fleet's ${this.ceilingPerMinute})`;
       return this.#defer(now, "budget", wait,
-        `the Jupiter budget is short: this buying turn needs ${calls} calls and ${used} of this keeper's ${this.perMinute} a minute ` +
+        `the Jupiter budget is short: this buying turn needs ${calls} calls and ${used} of this keeper's ${this.perMinute} a minute${share} ` +
           `are spent or reserved in the last 60 s; nothing was quoted, wrapped or sent, and the turn is asked again next sweep ` +
           `(enough frees in about ${Math.ceil(wait / 1_000)} s)`);
     }
