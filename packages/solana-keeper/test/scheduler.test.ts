@@ -203,6 +203,19 @@ describe("discovery into keeper_link, and the last-known-good list", () => {
     expect(await scheduler(empty, "B").scheduler.tick()).toMatchObject({ kind: "failed", error: expect.stringContaining("overloaded") });
   });
 
+  it("under new_vault_system = 'queue' a new vault is enrolled draining, and a draining row is never made due until it is armed", async () => {
+    const r = rig(2);
+    r.store.armOnEnrol = false;
+    const s = scheduler(r, "A");
+    const first = await s.scheduler.tick();
+    expect([...r.store.rows.values()].map((row) => row.system)).toEqual(["draining", "draining"]);
+    expect(first).toMatchObject({ kind: "acted", marked: [] });
+    for (const row of r.store.rows.values()) row.system = "queue";
+    r.store.now += TICK;
+    const armed = await s.scheduler.tick();
+    expect(armed.kind === "acted" && [...armed.marked].sort()).toEqual([...r.store.rows.keys()].sort());
+  });
+
   it("names a vault's new row by the fleet flag: legacy until P3d, and a legacy row is never made due", async () => {
     const r = rig(2);
     r.store.newVaultSystem = "legacy";

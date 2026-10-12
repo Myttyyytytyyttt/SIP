@@ -18,7 +18,8 @@
 //   2. discovery into keeper_link: a listing (C6's V2 first under `gpa-v2`,
 //      V1 otherwise), upserted, with the links it no longer returns marked
 //      gone and every vault it names given a row as fleet.new_vault_system says
-//      (plan design detail 3: 'legacy' until P3d). A FAILED LISTING DOES NOT
+//      (plan design detail 3: 'legacy' until P3d, then 'draining', which only
+//      the handover's `arm` moves to the queue). A FAILED LISTING DOES NOT
 //      FAIL THE TICK: the last-known-good list is keeper_link itself, re-read
 //      fresh by address (L3's rule, now persisted, so a new holder has it too);
 //      warn after three failures, critical once the list is ten minutes old;

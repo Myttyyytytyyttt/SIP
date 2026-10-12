@@ -153,11 +153,17 @@ export const CACHED_LINKS_SQL = `SELECT link_addr, wallet_addr, vault_addr, epoc
 
 /**
  * A row for each vault the listing names that has none yet, as the fleet flag
- * says (plan design detail 3): 'legacy' until P3d, then 'queue'. Due now, in
- * the new lane. A vault that has a row keeps it untouched.
+ * says (plan design detail 3): 'legacy' until P3d; then 'draining', NEVER
+ * 'queue' — the handover's enrolment rule (src/handover.ts, ENROL_VAULTS_SQL).
+ * A legacy keeper that read the flag before it flipped takes a vault with no
+ * row for its own, and a row written straight to the queue could be claimed
+ * by a worker while that keeper's sweep still turns it; through 'draining' the
+ * vault reaches the queue only by `arm`, after every legacy process's receipt
+ * and 150 finalized blocks. Due now, in the new lane. A vault that has a row
+ * keeps it untouched.
  */
 export const ENSURE_VAULTS_SQL = `INSERT INTO ${S}.vault_work (vault_addr, system, lane, priority, due_at)
-SELECT v.vault, f.new_vault_system, 'new', ${LANE_PRIORITY.new}, clock_timestamp()
+SELECT v.vault, CASE f.new_vault_system WHEN 'queue' THEN 'draining' ELSE 'legacy' END, 'new', ${LANE_PRIORITY.new}, clock_timestamp()
   FROM unnest($1::text[]) AS v(vault) CROSS JOIN ${S}.fleet f
  WHERE f.id
 ON CONFLICT (vault_addr) DO NOTHING

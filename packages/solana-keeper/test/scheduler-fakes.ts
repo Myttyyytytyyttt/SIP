@@ -62,6 +62,13 @@ type MutableRow = { -readonly [K in keyof WorkRow]: WorkRow[K] };
 export class MemoryStore implements SchedulerStore {
   now = 1_000_000_000;
   newVaultSystem: VaultSystem = "queue";
+  /**
+   * The handover's `arm`, taken as done: ENSURE_VAULTS_SQL enrols a vault as
+   * 'draining' under new_vault_system = 'queue' (never the queue itself), and
+   * these unit tests are about the selection, so by default the fake moves it
+   * on to 'queue' at once. false leaves it draining, as the statement does.
+   */
+  armOnEnrol = true;
   webhookOwner: WebhookOwner = "legacy";
   readonly links = new Map<string, LinkRow & { gone: boolean; seenAt: number }>();
   readonly rows = new Map<string, MutableRow>();
@@ -130,11 +137,12 @@ export class MemoryStore implements SchedulerStore {
   async ensureVaults(vaults: readonly string[]): Promise<readonly { readonly vault: string; readonly system: VaultSystem }[]> {
     this.#maybeFail("ensureVaults");
     const made: { vault: string; system: VaultSystem }[] = [];
+    const enrolled: VaultSystem = this.newVaultSystem === "queue" ? "draining" : "legacy";
     for (const vault of new Set(vaults)) {
       if (this.rows.has(vault)) continue;
       this.rows.set(vault, {
         vault,
-        system: this.newVaultSystem,
+        system: enrolled === "draining" && this.armOnEnrol ? "queue" : enrolled,
         lane: "new",
         priority: 2,
         rests: false,
@@ -148,7 +156,7 @@ export class MemoryStore implements SchedulerStore {
         lastOutcome: null,
         openIntents: 0,
       });
-      made.push({ vault, system: this.newVaultSystem });
+      made.push({ vault, system: enrolled });
     }
     return made;
   }

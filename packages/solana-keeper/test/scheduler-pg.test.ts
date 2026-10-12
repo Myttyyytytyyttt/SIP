@@ -237,12 +237,16 @@ describe.skipIf(!usable)("the scheduler on Postgres 16 (needs KEEPER_TEST_PG_URL
       expect((await store.cachedLinks()).links.map((l) => l.link)).toEqual(["L1", "L2", "L3"]);
     });
 
-    it("gives a new vault the fleet's system, leaves an existing row untouched, and reads rows with their open intents", async () => {
+    it("gives a new vault the fleet's system — 'draining' under 'queue', never the queue itself — leaves an existing row untouched, and reads rows with their open intents", async () => {
       const store = new PgSchedulerStore(db);
       await db.query(`UPDATE ${S}.fleet SET new_vault_system = 'legacy'`);
       expect(await store.ensureVaults(["VA", "VA"])).toEqual([{ vault: "VA", system: "legacy" }]);
       await db.query(`UPDATE ${S}.fleet SET new_vault_system = 'queue'`);
-      expect(await store.ensureVaults(["VA", "VB"])).toEqual([{ vault: "VB", system: "queue" }]);
+      // THE HANDOVER'S ENROLMENT RULE: a vault enters the queue only through `arm`.
+      expect(await store.ensureVaults(["VA", "VB"])).toEqual([{ vault: "VB", system: "draining" }]);
+      expect(await store.markDue([{ vault: "VB", lane: "full" }], 15_000)).toEqual([]);
+      expect(await new DispatchStore(db, "W").claim(2)).toEqual([]);
+      await db.query(`UPDATE ${S}.vault_work SET system = 'queue' WHERE vault_addr = 'VB'`);
       await db.query(
         `INSERT INTO ${S}.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height) VALUES ('VB', 'wrap', 1, 'w', 'bh', 10), ('VB', 'invest', 1, 'w', 'bh', 11)`,
       );
@@ -404,7 +408,9 @@ describe.skipIf(!usable)("the scheduler on Postgres 16 (needs KEEPER_TEST_PG_URL
       const holder = a.scheduler.acting ? a : b;
       const standby = a.scheduler.acting ? b : a;
       expect((await db.query(`SELECT scheduler_id FROM ${S}.fleet`)).rows[0]!["scheduler_id"]).toBe(holder === a ? "sched-A" : "sched-B");
-      expect(Number((await db.query(`SELECT count(*) FROM ${S}.vault_work WHERE system = 'queue'`)).rows[0]!["count"])).toBe(4);
+      // ENROLLED DRAINING (new_vault_system = 'queue'); the handover's `arm` moves them to the queue.
+      expect(Number((await db.query(`SELECT count(*) FROM ${S}.vault_work WHERE system = 'draining'`)).rows[0]!["count"])).toBe(4);
+      await db.query(`UPDATE ${S}.vault_work SET system = 'queue' WHERE system = 'draining'`);
       // THE HOLDER DIES: its lock session ends with it.
       holder.lock.release();
       await new Promise((resolve) => setTimeout(resolve, 100));
