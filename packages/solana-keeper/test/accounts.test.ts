@@ -2516,6 +2516,28 @@ describe("the ticks' first steps, over the same bytes", () => {
       expect(pacer.status().deferred).toEqual({ budget: 0, backoff: 1, neverFits: 0 });
     });
 
+    it("refuses a basket a dispatcher worker's share cannot cover, though the plan's minute could — with the remedy, nothing asked — where a deferral would starve it in silence", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      // THE KEYLESS 30 A MINUTE OVER THE ADR'S r = 2: 15 each, under the owner's 18.
+      const pacer = clock.pacer(30);
+      pacer.retune(15);
+      const jupiter = { baseUrl: LITE_API, apiKey: null, pacer };
+      for (let sweep = 0; sweep < 3; sweep++) {
+        const result = await runInvestTick({ ...buyingVault(basket).deps, jupiter });
+        expect(result.outcome).toBe("REFUSED");
+        expect(result.detail).toContain("needs 18 Jupiter calls per buying turn");
+        expect(result.detail).toContain("this worker's share of the organisation's 30 a minute is 15 now");
+        clock.advance(60_000);
+      }
+      expect(wire.seen).toHaveLength(0);
+      // THE SAME WORKER, ITS SHARE BACK TO A BASKET'S WORTH: bought.
+      pacer.retune(30);
+      expect((await runInvestTick({ ...buyingVault(basket).deps, jupiter })).outcome).toBe("INVESTED");
+    });
+
     it("refuses a basket the plan's minute can never cover — with the remedy — and asks Jupiter nothing", async () => {
       const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
       stubJupiter();

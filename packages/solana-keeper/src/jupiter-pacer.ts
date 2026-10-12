@@ -160,15 +160,20 @@ export function readJupiterKeySettings(
   return { apiKey, callsPerMinute, callsPerMinuteSource, problems, warnings };
 }
 
-/** Why a reservation was not granted. */
-export type JupiterDeferralReason = "budget" | "backoff" | "never-fits";
+/**
+ * Why a reservation was not granted. `never-fits` and `share-too-small` are
+ * REFUSALS of the basket's size — at the plan's whole minute, and at this
+ * worker's share of it — and the caller turns both into a REFUSED basket;
+ * `budget` and `backoff` are deferrals that free on their own.
+ */
+export type JupiterDeferralReason = "budget" | "backoff" | "never-fits" | "share-too-small";
 
 export type JupiterReserveAnswer =
   | { readonly granted: true; readonly reservation: JupiterReservation }
   | {
       readonly granted: false;
       readonly reason: JupiterDeferralReason;
-      /** How long until a reservation of the same size could be granted, as far as this process knows; null for never-fits. */
+      /** How long until a reservation of the same size could be granted, as far as this process knows; null for never-fits and share-too-small. */
       readonly retryInMs: number | null;
       /** A sentence for the turn's detail: what was asked, what was free, and that nothing moved. */
       readonly detail: string;
@@ -181,7 +186,14 @@ export interface JupiterPacerStatus {
   /** Calls made in the last 60 s, and reserved but not yet made. */
   readonly spentLastMinute: number;
   readonly reservedOutstanding: number;
-  /** Buying turns that asked, were granted, and were deferred — by why. */
+  /**
+   * Buying turns that asked, were granted, and were not — by why. `neverFits`
+   * counts every turn refused for its SIZE: over the plan's minute, and (on a
+   * dispatcher worker, whose pacer is retuned) over this worker's share of it,
+   * which lastDeferral.reason tells apart. One counter for both keeps the legacy
+   * keeper's /status exactly as it was: its pacer is never retuned, so it can
+   * never meet the second.
+   */
   readonly reservations: number;
   readonly granted: number;
   readonly deferred: { readonly budget: number; readonly backoff: number; readonly neverFits: number };
@@ -226,11 +238,16 @@ export class JupiterBackoffError extends Error {
  * THE DISPATCHER'S WORKERS SHARE ONE ORGANISATION'S MINUTE, so each is handed a
  * share of it (worker.jup_quota, src/rpc-quota.ts) and RETUNES its pacer to that
  * share (retune). The share is what the budget check and the spacing use; the
- * minute the pacer was built with stays the ceiling, and NEVER-FITS still
- * compares against it — a basket the whole organisation's minute can cover is
- * not one that can never be bought, only one this worker's share is too small
- * for, and it is deferred, not refused. A legacy keeper never retunes, so its
- * share IS its ceiling and every answer is the one it gave before.
+ * minute the pacer was built with stays the ceiling, which NEVER-FITS compares
+ * against. A basket over the SHARE but within the ceiling is SHARE-TOO-SMALL:
+ * refused, not deferred. Every live worker is handed the same share
+ * (fleetQuotas), so no worker of the fleet could buy it either, and a deferral
+ * would say "about 60 s" every sweep, forever, while nothing was bought and
+ * nothing alerted — the very silence never-fits exists to prevent. It is a
+ * refusal for as long as the share stays that small (fewer workers, a larger
+ * plan, or a share back from the floor end it). A legacy keeper never retunes,
+ * so its share IS its ceiling, it can never meet share-too-small, and every
+ * answer is the one it gave before.
  */
 export class JupiterPacer {
   /** The minute the pacer was built with: the plan's whole budget, and the never-fits bound. */
@@ -277,8 +294,9 @@ export class JupiterPacer {
    * (QuotaFollower, src/rpc-quota.ts). Whole calls from 1 to the ceiling; above
    * the ceiling it is the ceiling, and anything that is not a positive number is
    * refused and changes nothing. Calls already made stay in the window and
-   * reservations already granted stay granted: a smaller share defers the NEXT
-   * turn, it never takes calls back from a turn halfway through its basket.
+   * reservations already granted stay granted: a smaller share refuses or
+   * defers the NEXT turn, it never takes calls back from a turn halfway through
+   * its basket.
    */
   retune(perMinute: number): boolean {
     if (!Number.isFinite(perMinute) || perMinute < 1) return false;
@@ -305,7 +323,9 @@ export class JupiterPacer {
    * NEVER-FITS IS ITS OWN ANSWER. A basket needing more calls than the plan's
    * whole minute can never be granted; deferring it would retry it every sweep,
    * forever, and say nothing. The caller turns it into a REFUSED basket, whose
-   * alert names the remedy.
+   * alert names the remedy. SHARE-TOO-SMALL is the same answer one level down
+   * (the class header): more calls than this worker's share, which no wait on
+   * this worker's own minute frees — only a larger share does.
    */
   reserve(calls: number): JupiterReserveAnswer {
     const now = this.#now();
@@ -316,6 +336,13 @@ export class JupiterPacer {
         `this basket needs ${calls} Jupiter calls per buying turn (6 per leg, and 6 for the convert) and this keeper's budget is ` +
           `${this.ceilingPerMinute} a minute, so it can never be bought at this budget — raise SIP_SOLANA_JUPITER_CALLS_PER_MINUTE with a ` +
           "paid key, or hold fewer stocks; nothing was quoted, wrapped or sent");
+    }
+    if (calls > this.perMinute) {
+      return this.#defer(now, "share-too-small", null,
+        `this basket needs ${calls} Jupiter calls per buying turn (6 per leg, and 6 for the convert) and this worker's share of the ` +
+          `organisation's ${this.ceilingPerMinute} a minute is ${this.perMinute} now; every live worker is handed the same share, so ` +
+          "no worker of this fleet can buy it while the share is this small, and no wait on this worker's minute frees it — run fewer workers, raise " +
+          "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE with a paid key, or hold fewer stocks; nothing was quoted, wrapped or sent");
     }
     if (now < this.#blockedUntil) {
       const wait = this.#blockedUntil - now;
@@ -346,7 +373,7 @@ export class JupiterPacer {
   #defer(now: number, reason: JupiterDeferralReason, retryInMs: number | null, detail: string): JupiterReserveAnswer {
     if (reason === "budget") this.#deferred.budget += 1;
     else if (reason === "backoff") this.#deferred.backoff += 1;
-    else this.#deferred.neverFits += 1;
+    else this.#deferred.neverFits += 1; // never-fits and share-too-small: refused for its size (JupiterPacerStatus)
     this.#lastDeferral = { at: now, reason, detail };
     return { granted: false, reason, retryInMs, detail };
   }

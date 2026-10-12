@@ -91,10 +91,11 @@ const positive = (value: number, name: string): number => {
  *
  * JUPITER IN WHOLE CALLS, AND ROUNDED DOWN: a share of 7.5 calls a minute is 7,
  * so the shares never add up to more than the organisation's minute. A share
- * smaller than one buying turn (18 calls for the owner's basket) defers that
- * turn on that worker every time (JupiterPacer.retune says why it is not a
- * refusal); the scheduler's caller should treat perWorkerJupiterPerMinute below
- * the largest basket as a reason to run fewer workers, not more.
+ * smaller than one buying turn (18 calls for the owner's basket) REFUSES that
+ * basket on every worker — the pacer's share-too-small, a REFUSED basket that
+ * raises invest-refused with the remedy — rather than deferring it forever in
+ * silence (JupiterPacer's header says why). Fewer workers, not more, is then
+ * the remedy: at the keyless 30 a minute, r = 2 already leaves 15.
  */
 export function fleetQuotas(input: FleetQuotaInput): FleetQuotas {
   const planRps = positive(input.planRps ?? HELIUS_DEVELOPER_RPS, "planRps");

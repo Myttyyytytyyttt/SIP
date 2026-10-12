@@ -864,11 +864,17 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
   //
   // A BASKET THAT CAN NEVER FIT THE PLAN'S MINUTE IS REFUSED, NOT DEFERRED: a
   // deferral is "next sweep", and next sweep it would not fit either. REFUSED
-  // raises `invest-refused`, whose detail names the remedy.
+  // raises `invest-refused`, whose detail names the remedy. So is one over a
+  // dispatcher worker's SHARE of that minute (share-too-small): every worker has
+  // the same share, so no sweep of any of them frees it. A legacy keeper's pacer
+  // is never retuned, so it never answers that.
   let jupiterApi: JupiterApi | undefined;
   if (deps.jupiter !== undefined) {
     const answer = deps.jupiter.pacer.reserve(buyingTurnJupiterCalls(policy.legs.length, converts));
-    if (!answer.granted) return { outcome: answer.reason === "never-fits" ? "REFUSED" : "DEFERRED", detail: answer.detail };
+    if (!answer.granted) {
+      const refused = answer.reason === "never-fits" || answer.reason === "share-too-small";
+      return { outcome: refused ? "REFUSED" : "DEFERRED", detail: answer.detail };
+    }
     found.reservation = answer.reservation;
     jupiterApi = jupiterApiForTurn(deps.jupiter, answer.reservation);
   }

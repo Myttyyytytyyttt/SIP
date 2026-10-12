@@ -172,23 +172,52 @@ describe("the P2 Jupiter pacer, retuned to a worker's share", () => {
     if (!short.granted) expect(short.detail).toContain("18 of this keeper's 30 a minute are spent or reserved");
   });
 
-  it("defers — does not refuse — a basket the organisation's minute covers but this worker's share does not", () => {
+  it("REFUSES — never silently defers — a basket the organisation's minute covers but this worker's share does not", () => {
+    // THE REVIEW'S PROBE: the free key's 60, four workers at most, two alive.
+    const quotas = fleetQuotas({ liveWorkers: 2, maxWorkers: 4, jupiterPerMinute: 60 });
+    expect([quotas.perWorkerJupiterPerMinute, quotas.floorJupiterPerMinute]).toEqual([30, 15]);
     const pacer = new JupiterPacer({ perMinute: 60, now: () => 0, sleep: async () => undefined });
-    expect(pacer.retune(15)).toBe(true);
+    // ON ITS FLOOR (at boot, or two minutes after the scheduler went quiet): 15, under the owner's 18.
+    expect(pacer.retune(quotas.floorJupiterPerMinute!)).toBe(true);
     const owner = buyingTurnJupiterCalls(2, true);
     expect(owner).toBe(18);
-    const answer = pacer.reserve(owner);
-    expect(answer.granted).toBe(false);
-    if (!answer.granted) {
-      expect(answer.reason).toBe("budget");
-      expect(answer.detail).toContain("this worker's share of the fleet's 60");
+    for (let sweep = 0; sweep < 3; sweep++) {
+      const answer = pacer.reserve(owner);
+      expect(answer.granted).toBe(false);
+      if (!answer.granted) {
+        expect(answer.reason).toBe("share-too-small");
+        // NO WAIT IS PROMISED: nothing frees on its own.
+        expect(answer.retryInMs).toBeNull();
+        expect(answer.detail).not.toContain("frees in about");
+        expect(answer.detail).toContain("this worker's share of the organisation's 60 a minute is 15 now");
+        expect(answer.detail).toContain("run fewer workers");
+      }
     }
+    expect(pacer.status().deferred).toEqual({ budget: 0, backoff: 0, neverFits: 3 });
+    expect(pacer.status().lastDeferral?.reason).toBe("share-too-small");
+    // THE ADR'S r = 2 ON A 5-LEG BASKET UNDER THE KEY: 36 calls over a share of 30, within the minute of 60.
+    expect(pacer.retune(quotas.perWorkerJupiterPerMinute!)).toBe(true);
+    const fiveLegs = pacer.reserve(buyingTurnJupiterCalls(5, true));
+    expect(!fiveLegs.granted && fiveLegs.reason).toBe("share-too-small");
     // OVER THE WHOLE MINUTE it is still never-fits.
     const huge = pacer.reserve(61);
     expect(huge.granted).toBe(false);
     if (!huge.granted) expect(huge.reason).toBe("never-fits");
-    expect(pacer.retune(30)).toBe(true);
+    // A SHARE THE BASKET FITS: bought.
     expect(pacer.reserve(owner).granted).toBe(true);
+  });
+
+  it("still DEFERS a basket its share covers when the share's minute is merely spent: that one frees on its own", () => {
+    const pacer = new JupiterPacer({ perMinute: 60, now: () => 0, sleep: async () => undefined });
+    pacer.retune(30);
+    expect(pacer.reserve(18).granted).toBe(true);
+    const short = pacer.reserve(18);
+    expect(short.granted).toBe(false);
+    if (!short.granted) {
+      expect(short.reason).toBe("budget");
+      expect(short.detail).toContain("this worker's share of the fleet's 60");
+      expect(short.retryInMs).toBe(60_000);
+    }
   });
 
   it("spaces calls at the share, clamps a share above the ceiling to it, and refuses one that is not a positive number", () => {
