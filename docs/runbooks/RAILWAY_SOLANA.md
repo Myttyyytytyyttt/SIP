@@ -610,7 +610,10 @@ Un valor que no sea `volume` ni `profit` impide arrancar.
 ## 7. Los recortes de coste (`SIP_SOLANA_CUTS`) y la lista de respaldo (`SIP_SOLANA_DISCOVERY_LKG_MS`)
 
 Las dos variables están **apagadas si no existen**: sin ellas el vigilante hace exactamente lo de siempre, petición por
-petición. Ninguna toca el dinero (qué se cobra, a quién, cuánto, qué se compra). Diseño: ADR del dispatcher, §2.3 y §6.
+petición. Los tres primeros nombres de la tabla no tocan el dinero (qué se cobra, a quién, cuánto, qué se compra). **Los
+cuatro siguientes sí** (deciden si una compra empieza, cuándo se busca un cobro o cómo sale una transacción): se encienden
+**de uno en uno y en este orden** —`jupiter-key`, `rest-skip`, `invest-batch`, `explicit-send`—, cada uno con su propio
+periodo de prueba antes del siguiente. Diseño: ADR del dispatcher, §2.3 y §6.
 
 `SIP_SOLANA_CUTS` es una lista separada por comas. Un nombre que no esté en esta tabla, o uno repetido, **impide
 arrancar** (Railway deja funcionando el despliegue anterior). **Volver atrás = quitar el nombre** y redesplegar.
@@ -620,6 +623,10 @@ arrancar** (Railway deja funcionando el despliegue anterior). **Volver atrás = 
 | `gpa-v2` | Buscar los vínculos con `getProgramAccountsV2` de Helius (1 crédito por página en vez de 10). Si el endpoint no lo entiende, en la misma barrida vuelve a la llamada de siempre | `discovery.method` = `"v2"`; si dice `"v1-fallback"`, `discovery.fallbackReason` dice por qué. `linksDiscovered` igual que antes |
 | `privy-address` | Leer el registro de Privy de cada wallet **por su dirección** y guardarlo, en vez de listar todas las wallets de la app en cada barrida. Una wallet que aún no se puede firmar se vuelve a mirar cada minuto (lo que arregla el dueño desde la web se ve igual de rápido); una que sí, cada 30 min, o enseguida si Privy rechaza un envío. **Justo antes de cada cobro se vuelve a preguntar**: si el dueño quitó el permiso en ese rato, el turno dice `NO_SIGNER` (aviso) y no se envía nada, en vez de un cobro fallido que llega a Telegram como crítico | `cuts.privyAddressBook.listPages` no sube después de la primera barrida; `signing.wallets.signable` igual que antes; `cuts.privyAddressBook.withdrawnAtSend` cuenta los cobros parados así |
 | `board-timer` | El ranking se recalcula como mucho cada 15 s después de un cobro, uno a la vez, en vez de una vez por cobro | `cuts.board.refreshes`; un cobro nuevo sale en `/leaderboard` en ≤ 15 s |
+| `jupiter-key` (dinero, 1.º) | Con `SIP_SOLANA_JUPITER_API_KEY` puesta, cada llamada a Jupiter va a `api.jup.ag` con la clave; sin ella, al host de siempre. Un turno que compra **reserva todas sus llamadas** (6 por pierna y por la conversión) antes de la primera: si no caben en el minuto se aplaza (`DEFERRED`) **sin cotizar, envolver ni enviar nada**, y vuelve a intentarlo en la barrida siguiente. Tras un 429 espera (1 min, doblando hasta 10). `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` cambia el límite (60 con clave, 30 sin ella). Una clave mal pegada **impide arrancar** | `cuts.jupiter.host`, `.keyed` (nunca la clave), `.deferred`, `.http429` (debe quedarse en 0), `.lastDeferral` |
+| `rest-skip` (dinero, 2.º) | Un vínculo que descansa sobre su propio cobro, y cuya última firma no ha cambiado, devuelve el mismo `IDLE` sin volver a recorrer su ventana (1 llamada en vez de 3). No envía nada: como mucho retrasa la búsqueda de un cobro | `cuts.restSkip.skips` sube, `.recorded` casi quieto; `.invalidated` = vínculos que se movieron y se recorrieron |
+| `invest-batch` (dinero, 3.º) | Las lecturas en reposo de cada turno de inversión (política, saldos de wSOL y USDC, reloj, Pyth) van en el mismo lote que los vaults: el censo del vigilante de beneficio baja de 19 a 7 llamadas por barrida. **La foto solo decide turnos que no envían nada**; un turno que compraría se repite con lecturas frescas | `cuts.investBatch.decidedFromSnapshot`, `.rereadFresh`, `.investedAfterReread` (> 0 = una compra real por el camino nuevo), `.batchFailed` |
+| `explicit-send` (dinero, 4.º) | El wrap, la conversión y cada pierna se envían en el orden del vigilante —blockhash, construir, firmar, **preguntar si sigue siendo el que actúa**, enviar, confirmar por sondeo—; **75 s sin compras** tras tomar el candado, y con SIGTERM deja de empezar envíos y espera hasta 20 s a los que ya salieron antes de soltar el candado | `cuts.explicitSend.sent`, `.landed`, `.reverted`, `.expired`, `.refused`, `.quietUntil`, `.drain` |
 
 `SIP_SOLANA_DISCOVERY_LKG_MS` (0 = apagado; el valor previsto es `600000`, 10 minutos; como mucho `3600000`): si la
 búsqueda de vínculos falla, la barrida **no se cae**: usa la última lista buena si tiene menos de ese tiempo, y vuelve a
@@ -658,6 +665,47 @@ tiene bloque `ops` y el vigilante hace lo de siempre.
   retenidas que sigan siendo verdad vuelven a salir en el barrido siguiente a la recuperación.
 - Con `dep-down` o `jupiter-budget`, el vigilante observa las peticiones a Jupiter desde el `fetch` global (su constructor de rutas no
   acepta otro): solo mira el host `jup.ag`; el resto pasa sin tocarse y sin guardar la URL.
+
+## 9. Las pérdidas arrastradas, en Postgres (`SIP_SOLANA_CARRY_STORE`, apagado si no existe)
+
+Cuando un tramo con pérdida se cobra a cero, la pérdida pasa al tramo siguiente y rebaja lo que se cobra al próximo
+trade ganador. Hoy esa pérdida vive **en memoria**: un reinicio (y cada despliegue lo es) la olvida, y el siguiente trade
+ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_carry`. Diseño: ADR del dispatcher, §4.6.
+
+| valor | quién decide | qué pasa si Postgres falla |
+|---|---|---|
+| sin poner, u `off` | la memoria, como siempre | — |
+| `dual` | la memoria; también escribe en Postgres y compara cada lectura | aviso `carry-store` en el registro; **el cobro sale igual**, como con `off` |
+| `on` | Postgres, leído en cada turno | el cobro de ese turno **espera** (RETRY, no se envía nada) hasta que Postgres conteste |
+
+- **Solo en `sip-solana-keeper`** (el de beneficio). El de volumen **no arranca** con `dual` u `on` (no arrastra
+  pérdidas), y ninguno arranca con `dual` u `on` sin `DATABASE_URL`. Un valor distinto de `off`, `dual` u `on` impide
+  arrancar.
+- **En este orden, y no en otro:**
+  1. **Primero crea la tabla**: el mismo comando de la sección 0 (`setup-read-model`; es idempotente). Sin la tabla,
+     con `on` el vigilante **no actúa en absoluto**: ni cobros ni compras (si todo lo demás está en orden, `/status` →
+     `missingLiveCondition` dice `SIP_SOLANA_CARRY_STORE is on and the loss-carry store is not ready: …`).
+  2. Pon `dual` y despliega. En `/status`: `carryStore.notReady` = `null` y `carryStore.dbOnlyAtBoot` un número.
+  3. Pasa a `on` solo después de **14 días con `carryStore.mismatches` = 0 y `carryStore.seenInBoth` ≥ 1**, o del
+     simulacro que acepta el ADR. Una alerta `carry-mismatch` hay que entenderla antes de seguir.
+- **Si en `on` Postgres no contesta, o falta la tabla**: cada wallet afectada dice `RETRY` en su fila de `/status`
+  ("the loss-carry store could not be read/written") y **ninguna wallet manda alerta propia**. Llega **una** alerta,
+  `carry-store`: aviso al primer fallo y **crítica** si pasan 2 minutos sin una sola respuesta. Se resuelve sola con la
+  primera respuesta. Con `dep-down` en `SIP_SOLANA_CUTS`, sus peticiones cuentan para `dep-down:database`, y mientras
+  esa alerta está activa `carry-store` se retiene (una caída, un mensaje). Crear la tabla mientras el vigilante corre
+  basta: la vuelve a buscar en cada barrida, sin reiniciar.
+- **Qué mirar en `/status` → `carryStore`**: `mode`, `notReady`, `lastProblem` (qué falló y cuándo), `readFailures`,
+  `writeFailures`, `written`, `mismatches`, `lastMismatch`, `seenInBoth`, `refusedAtGate` (cobros que la puerta paró
+  porque otro intento desde el mismo estado del vínculo podía seguir en vuelo, o el vínculo ya se había movido),
+  `dbOnlyAtBoot`, `decidedWithDbRow` (pérdidas que un reinicio habría olvidado).
+- **Volver atrás**: de `on` a `dual` (al arrancar, `dual` carga en memoria lo que `on` escribió; si Postgres no contesta
+  en ese momento lo reintenta en cada barrida, y `carryStore.dbOnlyAtBoot` sigue en `null` hasta que lo consigue), o
+  quitar la variable (vuelve a la memoria: una pérdida pendiente se olvida en ese despliegue,
+  como hoy). **Nunca borres la tabla**: `loss_carry` no se puede reconstruir desde la cadena.
+- **Conexiones a Supabase**: el almacén abre **su propia conexión**, además de las 2 del historial. Un
+  `sip-solana-keeper` con `dual` u `on` usa hasta **3**, y **6 durante un despliegue** (el contenedor viejo y el nuevo a
+  la vez); el de volumen, 2 y 4. Antes de encenderlo, comprueba que la suma de los dos servicios durante un despliegue
+  (6 + 4 = 10) más todo lo demás que use esa base queda al menos 5 por debajo del límite del pooler de sesión de Supabase.
 
 ## Si algo falla
 
