@@ -87,8 +87,12 @@ describe("the leaderboard's wiring in bin/keeper.mts", () => {
   });
 
   it("recomputes when the history changes, not only on its timer", () => {
-    expect(keeper).toContain(".then(() => refreshLeaderboard());");
-    expect(keeper).toContain("setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);");
+    // THROUGH requestBoard, which is refreshLeaderboard itself unless the
+    // board-timer cut is on (src/board-refresh.ts).
+    expect(keeper).toContain(".then(() => requestBoard());");
+    expect(keeper).toContain("setInterval(requestBoard, LEADERBOARD_REFRESH_MS);");
+    expect(keeper).toMatch(/function requestBoard\(\): void \{\n\s+if \(boardRefresh === null\) void refreshLeaderboard\(\);\n\s+else boardRefresh\.request\(\);\n\}/);
+    expect(keeper).toContain('const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? new CoalescedRefresh(refreshLeaderboard) : null;');
   });
 
   it("re-asks the history verdict instead of serving the one from boot", () => {

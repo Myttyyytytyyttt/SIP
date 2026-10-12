@@ -68,7 +68,10 @@ describe("the sweep turns the doorbell's selection", () => {
   });
 
   it("still discovers every sweep, and keeps everything discovered as known", () => {
-    expect(sweepBody).toContain("links = await discoverLinks(connection, programId, TRADING_LINK_DISC);");
+    // THROUGH L3 (src/discovery-lkg.ts), whose limit at 0 is this listing and nothing else.
+    expect(sweepBody).toContain(": discoverLinks(connection, programId, TRADING_LINK_DISC).then(");
+    expect(sweepBody).toContain("const found = await linkDiscovery.discover(");
+    expect(sweepBody).toContain("links = found.links;");
     expect(sweepBody).toContain("health.linksDiscovered = links.length");
     expect(sweepBody).toContain("for (const link of links) linkWallets.set(link.linkAddress.toBase58(), link.wallet.toBase58());");
     expect(sweepBody).toContain("knownAddresses = new Set(doorLinks.flatMap((link) => [link.wallet, link.vault]));");
@@ -139,7 +142,12 @@ describe("the doorbell's own alerts, and its route", () => {
   });
 
   it("keeps the webhook in step only from the acting instance, detached, and never with an empty list", () => {
-    expect(sweepBody).toContain("if (knownAddresses.size > 0) void webhookSync.tick({ acting: liveAtStart, addresses: [...knownAddresses], now: Date.now() });");
+    // AND ONLY FROM A LISTED LIST: a last-known-good sweep (L3) edits nothing.
+    expect(sweepBody).toContain(
+      "if (knownAddresses.size > 0 && listedFresh) void webhookSync.tick({ acting: liveAtStart, addresses: [...knownAddresses], now: Date.now() });",
+    );
+    expect(sweepBody.match(/listedFresh = false;/g)).toHaveLength(1);
+    expect(sweepBody.indexOf("listedFresh = false;")).toBeGreaterThan(sweepBody.indexOf('if (found.source === "lkg") {'));
   });
 
   it("serves the receiver built by createHooksRoute, on the server that bounds slow requests, and folds the block into /status", () => {
@@ -147,7 +155,7 @@ describe("the doorbell's own alerts, and its route", () => {
     expect(keeper).toMatch(/\(\) => leaderboard,\n\s+hooks,\n\s+\),/);
     expect(keeper).toContain("const server = createHeartbeatServer(");
     expect(keeper).not.toMatch(/\bcreateServer\(/);
-    expect(keeper).toContain("pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }");
+    expect(keeper).toContain("pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus(), ...cutsStatusBlocks() }");
   });
 
   it("builds the webhook sync with createDoorbellWebhookSync, handing it the doorbell", () => {

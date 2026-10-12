@@ -76,8 +76,11 @@ export const DEFAULT_ARCHIVAL_CREDITS: ArchivalCredits = 1;
  *
  *   * standard            — every JSON-RPC method not listed separately: 1.
  *   * programAccounts     — getProgramAccounts: 10 (raw/billing_credits.md:94-96).
- *   * programAccountsV2   — getProgramAccountsV2: 1 (:100-102). Not called yet;
- *                           C6 (`gpa-v2`) switches discovery to it.
+ *   * programAccountsV2   — getProgramAccountsV2: 1 (:100-102). Called only
+ *                           under C6 (`gpa-v2`, src/discovery.ts), one per
+ *                           page, over the same pooled fetch, so it is metered
+ *                           here; a sweep that falls back is billed its
+ *                           getProgramAccounts on top.
  *   * archival            — the historical calls, ArchivalCredits each.
  *   * webSocketConfirmation — one Anchor confirmTransaction, which listens on
  *                           the Connection's websocket. Helius bills a websocket

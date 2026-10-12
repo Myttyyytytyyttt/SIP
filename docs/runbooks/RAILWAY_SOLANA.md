@@ -604,6 +604,31 @@ Qué cuenta como volumen, la frecuencia de cobro y el cambio de modo: `reports/V
 Armado, compite por el candado del de siempre y solo uno de los dos actúa, pero sería el servicio equivocado.
 Un valor que no sea `volume` ni `profit` impide arrancar.
 
+## 7. Los recortes de coste (`SIP_SOLANA_CUTS`) y la lista de respaldo (`SIP_SOLANA_DISCOVERY_LKG_MS`)
+
+Las dos variables están **apagadas si no existen**: sin ellas el vigilante hace exactamente lo de siempre, petición por
+petición. Ninguna toca el dinero (qué se cobra, a quién, cuánto, qué se compra). Diseño: ADR del dispatcher, §2.3 y §6.
+
+`SIP_SOLANA_CUTS` es una lista separada por comas. Un nombre que no esté en esta tabla, o uno repetido, **impide
+arrancar** (Railway deja funcionando el despliegue anterior). **Volver atrás = quitar el nombre** y redesplegar.
+
+| nombre | qué cambia | qué mirar en `/status` |
+|---|---|---|
+| `gpa-v2` | Buscar los vínculos con `getProgramAccountsV2` de Helius (1 crédito por página en vez de 10). Si el endpoint no lo entiende, en la misma barrida vuelve a la llamada de siempre | `discovery.method` = `"v2"`; si dice `"v1-fallback"`, `discovery.fallbackReason` dice por qué. `linksDiscovered` igual que antes |
+| `privy-address` | Leer el registro de Privy de cada wallet **por su dirección** y guardarlo, en vez de listar todas las wallets de la app en cada barrida. Una wallet que aún no se puede firmar se vuelve a mirar cada minuto (lo que arregla el dueño desde la web se ve igual de rápido); una que sí, cada 30 min, o enseguida si Privy rechaza un envío | `cuts.privyAddressBook.listPages` no sube después de la primera barrida; `signing.wallets.signable` igual que antes |
+| `board-timer` | El ranking se recalcula como mucho cada 15 s después de un cobro, uno a la vez, en vez de una vez por cobro | `cuts.board.refreshes`; un cobro nuevo sale en `/leaderboard` en ≤ 15 s |
+
+`SIP_SOLANA_DISCOVERY_LKG_MS` (0 = apagado; el valor previsto es `600000`, 10 minutos; como mucho `3600000`): si la
+búsqueda de vínculos falla, la barrida **no se cae**: usa la última lista buena si tiene menos de ese tiempo, y vuelve a
+leer **cada vínculo de la cadena en ese momento** (el nonce y la frontera que firma el atestador nunca salen de memoria).
+
+- `/status` → `discovery.source` = `"lkg"` y `discovery.lkgUses` > 0 quieren decir que pasó. Un vínculo creado durante
+  el fallo no se ve hasta que la búsqueda vuelva a funcionar.
+- Alerta `discovery-stale`: aviso en el registro las dos primeras veces seguidas, **Telegram a la tercera**. Pasado el
+  límite de edad, la barrida falla como siempre (`sweep-failed`).
+- Al arrancar siempre hace falta una búsqueda buena: no hay lista guardada entre reinicios.
+- Volver atrás: `0` o borrar la variable.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
