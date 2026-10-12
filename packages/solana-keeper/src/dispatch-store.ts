@@ -18,9 +18,10 @@
 //              A vault missing from the answer: the job stops at its next step.
 //   GATE       before EVERY send, one transaction: the vault row FOR SHARE, held
 //              by this worker at this fence with more than 10 s of lease left by
-//              clock_timestamp(); then the send_intent row; then, for a PROFIT
-//              settle, the carry write-ahead. The bytes leave only once the
-//              COMMIT is acknowledged.
+//              clock_timestamp(); then the send_intent row, only if the job's
+//              plan cleared every earlier fence's intents (the takeover's floor,
+//              below); then, for a PROFIT settle, the carry write-ahead. The
+//              bytes leave only once the COMMIT is acknowledged.
 //   COMPLETE   the lease handed back with the job's outcome; RELEASE on SIGTERM is
 //              the same statement, due at once. A holder that lost its lease
 //              changes nothing.
@@ -63,8 +64,10 @@
 // WHAT A GATE ANSWERS, and what each means for the signed bytes:
 //   gated           the intent row is committed and acknowledged: send exactly
 //                   those bytes;
-//   refused         the fence is no longer this worker's, or less than the margin
-//                   is left: drop the bytes (never re-sign them with another
+//   refused         `lease`: the fence is no longer this worker's, or less than
+//                   the margin is left; `plan-floor`: the job planned without
+//                   clearing an earlier fence's intent (a bug upstream). Either
+//                   way drop the bytes (never re-sign them with another
 //                   blockhash, never log them serialized);
 //   unavailable     the gate never got as far as COMMIT, or the server refused
 //                   the commit on the request's own account (a constraint):
@@ -85,7 +88,11 @@
 // expired, its last valid height. So a plan that waits for the finalized height
 // to pass the floor can never be an audit row, and a send that landed a moment
 // ago is waited out to finality (≈ 13 s) before the next fence plans over it. The
-// worker that resolves, waits and plans is Q3's; this file gives it the two reads.
+// worker that resolves, waits and plans is Q3's; this file gives it the two reads
+// — AND REFUSES, IN BOTH GATE FORMS, an intent whose plan_cleared_height is not
+// above that floor (NULL included, unless no earlier fence ever gated on the
+// vault). The audit then proves an invariant the store itself holds, instead of
+// being the first place a job that planned too early could be noticed.
 //
 // SHADOW (plan P3a design detail 1). A store built for the shadow world writes
 // its intents with state 'shadow' and never writes a carry: under
@@ -98,7 +105,9 @@
 // Two per worker replica, its whole pool: the queue's statements and nothing
 // else. The scheduler pools ONE, plus the advisory lock's pinned connection on
 // the replica that holds it: holder 2 + standby 1 = 3. Steady 3 + 2r; a deploy's
-// boot window doubles it; each legacy keeper still running adds its own 2.
+// boot window doubles it; each legacy keeper still running adds its read model's
+// 2, and a PROFIT keeper whose carry store is not off (SIP_SOLANA_CARRY_STORE =
+// dual | on, which S-4 wants before the queue) 1 more for createCarryPool's own.
 // dispatchConnections() is that arithmetic. AN ASSUMED SESSION POOL OF 15 FITS
 // r ≤ 2 WITH A DEPLOY, AND NO r WHILE THE LEGACY KEEPERS SHADOW A PUSH.
 //
@@ -122,6 +131,9 @@
 //     ONE (holder 1 + 1 pinned, standby 1). The pools here are sized to the
 //     table: SCHEDULER_POOL_MAX = 1, WORKER_POOL_MAX = 2.
 //   * COMPLETE's `$10` is a delay in seconds (the clock paragraph above says why).
+//   * The overlap audit counts a NULL plan_cleared_height as -1 (OVERLAP_AUDIT_SQL
+//     says why): the ADR's text compares it with `<=`, under which such a row
+//     drops out of the audit instead of failing it.
 //   * L2's loss_carry already existed with valid_until_slot and written_by; the
 //     dispatcher's written_fence and send_intent_id are added beside them by an
 //     ALTER, and a gated carry fills all four.
@@ -129,7 +141,7 @@
 import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
 import { CARRY_LOCK_CLASS, type CarryLink } from "./carry-store.js";
-import type { RpcUsageFeed, RpcUsageRow, UsageClass, UsageProvider } from "./credit-governor.js";
+import { HELIUS_USAGE_PROVIDERS, type HeliusUsageSummary, type RpcUsageFeed, type RpcUsageRow, type UsageClass, type UsageProvider } from "./credit-governor.js";
 import { WORKER_DEAD_AFTER_MS, WORKER_STATS_KEYS } from "./fleet-status.js";
 import { READ_MODEL_SCHEMA, databaseAnswered, sslFor } from "./read-model.js";
 import type { RpcLane } from "./rpc-budget.js";
@@ -170,6 +182,13 @@ export const SCHEDULER_POOL_MAX = 1;
 export const SCHEDULER_LOCK_CONNECTIONS = 1;
 /** A legacy keeper's two (read-model.ts, max 2). */
 export const LEGACY_KEEPER_CONNECTIONS = 2;
+/**
+ * And one more on a legacy keeper whose carry store is not off: createCarryPool
+ * (src/carry-store.ts) is a pool of its own, max 1, so a settle never queues for
+ * its carry behind the read model's history writes. Only a PROFIT keeper has one
+ * (config.ts refuses the store on a role that carries no loss).
+ */
+export const LEGACY_CARRY_POOL_CONNECTIONS = 1;
 
 /** Where a vault waits; its priority follows from it (queue §2.3). */
 export type Lane = "bell" | "busy" | "retry" | "new" | "full" | "safety";
@@ -216,24 +235,66 @@ export const GATE_LOCK_SQL = `SELECT 1 FROM ${VAULT_WORK}
 const INTENT_COLUMNS =
   "vault_addr, link_addr, kind, fence, worker_id, blockhash, last_valid_block_height, plan_cleared_height, signature, idempotency_key, amount_raw, state";
 
-/** The GATE's intent row, inside its transaction. */
-export const GATE_INSERT_SQL = `INSERT INTO ${SEND_INTENT} (${INTENT_COLUMNS})
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-RETURNING id`;
+/** The intent's twelve values, every one cast: a parameter that only appears in a SELECT list has no type to infer. */
+const INTENT_VALUES = "$1::text, $2::text, $3::text, $4::bigint, $5::text, $6::text, $7::bigint, $8::bigint, $9::text, $10::text, $11::numeric, $12::text";
+
+/**
+ * THE PLAN FLOOR, IN THE GATE ITSELF (the header's "takeover's floor"): the
+ * largest COALESCE(resolved_height, last_valid_block_height) over every EARLIER
+ * fence's intent of the vault — PLAN_FLOOR_SQL's number, and the overlap
+ * audit's own right-hand side.
+ */
+const GATE_FLOOR_CTE = `p AS (
+  SELECT max(COALESCE(resolved_height, last_valid_block_height)) AS floor
+    FROM ${SEND_INTENT} WHERE vault_addr = $1::text AND fence < $4::bigint)`;
+
+/**
+ * Whether the plan cleared that floor: plan_cleared_height ($8) STRICTLY above
+ * it, or — only when no earlier fence ever gated an intent on this vault — any
+ * plan_cleared_height, NULL included. A NULL height over an earlier intent is
+ * refused: NULL is not above anything, and it would also drop out of the
+ * audit's comparison.
+ *
+ * SOUND UNDER THE ROW LOCK. Once the fence has moved no earlier fence can gate
+ * again, so no earlier intent can appear after this read; and a resolution only
+ * ever LOWERS an intent's bound, from its last valid height to where it actually
+ * landed or reverted.
+ */
+const GATE_FLOOR_CLEARED = "COALESCE($8::bigint > p.floor, p.floor IS NULL)";
+
+/**
+ * The GATE's intent row, inside its transaction, after GATE_LOCK_SQL: inserted
+ * only when the plan cleared the floor. ALWAYS ONE ROW BACK — `id` NULL when
+ * nothing was inserted, and the floor it was judged against — so a refusal can
+ * say which height it needed.
+ */
+export const GATE_INSERT_SQL = `WITH ${GATE_FLOOR_CTE},
+i AS (
+  INSERT INTO ${SEND_INTENT} (${INTENT_COLUMNS})
+  SELECT ${INTENT_VALUES} FROM p
+   WHERE ${GATE_FLOOR_CLEARED}
+  RETURNING id)
+SELECT (SELECT id FROM i) AS id, (SELECT floor FROM p) AS plan_floor`;
 
 /**
  * The GATE as one statement (safety §2.2): the same row lock, in a CTE whose
- * rows feed the INSERT. No row, no insert. Every parameter is cast, because a
- * parameter that only appears in a SELECT list has no type to infer.
+ * rows feed the INSERT, and the same plan floor. No row, no insert. ALWAYS ONE
+ * ROW BACK: `id` (NULL when nothing was inserted), `held` (whether the lock
+ * found the row at this holder, fence and margin) and the floor, so the two
+ * refusals are told apart as in the transaction form.
  */
 export const GATE_ONE_STATEMENT_SQL = `WITH l AS (
   SELECT 1 FROM ${VAULT_WORK}
    WHERE vault_addr = $1::text AND holder = $5::text AND fence = $4::bigint
      AND lease_until > clock_timestamp() + interval '${GATE_MARGIN_SECONDS} seconds'
-   FOR SHARE)
-INSERT INTO ${SEND_INTENT} (${INTENT_COLUMNS})
-SELECT $1::text, $2::text, $3::text, $4::bigint, $5::text, $6::text, $7::bigint, $8::bigint, $9::text, $10::text, $11::numeric, $12::text FROM l
-RETURNING id`;
+   FOR SHARE),
+${GATE_FLOOR_CTE},
+i AS (
+  INSERT INTO ${SEND_INTENT} (${INTENT_COLUMNS})
+  SELECT ${INTENT_VALUES} FROM l, p
+   WHERE ${GATE_FLOOR_CLEARED}
+  RETURNING id)
+SELECT (SELECT id FROM i) AS id, EXISTS (SELECT 1 FROM l) AS held, (SELECT floor FROM p) AS plan_floor`;
 
 /**
  * COMPLETE (ADR §3.5), and RELEASE with a delay of 0. A bell rung after the claim
@@ -249,13 +310,20 @@ export const COMPLETE_SQL = `UPDATE ${VAULT_WORK}
 RETURNING vault_addr`;
 
 /**
- * The overlap audit (ADR §3.6, safety §5), exactly: zero rows means every later
- * holder planned only after every earlier fence's intent had landed, reverted or
+ * The overlap audit (ADR §3.6, safety §5): zero rows means every later holder
+ * planned only after every earlier fence's intent had landed, reverted or
  * expired. The gate for shadow and for L5.
+ *
+ * NULL-AWARE, WHERE THE ADR'S TEXT IS NOT: `b.plan_cleared_height <= …` is NULL
+ * for a row whose height is NULL, and such a row would drop out of the very check
+ * that is meant to catch it. A NULL height counts as -1 here, below every bound,
+ * so a later-fence row that recorded no plan height is ALWAYS an audit row. The
+ * gate refuses to write one (GATE_FLOOR_CLEARED); this is what catches one
+ * written any other way.
  */
 export const OVERLAP_AUDIT_SQL = `SELECT b.id FROM ${SEND_INTENT} a JOIN ${SEND_INTENT} b
   ON b.vault_addr = a.vault_addr AND b.fence > a.fence
- WHERE b.plan_cleared_height <= COALESCE(a.resolved_height, a.last_valid_block_height)`;
+ WHERE COALESCE(b.plan_cleared_height, -1) <= COALESCE(a.resolved_height, a.last_valid_block_height)`;
 
 /** The open intents of earlier fences, oldest first: what a job resolves before it plans (ADR §3.6). */
 export const OPEN_INTENTS_SQL = `SELECT id, vault_addr, link_addr, kind, fence, worker_id, blockhash, last_valid_block_height,
@@ -292,7 +360,11 @@ export const RECORD_SIGNATURE_SQL = `UPDATE ${SEND_INTENT} SET signature = $2 WH
  * an L2 writer never interleave on one link. L2's own `on` gate is not repeated
  * here: under the fence a stale writer cannot reach this point, and a successor
  * does not plan a link while an earlier settle on it can still land (ADR §3.6,
- * the takeover rule's settle wait).
+ * the takeover rule's settle wait). That holds for the GATED vault's link only,
+ * so gate() refuses a carry whose link is not the settle's own (intent.link)
+ * before it asks anything. It does not also look the link up in keeper_link:
+ * the job takes its links from the vault it claimed, and keeper_link is the
+ * scheduler's discovery, which may lag a link that was just made.
  */
 export const CARRY_LOCK_SQL = "SELECT pg_advisory_xact_lock($1, hashtext($2))";
 export const CARRY_DELETE_SQL = `DELETE FROM ${LOSS_CARRY}
@@ -354,6 +426,20 @@ ON CONFLICT (bucket, worker_id, provider, lane, class) DO UPDATE SET
 export const USAGE_READ_SQL = `SELECT (extract(epoch FROM bucket) * 1000)::bigint AS bucket_ms, worker_id, provider, lane, class, calls, errors_429, errors_other
   FROM ${RPC_USAGE}
  WHERE bucket >= to_timestamp($1 / 1000.0) AND bucket < to_timestamp($2 / 1000.0)`;
+
+/**
+ * The governor's read (RpcUsageFeed.summarize), aggregated here: calls by class
+ * over the buckets in [$1, $3), each sum split by whether the bucket starts at or
+ * after $2 (the recent window) and whether its lane is 'rest'. Only the providers
+ * in $4 (the bill's, HELIUS_USAGE_PROVIDERS) and the lanes in $5 (the code's):
+ * read() skips a lane it cannot name, and so does this. At most four rows a
+ * class, whatever the month's row count.
+ */
+export const USAGE_SUMMARY_SQL = `SELECT class, lane = 'rest' AS rest, bucket >= to_timestamp($2 / 1000.0) AS recent, sum(calls) AS calls
+  FROM ${RPC_USAGE}
+ WHERE bucket >= to_timestamp($1 / 1000.0) AND bucket < to_timestamp($3 / 1000.0)
+   AND provider = ANY($4::text[]) AND lane = ANY($5::text[])
+ GROUP BY 1, 2, 3`;
 
 /** The 35-day retention ([QUEUE] §2.3), the scheduler's reap: rows whose bucket starts before $1 ms. */
 export const USAGE_PRUNE_SQL = `DELETE FROM ${RPC_USAGE} WHERE bucket < to_timestamp($1 / 1000.0)`;
@@ -438,9 +524,17 @@ export interface GateCarry {
   readonly validUntilSlot: bigint;
 }
 
+/**
+ * Why a gate refused: `lease` — the vault is no longer this worker's at this
+ * fence with the margin left (the fence did its job); `plan-floor` — the lease
+ * is fine but the job planned without clearing every earlier fence's intents
+ * (a bug in the job's takeover, caught before it could send).
+ */
+export type GateRefusal = "lease" | "plan-floor";
+
 export type GateAnswer =
   | { readonly kind: "gated"; readonly intentId: bigint; readonly carryWritten: boolean }
-  | { readonly kind: "refused"; readonly detail: string }
+  | { readonly kind: "refused"; readonly reason: GateRefusal; readonly detail: string }
   | { readonly kind: "unavailable"; readonly detail: string }
   | { readonly kind: "unacknowledged"; readonly detail: string };
 
@@ -548,6 +642,20 @@ export class DispatchStore {
    * its carry, committed together or not at all. Only `gated` may send.
    */
   async gate(intent: IntentDraft, options: { readonly carry?: GateCarry | null } = {}): Promise<GateAnswer> {
+    // A CARRY BELONGS TO THE SETTLE IT IS GATED WITH, checked before the world
+    // drops it, so a shadow worker refuses the same mis-wired call a live one
+    // would. The row lock and the fence cover intent.vault ONLY: a carry for any
+    // other link would delete that link's states, and stamp them with this fence,
+    // on a vault whose lease this worker may not hold.
+    if (options.carry !== undefined && options.carry !== null) {
+      const carryLink = options.carry.link.linkAddress.toBase58();
+      if (intent.kind !== "settle" || intent.link !== carryLink) {
+        throw new Error(
+          `a carry is written only with the settle of its own link: this gate is a ${intent.kind} for ` +
+            `${intent.link === null ? "no link" : `link ${intent.link}`} and the carry is for link ${carryLink}; nothing was asked`,
+        );
+      }
+    }
     const carry = this.world === "shadow" ? null : (options.carry ?? null);
     // THE CODE REFUSES IT FIRST, as recordCarry does; the table's CHECK refuses it again.
     if (carry !== null && carry.carry !== null && carry.carry.lossLamports <= 0n) {
@@ -566,10 +674,14 @@ export class DispatchStore {
       const lock = await client.query(GATE_LOCK_SQL, [intent.vault, this.holder, intent.fence.toString()]);
       if (lock.rows.length === 0) {
         await client.query("ROLLBACK");
-        return { kind: "refused", detail: refusedDetail(intent) };
+        return { kind: "refused", reason: "lease", detail: refusedDetail(intent) };
       }
-      const inserted = await client.query(GATE_INSERT_SQL, this.#intentValues(intent));
-      const intentId = big(inserted.rows[0]?.["id"]);
+      const inserted = (await client.query(GATE_INSERT_SQL, this.#intentValues(intent))).rows[0];
+      if (inserted?.["id"] === null || inserted?.["id"] === undefined) {
+        await client.query("ROLLBACK");
+        return { kind: "refused", reason: "plan-floor", detail: planFloorDetail(intent, bigOrNull(inserted?.["plan_floor"])) };
+      }
+      const intentId = big(inserted["id"]);
       if (carry !== null) await this.#writeCarry(client, carry, intent.fence, intentId);
       stage = "commit";
       await client.query("COMMIT");
@@ -602,9 +714,10 @@ export class DispatchStore {
     }
     let destroy = false;
     try {
-      const { rows } = await client.query(GATE_ONE_STATEMENT_SQL, this.#intentValues(intent));
-      if (rows.length === 0) return { kind: "refused", detail: refusedDetail(intent) };
-      return { kind: "gated", intentId: big(rows[0]?.["id"]), carryWritten: false };
+      const row = (await client.query(GATE_ONE_STATEMENT_SQL, this.#intentValues(intent))).rows[0];
+      if (row?.["id"] !== null && row?.["id"] !== undefined) return { kind: "gated", intentId: big(row["id"]), carryWritten: false };
+      if (row?.["held"] !== true) return { kind: "refused", reason: "lease", detail: refusedDetail(intent) };
+      return { kind: "refused", reason: "plan-floor", detail: planFloorDetail(intent, bigOrNull(row["plan_floor"])) };
     } catch (error) {
       destroy = true;
       const detail = summarizeUpstreamError(error);
@@ -821,23 +934,43 @@ function refusedDetail(intent: IntentDraft): string {
   );
 }
 
+function planFloorDetail(intent: IntentDraft, floor: bigint | null): string {
+  const cleared = intent.planClearedHeight === null ? "no plan_cleared_height" : `plan_cleared_height ${intent.planClearedHeight}`;
+  return (
+    `vault ${intent.vault} at fence ${intent.fence} planned with ${cleared}, which is not above ${floor ?? "the floor"} — the ` +
+    "last height at which an earlier fence's intent could still act — so it may have planned from a state without that " +
+    "transaction; the signed bytes were dropped and nothing was sent"
+  );
+}
+
 /**
  * How many Postgres connections a dispatcher fleet holds (ADR §3.11; the queue
  * section's when.py): the scheduler's holder (its pool plus the pinned lock) and
  * standby, `workerReplicas` workers at WORKER_POOL_MAX, doubled while a deploy's
- * new containers boot beside the old, plus each legacy keeper still running.
+ * new containers boot beside the old, plus each legacy keeper still running —
+ * its read model's two, and `legacyCarryStores` of them (profit keepers with
+ * SIP_SOLANA_CARRY_STORE dual or on) one more each for the carry pool. when.py
+ * counted the read model only; with the carry store on, the profit keeper's
+ * third connection is real and its table under-counts by one (two in a deploy).
  */
 export function dispatchConnections({
   workerReplicas,
   deploying = false,
   legacyKeepers = 0,
+  legacyCarryStores = 0,
 }: {
   readonly workerReplicas: number;
   readonly deploying?: boolean;
   readonly legacyKeepers?: number;
+  /** How many of `legacyKeepers` run a carry store (not off): each holds LEGACY_CARRY_POOL_CONNECTIONS more. */
+  readonly legacyCarryStores?: number;
 }): number {
+  if (!Number.isSafeInteger(legacyCarryStores) || legacyCarryStores < 0 || legacyCarryStores > legacyKeepers) {
+    throw new Error(`legacyCarryStores counts legacy keepers with a carry store: 0 to legacyKeepers (${legacyKeepers}), not ${legacyCarryStores}`);
+  }
   const scheduler = SCHEDULER_POOL_MAX + SCHEDULER_LOCK_CONNECTIONS + SCHEDULER_POOL_MAX;
-  const steady = scheduler + WORKER_POOL_MAX * workerReplicas + LEGACY_KEEPER_CONNECTIONS * legacyKeepers;
+  const legacy = LEGACY_KEEPER_CONNECTIONS * legacyKeepers + LEGACY_CARRY_POOL_CONNECTIONS * legacyCarryStores;
+  const steady = scheduler + WORKER_POOL_MAX * workerReplicas + legacy;
   return deploying ? 2 * steady : steady;
 }
 
@@ -848,6 +981,17 @@ export function dispatchConnections({
  * then a gate that answers `unavailable` within the bound — nothing sent — never
  * one that waits past its lease. `applicationName` shows the process in
  * pg_stat_activity.
+ *
+ * AND THE GAP BETWEEN TWO STATEMENTS IS BOUNDED TOO (idle_in_transaction_session_timeout,
+ * the same 5 s). statement_timeout only runs while a statement does: a gate whose
+ * process stops between its FOR SHARE and its COMMIT — paused, SIGSTOPped, a host
+ * that suspends — would otherwise sit "idle in transaction" holding the vault's
+ * row lock for as long as the TCP connection lives. Every claim would skip the
+ * vault, and every write to its row (the heartbeat, release, the receiver's
+ * multi-vault bell) would wait out its own timeout and fail. With the bound the
+ * server ends that session and its transaction, the lock goes, and the process's
+ * late COMMIT meets a dead connection: `unacknowledged`, nothing sent. A healthy
+ * gate sends its statements back to back, microseconds apart.
  */
 export function createDispatchPool(
   databaseUrl: Secret,
@@ -864,11 +1008,23 @@ export function createDispatchPool(
     idleTimeoutMillis: 30_000,
     statement_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
     query_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
+    idle_in_transaction_session_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
     application_name: applicationName,
   });
   // REQUIRED, as for every pool in this keeper: an idle client erroring emits
   // 'error' on the pool, and unhandled that takes the process down.
   pool.on("error", (error) => warn("dispatch pool idle client error (ignored)", { detail: summarizeUpstreamError(error) }));
+  // AND A CHECKED-OUT CLIENT'S OWN: pg-pool takes its idle listener off a client
+  // it lends, so a connection that dies BETWEEN two statements — the server's
+  // idle-in-transaction bound above ending a stalled gate, a terminated backend,
+  // a dropped socket — emits 'error' on the client with nobody listening, which
+  // throws out of the socket's handler and ends the process. Heard here, it
+  // only marks the client unusable: its next statement fails, the store's
+  // catch answers for that (`unacknowledged` or `unavailable` for a gate) and
+  // destroys it.
+  pool.on("connect", (client) => {
+    client.on("error", (error) => warn("dispatch pool client error while lent (its next statement fails)", { detail: summarizeUpstreamError(error) }));
+  });
   return pool;
 }
 
@@ -925,6 +1081,24 @@ export class PgRpcUsageFeed implements RpcUsageFeed {
         },
       ];
     });
+  }
+
+  /** The governor's read, summed by Postgres (USAGE_SUMMARY_SQL): a few dozen rows, never the month's. */
+  async summarize(fromMs: number, recentFromMs: number, toMs: number): Promise<HeliusUsageSummary> {
+    const rows = await this.#query(USAGE_SUMMARY_SQL, [fromMs, recentFromMs, toMs, [...HELIUS_USAGE_PROVIDERS], [...USAGE_LANES]]);
+    const total: Record<string, number> = {};
+    const recentRest: Record<string, number> = {};
+    const recentOther: Record<string, number> = {};
+    for (const row of rows) {
+      const usageClass = String(row["class"]);
+      const calls = Number(row["calls"]);
+      total[usageClass] = (total[usageClass] ?? 0) + calls;
+      if (row["recent"] === true) {
+        const into = row["rest"] === true ? recentRest : recentOther;
+        into[usageClass] = (into[usageClass] ?? 0) + calls;
+      }
+    }
+    return { total, recentRest, recentOther };
   }
 
   /** The 35-day retention, for the scheduler's reap: how many rows went. */

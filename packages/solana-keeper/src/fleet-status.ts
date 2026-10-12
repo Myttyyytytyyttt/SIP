@@ -94,12 +94,20 @@ export const PARKED_LISTED = 50;
 /**
  * What a worker reports about itself in `worker.stats` (jsonb), the contract
  * between the worker (Q3, which writes it on its heartbeat) and this page.
- * COUNTERS SINCE THAT WORKER'S BOOT. Only these keys are read, and only these
- * are served: the column is free jsonb, and a public page serves what it names.
+ * COUNTERS SINCE THAT WORKER'S BOOT, and two over a window of its own. Only
+ * these keys are read, and only these are served: the column is free jsonb, and
+ * a public page serves what it names.
  */
 export interface WorkerStats {
   /** GATE statements that returned no row: a send this worker signed and dropped because its lease was gone (ADR §3.5). */
   readonly fenceRejects: number | null;
+  /**
+   * The same rejects, counted over this worker's LAST HOUR — an interval on its
+   * own clock, so a skewed clock does not move it. What lets a scheduler that
+   * has just started page a reject it never saw happen: a counter since boot
+   * says how many, not when (src/fleet-alerts.ts, fence-reject).
+   */
+  readonly fenceRejectsLastHour: number | null;
   /** COMPLETE statements that updated no row, and heartbeats that dropped a vault: leases this worker lost mid-job. */
   readonly leaseLosses: number | null;
   /** Jobs this worker completed in its last ten minutes. */
@@ -109,7 +117,7 @@ export interface WorkerStats {
 }
 
 /** The keys of WorkerStats as they are spelled in the jsonb. */
-export const WORKER_STATS_KEYS = ["fenceRejects", "leaseLosses", "jobsLast10Min", "releasedOnSigterm"] as const;
+export const WORKER_STATS_KEYS = ["fenceRejects", "fenceRejectsLastHour", "leaseLosses", "jobsLast10Min", "releasedOnSigterm"] as const;
 
 /** One `worker` row, as served. */
 export interface FleetWorkerRow {

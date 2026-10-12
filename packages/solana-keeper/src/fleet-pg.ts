@@ -269,6 +269,7 @@ function workerStats(value: unknown): WorkerStats {
   const stats = obj(value);
   return {
     fenceRejects: num(stats["fenceRejects"]),
+    fenceRejectsLastHour: num(stats["fenceRejectsLastHour"]),
     leaseLosses: num(stats["leaseLosses"]),
     jobsLast10Min: num(stats["jobsLast10Min"]),
     releasedOnSigterm: num(stats["releasedOnSigterm"]),

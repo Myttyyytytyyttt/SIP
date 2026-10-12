@@ -22,6 +22,7 @@ import {
   USAGE_BUCKET_MS,
   bucketStart,
   safetySliceSize,
+  summarizeUsage,
   utcMonth,
   type RpcUsageFeed,
   type RpcUsageRow,
@@ -108,9 +109,10 @@ describe("the rows a process collects", () => {
     expect((await feed.read(NOV, NOV + DAY))[0]!.calls).toBe(12);
 
     collector.asked("hot", "standard", 3, NOV + 2_000);
-    const down: RpcUsageFeed = { add: async () => Promise.reject(new Error("pg down")), read: async () => [] };
+    const nothing = async () => ({ total: {}, recentRest: {}, recentOther: {} });
+    const down: RpcUsageFeed = { add: async () => Promise.reject(new Error("pg down")), read: async () => [], summarize: nothing };
     expect(await collector.flush(down)).toEqual({ failed: true, kept: 1 });
-    const hung: RpcUsageFeed = { add: () => new Promise(() => undefined), read: async () => [] };
+    const hung: RpcUsageFeed = { add: () => new Promise(() => undefined), read: async () => [], summarize: nothing };
     collector.asked("hot", "standard", 1, NOV + 3_000);
     expect(await collector.flush(hung, 20)).toEqual({ failed: true, kept: 1 });
     expect(collector.status()).toMatchObject({ pendingRows: 1, flushFailures: 2 });
@@ -263,7 +265,9 @@ describe("the governor", () => {
     let mode: "ok" | "throw" | "hang" = "ok";
     const flaky: RpcUsageFeed = {
       add: (rows) => feed.add(rows),
-      read: (from, to) => (mode === "ok" ? feed.read(from, to) : mode === "throw" ? Promise.reject(new Error("pg down")) : new Promise(() => undefined)),
+      read: (from, to) => feed.read(from, to),
+      summarize: (from, recent, to) =>
+        mode === "ok" ? feed.summarize(from, recent, to) : mode === "throw" ? Promise.reject(new Error("pg down")) : new Promise(() => undefined),
     };
     const { governor } = governed({ at: NOV + 10 * DAY, feed: flaky, readTimeoutMs: 20 });
     await burn(feed, NOV, NOV + 10 * DAY, { hot: 158_400, rest: 158_400 });
@@ -273,6 +277,59 @@ describe("the governor", () => {
       const verdict = await governor.evaluate();
       expect(verdict).toMatchObject({ step: 1, safetyPassMs: 2 * SAFETY_PASS_MS, held: "feed-failed", alert: { fire: null, clear: false } });
     }
+  });
+
+  it("reads one aggregate of the month, never its rows: the same verdict from a feed whose rows cannot be read at all", async () => {
+    // LATE IN A MONTH AT r = 2 the rows are tens to hundreds of thousands; the
+    // governor's read must not grow with them. A feed that refuses row reads
+    // decides exactly as the plain one, and is asked once per evaluation.
+    const at = NOV + 10 * DAY;
+    const plain = governed({ at });
+    await burn(plain.feed, NOV, at, { hot: 158_400, rest: 158_400 });
+    const memory = new InMemoryRpcUsageFeed();
+    await burn(memory, NOV, at, { hot: 158_400, rest: 158_400 });
+    const asked: Array<[number, number, number]> = [];
+    const aggregateOnly: RpcUsageFeed = {
+      add: (rows) => memory.add(rows),
+      read: () => Promise.reject(new Error("the governor read the month's rows")),
+      summarize: (from, recent, to) => {
+        asked.push([from, recent, to]);
+        return memory.summarize(from, recent, to);
+      },
+    };
+    const lean = governed({ at, feed: aggregateOnly });
+    const verdict = await lean.governor.evaluate();
+    expect(verdict.held).toBeNull();
+    expect(verdict).toEqual(await plain.governor.evaluate());
+    expect(verdict.step).toBe(1);
+    // THE MONTH, AND THE LAST HOUR'S BUCKETS INSIDE IT, IN ONE CALL.
+    expect(asked).toEqual([[NOV, bucketStart(at - HOUR), at + 1]]);
+  });
+
+  it("summarizes only Helius's rows, by class, the recent window split by the rest lane", () => {
+    const row = (bucket: number, lane: RpcLane, provider: UsageProvider, usageClass: UsageClass, calls: number): RpcUsageRow => ({
+      bucket,
+      workerId: "w",
+      provider,
+      lane,
+      usageClass,
+      calls,
+      errors429: 0,
+      errorsOther: 0,
+    });
+    const recent = NOV + DAY;
+    const rows = [
+      row(NOV, "hot", "helius-rpc", "standard", 5),
+      row(recent, "rest", "helius-rpc", "standard", 7),
+      row(recent, "hot", "helius-rest", "webhookEvent", 2),
+      row(recent, "send", "jupiter", "jupiter", 100),
+      row(NOV + 2 * DAY, "hot", "helius-rpc", "standard", 1_000),
+    ];
+    expect(summarizeUsage(rows, NOV, recent, NOV + 2 * DAY)).toEqual({
+      total: { standard: 12, webhookEvent: 2 },
+      recentRest: { standard: 7 },
+      recentOther: { webhookEvent: 2 },
+    });
   });
 
   it("reads the UTC calendar month", () => {
@@ -305,7 +362,7 @@ describe("sends never deferred by the governor", () => {
     const order: string[] = [];
     for (let i = 0; i < 40; i++) void withRpcLane("hot", () => budget.admit(read)).then(() => order.push("hot"));
     for (let i = 0; i < 40; i++) void withRpcLane("rest", () => budget.admit(read)).then(() => order.push("rest"));
-    const hung: RpcUsageFeed = { add: () => new Promise(() => undefined), read: () => new Promise(() => undefined) };
+    const hung: RpcUsageFeed = { add: () => new Promise(() => undefined), read: () => new Promise(() => undefined), summarize: () => new Promise(() => undefined) };
     const flushing = collector.flush(hung, 20);
     await clock.advance(1_000);
     // THE QUOTA'S RATE, untouched by any verdict: sixteen in the second.

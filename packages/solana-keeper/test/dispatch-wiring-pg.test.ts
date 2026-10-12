@@ -28,7 +28,7 @@ import { Secret } from "@sip/solana-log";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Alert } from "../src/alerts.js";
 import { CreditGovernor, InMemoryRpcUsageFeed, RpcUsageCollector, USAGE_BUCKET_MS, bucketStart, type RpcUsageRow, type UsageClass, type UsageProvider } from "../src/credit-governor.js";
-import { DispatchStore, PgRpcUsageFeed, SCHEDULER_POOL_MAX, createDispatchPool } from "../src/dispatch-store.js";
+import { DispatchStore, PgRpcUsageFeed, SCHEDULER_POOL_MAX, USAGE_SUMMARY_SQL, createDispatchPool } from "../src/dispatch-store.js";
 import { FENCE_REJECT_ALERT_KEY, FleetAlerts } from "../src/fleet-alerts.js";
 import { PgFleetStore } from "../src/fleet-pg.js";
 import { BELL_DELAY_MS, FleetReceiver } from "../src/fleet-receiver.js";
@@ -239,6 +239,12 @@ describe.skipIf(!usable)("the P3a tracks wired to the store, on Postgres 16 (nee
       ] as const) {
         expect(sorted(await pgFeed.read(from, to))).toEqual(sorted(await memory.read(from, to)));
       }
+      // THE GOVERNOR'S READ, SUMMED BY POSTGRES: the same numbers as memory's, in a handful of rows.
+      const recentFrom = bucketStart(NOW - 60 * 60_000);
+      expect(await pgFeed.summarize(MONTH_START, recentFrom, NOW + 1)).toEqual(await memory.summarize(MONTH_START, recentFrom, NOW + 1));
+      const summed = await db.query(USAGE_SUMMARY_SQL, [MONTH_START, recentFrom, NOW + 1, ["helius-rpc", "helius-rest"], ["send", "hot", "rest", "sched"]]);
+      expect(summed.rows.length).toBeLessThanOrEqual(CLASSES.length * 4);
+      expect((await db.query("SELECT count(*)::int AS n FROM sip_solana.rpc_usage")).rows[0].n).toBeGreaterThan(summed.rows.length);
       for (const [archivalCredits, archivalCreditsSource] of [
         [10, "default"],
         [1, "env"],
@@ -283,14 +289,14 @@ describe.skipIf(!usable)("the P3a tracks wired to the store, on Postgres 16 (nee
       const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: () => undefined }, windowMs: 60_000 });
       const reader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => alerts.observeSnapshot(snapshot, { acting: true }) });
       expect(await reader.refresh()).toBe(true);
-      expect(reader.snapshot()!.workers[0]!.stats).toEqual({ fenceRejects: 0, leaseLosses: null, jobsLast10Min: 3, releasedOnSigterm: null });
+      expect(reader.snapshot()!.workers[0]!.stats).toEqual({ fenceRejects: 0, fenceRejectsLastHour: null, leaseLosses: null, jobsLast10Min: 3, releasedOnSigterm: null });
       expect(fired.filter((alert) => alert.key === FENCE_REJECT_ALERT_KEY)).toEqual([]);
       // A gate refused two sends: the worker's next beat says so, and the next read pages it.
       await worker.beatProcess(1, { fenceRejects: 2, jobsLast10Min: 4, ...({ walletKey: "never written" } as object) });
       // A beat without stats keeps the counters the row has.
       await worker.beatProcess(0);
       expect(await reader.refresh()).toBe(true);
-      expect(reader.snapshot()!.workers[0]!.stats).toEqual({ fenceRejects: 2, leaseLosses: null, jobsLast10Min: 4, releasedOnSigterm: null });
+      expect(reader.snapshot()!.workers[0]!.stats).toEqual({ fenceRejects: 2, fenceRejectsLastHour: null, leaseLosses: null, jobsLast10Min: 4, releasedOnSigterm: null });
       expect(fired.filter((alert) => alert.key === FENCE_REJECT_ALERT_KEY).map((alert) => alert.severity)).toEqual(["critical"]);
       const { rows } = await db.query<{ stats: Record<string, unknown> }>("SELECT stats FROM sip_solana.worker WHERE worker_id = 'w-a'");
       expect(rows[0]!.stats).toEqual({ fenceRejects: 2, jobsLast10Min: 4 });

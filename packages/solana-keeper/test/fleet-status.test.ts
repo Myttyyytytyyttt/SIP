@@ -79,7 +79,7 @@ const noBoard = (): LeaderboardReply => ({ unavailable: "not here" });
 describe("the snapshot as the statement returns it", () => {
   it("serves only the worker stats it names, marks a heartbeat past 2 minutes dead, and reads the lanes' oldest wait", () => {
     const [alive, dead] = SNAPSHOT.workers;
-    expect(alive!.stats).toEqual({ fenceRejects: 0, leaseLosses: 1, jobsLast10Min: 12, releasedOnSigterm: null });
+    expect(alive!.stats).toEqual({ fenceRejects: 0, fenceRejectsLastHour: null, leaseLosses: 1, jobsLast10Min: 12, releasedOnSigterm: null });
     // The quota's age (worker.quota_at, Q1) as the statement computed it; a row never handed out reads null, not 0.
     expect([alive!.quotaAgeMs, dead!.quotaAgeMs]).toEqual([9_000, null]);
     expect(JSON.stringify(SNAPSHOT)).not.toContain("never served");

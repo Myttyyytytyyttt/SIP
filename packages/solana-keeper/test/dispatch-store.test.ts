@@ -7,6 +7,7 @@
 // commit, the SIGTERM drill — need a real Postgres and live in
 // test-local/fence-pg.local.test.ts.
 
+import { EventEmitter } from "node:events";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -20,6 +21,8 @@ import {
   DISPATCH_TABLES,
   DispatchStore,
   GATE_INSERT_SQL,
+  LEGACY_CARRY_POOL_CONNECTIONS,
+  LEGACY_KEEPER_CONNECTIONS,
   GATE_LOCK_SQL,
   GATE_MARGIN_SECONDS,
   GATE_ONE_STATEMENT_SQL,
@@ -40,6 +43,7 @@ import {
   USAGE_ADD_SQL,
   USAGE_PRUNE_SQL,
   USAGE_READ_SQL,
+  USAGE_SUMMARY_SQL,
   WORKER_BEAT_SQL,
   WORKER_POOL_MAX,
   WRITE_QUOTAS_SQL,
@@ -50,6 +54,7 @@ import {
   type DispatchPool,
   type IntentDraft,
 } from "../src/dispatch-store.js";
+import { createCarryPool } from "../src/carry-store.js";
 import type { RpcUsageRow } from "../src/credit-governor.js";
 import { WORKER_DEAD_AFTER_MS, WORKER_STATS_KEYS } from "../src/fleet-status.js";
 import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
@@ -150,12 +155,25 @@ describe("the four statements, as ADR §3.5 writes them", () => {
   it("GATE: the vault row FOR SHARE, at this holder and fence, with more than the 10 s margin left", () => {
     for (const text of [GATE_LOCK_SQL, GATE_ONE_STATEMENT_SQL]) {
       expect(text).toContain("lease_until > clock_timestamp() + interval '10 seconds'");
-      expect(text).toMatch(/FOR SHARE\)?$/m);
+      expect(text).toMatch(/FOR SHARE(\),)?$/m);
     }
     expect(GATE_LOCK_SQL).toContain("WHERE vault_addr = $1 AND holder = $2 AND fence = $3");
     expect(GATE_ONE_STATEMENT_SQL).toContain("WHERE vault_addr = $1::text AND holder = $5::text AND fence = $4::bigint");
-    // THE ONE-STATEMENT FORM INSERTS ONLY THE ROWS THE LOCK RETURNED.
-    expect(GATE_ONE_STATEMENT_SQL).toMatch(/SELECT \$1::text, .* FROM l\nRETURNING id$/);
+    // THE ONE-STATEMENT FORM INSERTS ONLY THE ROWS THE LOCK RETURNED, and only past the plan floor.
+    expect(GATE_ONE_STATEMENT_SQL).toMatch(/SELECT \$1::text, .* FROM l, p\n\s+WHERE COALESCE\(\$8::bigint > p\.floor, p\.floor IS NULL\)\n\s+RETURNING id\)/);
+    expect(GATE_ONE_STATEMENT_SQL).toMatch(/SELECT \(SELECT id FROM i\) AS id, EXISTS \(SELECT 1 FROM l\) AS held, \(SELECT floor FROM p\) AS plan_floor$/);
+  });
+
+  it("GATE: the intent goes in only when its plan_cleared_height is above every earlier fence's intent — NULL only when there is none", () => {
+    for (const text of [GATE_INSERT_SQL, GATE_ONE_STATEMENT_SQL]) {
+      // THE FLOOR IS PLAN_FLOOR_SQL'S, over earlier fences only.
+      expect(text).toContain("SELECT max(COALESCE(resolved_height, last_valid_block_height)) AS floor");
+      expect(text).toContain("WHERE vault_addr = $1::text AND fence < $4::bigint)");
+      // STRICTLY ABOVE; a NULL plan height passes only a NULL floor (no earlier intent at all).
+      expect(text).toContain("WHERE COALESCE($8::bigint > p.floor, p.floor IS NULL)");
+    }
+    expect(GATE_INSERT_SQL).toMatch(/SELECT \$1::text, .* FROM p\n/);
+    expect(GATE_INSERT_SQL).toMatch(/SELECT \(SELECT id FROM i\) AS id, \(SELECT floor FROM p\) AS plan_floor$/);
   });
 
   it("COMPLETE: only the holder at its fence; a bell during the turn makes it due now; the next due is a delay on the database's clock", () => {
@@ -167,9 +185,9 @@ describe("the four statements, as ADR §3.5 writes them", () => {
     expect(COMPLETE_SQL.slice(COMPLETE_SQL.indexOf("SET"), COMPLETE_SQL.indexOf("WHERE"))).not.toContain("fence");
   });
 
-  it("the overlap audit is the ADR's, word for word", () => {
+  it("the overlap audit is the ADR's, except that a NULL plan height is an audit row instead of dropping out of it", () => {
     expect(OVERLAP_AUDIT_SQL.replace(/\s+/g, " ")).toBe(
-      "SELECT b.id FROM sip_solana.send_intent a JOIN sip_solana.send_intent b ON b.vault_addr = a.vault_addr AND b.fence > a.fence WHERE b.plan_cleared_height <= COALESCE(a.resolved_height, a.last_valid_block_height)",
+      "SELECT b.id FROM sip_solana.send_intent a JOIN sip_solana.send_intent b ON b.vault_addr = a.vault_addr AND b.fence > a.fence WHERE COALESCE(b.plan_cleared_height, -1) <= COALESCE(a.resolved_height, a.last_valid_block_height)",
     );
   });
 
@@ -211,7 +229,9 @@ describe("DispatchStore, over a scripted client", () => {
   });
 
   describe("the gate", () => {
-    const gatedScript = (text: string): Answer => (text.startsWith("SELECT 1") ? { rows: [{ "?column?": 1 }] } : text.startsWith("INSERT INTO sip_solana.send_intent") ? { rows: [{ id: "41" }] } : { rows: [] });
+    const gatedScript = (text: string): Answer =>
+      text.startsWith("SELECT 1") ? { rows: [{ "?column?": 1 }] } : text === GATE_INSERT_SQL ? { rows: [{ id: "41", plan_floor: "3999" }] } : { rows: [] };
+    const settleIntent = (overrides: Partial<IntentDraft> = {}) => intent({ kind: "settle", link: LINK.linkAddress.toBase58(), signature: null, ...overrides });
 
     it("locks, inserts, commits — in that order, in one transaction — and only then answers gated", async () => {
       const db = scripted(gatedScript);
@@ -226,14 +246,25 @@ describe("DispatchStore, over a scripted client", () => {
     it("refuses, rolls back and inserts nothing when the lock returns no row", async () => {
       const db = scripted((text) => ({ rows: text.startsWith("SELECT 1") ? [] : [] }));
       const answer = await new DispatchStore(db.pool, "w").gate(intent());
-      expect(answer.kind).toBe("refused");
+      expect(answer).toMatchObject({ kind: "refused", reason: "lease" });
       expect(answer.kind === "refused" && answer.detail).toMatch(/no longer held at fence 7 with more than 10 s of lease left; the signed bytes were dropped/);
       expect(db.sent.map((s) => s.text)).toEqual(["BEGIN", GATE_LOCK_SQL, "ROLLBACK"]);
     });
 
+    it("refuses, rolls back and writes no carry when the plan did not clear the floor: the insert inserted nothing", async () => {
+      const db = scripted((text) => (text === GATE_INSERT_SQL ? { rows: [{ id: null, plan_floor: "4242" }] } : gatedScript(text)));
+      const answer = await new DispatchStore(db.pool, "w").gate(settleIntent({ planClearedHeight: null }), {
+        carry: { link: LINK, endSlot: 950n, carry: { lossLamports: 77n, walletSignedTxCount: 4 }, validUntilSlot: 1_100n },
+      });
+      expect(answer).toMatchObject({ kind: "refused", reason: "plan-floor" });
+      expect(answer.kind === "refused" && answer.detail).toContain("planned with no plan_cleared_height, which is not above 4242");
+      expect(db.sent.map((s) => s.text)).toEqual(["BEGIN", GATE_LOCK_SQL, GATE_INSERT_SQL, "ROLLBACK"]);
+      expect(db.releases).toEqual([false]);
+    });
+
     it("writes the carry inside the transaction, after the intent and before COMMIT, stamped with the fence and the intent", async () => {
       const db = scripted(gatedScript);
-      const answer = await new DispatchStore(db.pool, "w").gate(intent({ kind: "settle", link: LINK.linkAddress.toBase58(), signature: null }), {
+      const answer = await new DispatchStore(db.pool, "w").gate(settleIntent(), {
         carry: { link: LINK, endSlot: 950n, carry: { lossLamports: 77n, walletSignedTxCount: 4 }, validUntilSlot: 1_100n },
       });
       expect(answer).toEqual({ kind: "gated", intentId: 41n, carryWritten: true });
@@ -241,7 +272,7 @@ describe("DispatchStore, over a scripted client", () => {
       expect(texts).toEqual([
         "BEGIN",
         "SELECT 1 FROM sip_solana.vault_work",
-        "INSERT INTO sip_solana.send_intent (vault_addr, link_addr, kind, fence, worker_id, blockhash, last_valid_block_height, plan_cleared_height, signature, idempotency_key, amount_raw, state)",
+        "WITH p AS (",
         "SELECT pg_advisory_xact_lock($1, hashtext($2))",
         "DELETE FROM sip_solana.loss_carry",
         "INSERT INTO sip_solana.loss_carry",
@@ -253,7 +284,7 @@ describe("DispatchStore, over a scripted client", () => {
 
     it("with no carry to keep, still deletes the link's other states, as recordCarry does", async () => {
       const db = scripted(gatedScript);
-      await new DispatchStore(db.pool, "w").gate(intent({ kind: "settle", link: "L" }), { carry: { link: LINK, endSlot: 950n, carry: null, validUntilSlot: 1n } });
+      await new DispatchStore(db.pool, "w").gate(settleIntent(), { carry: { link: LINK, endSlot: 950n, carry: null, validUntilSlot: 1n } });
       expect(db.sent.map((s) => s.text.split("\n")[0])).toContain("DELETE FROM sip_solana.loss_carry");
       expect(db.sent.map((s) => s.text.split("\n")[0])).not.toContain("INSERT INTO sip_solana.loss_carry");
     });
@@ -261,14 +292,33 @@ describe("DispatchStore, over a scripted client", () => {
     it("refuses a carry that is not a loss before it asks anything", async () => {
       const db = scripted(gatedScript);
       await expect(
-        new DispatchStore(db.pool, "w").gate(intent(), { carry: { link: LINK, endSlot: 950n, carry: { lossLamports: 0n, walletSignedTxCount: 1 }, validUntilSlot: 1n } }),
+        new DispatchStore(db.pool, "w").gate(settleIntent(), { carry: { link: LINK, endSlot: 950n, carry: { lossLamports: 0n, walletSignedTxCount: 1 }, validUntilSlot: 1n } }),
       ).rejects.toThrow(/a carried loss is positive, not 0 lamports/);
       expect(db.connects).toBe(0);
     });
 
+    it("refuses, before it asks anything, a carry that is not for the settle it is gated with — in either world", async () => {
+      // THE LOCK AND THE FENCE COVER intent.vault ONLY: a carry for another link
+      // would delete that link's states under a fence that is not its vault's.
+      const other = new PublicKey(Buffer.alloc(32, 10)).toBase58();
+      const carry = { link: LINK, endSlot: 950n, carry: { lossLamports: 77n, walletSignedTxCount: 4 }, validUntilSlot: 1n };
+      for (const world of ["live", "shadow"] as const) {
+        const db = scripted(gatedScript);
+        const store = new DispatchStore(db.pool, "w", world);
+        await expect(store.gate(intent(), { carry }), world).rejects.toThrow(/a carry is written only with the settle of its own link: this gate is a wrap for no link/);
+        await expect(store.gate(settleIntent({ link: other }), { carry }), world).rejects.toThrow(
+          new RegExp(`this gate is a settle for link ${other} and the carry is for link ${LINK.linkAddress.toBase58()}`),
+        );
+        expect(db.connects, world).toBe(0);
+        // ITS OWN LINK'S SETTLE PASSES, and a gate with no carry is never asked.
+        expect((await store.gate(settleIntent(), { carry })).kind, world).toBe("gated");
+        expect((await store.gate(intent(), { carry: null })).kind, world).toBe("gated");
+      }
+    });
+
     it("in the shadow world writes 'shadow' rows and never a carry", async () => {
       const db = scripted(gatedScript);
-      const answer = await new DispatchStore(db.pool, "w", "shadow").gate(intent(), {
+      const answer = await new DispatchStore(db.pool, "w", "shadow").gate(settleIntent(), {
         carry: { link: LINK, endSlot: 950n, carry: { lossLamports: 77n, walletSignedTxCount: 4 }, validUntilSlot: 1n },
       });
       expect(answer).toEqual({ kind: "gated", intentId: 41n, carryWritten: false });
@@ -277,7 +327,7 @@ describe("DispatchStore, over a scripted client", () => {
     });
 
     it("anything that fails before COMMIT is unavailable: rolled back, the client destroyed, nothing sent", async () => {
-      for (const failing of ["BEGIN", "SELECT 1", "INSERT INTO sip_solana.send_intent"]) {
+      for (const failing of ["BEGIN", "SELECT 1", "WITH p AS ("]) {
         const db = scripted((text) => (text.startsWith(failing) ? new Error("socket hang up") : gatedScript(text)));
         const answer = await new DispatchStore(db.pool, "w").gate(intent());
         expect(answer.kind, failing).toBe("unavailable");
@@ -305,13 +355,18 @@ describe("DispatchStore, over a scripted client", () => {
     });
 
     it("the one-statement form: one round trip; no row is refused; no answer is unacknowledged; a refusal on the request is unavailable", async () => {
-      const ok = scripted(() => ({ rows: [{ id: "5" }] }));
+      const ok = scripted(() => ({ rows: [{ id: "5", held: true, plan_floor: null }] }));
       expect(await new DispatchStore(ok.pool, "w").gateOneStatement(intent())).toEqual({ kind: "gated", intentId: 5n, carryWritten: false });
       expect(ok.sent).toEqual([{ text: GATE_ONE_STATEMENT_SQL, values: ["Vault1111", null, "wrap", "7", "w", "Hash1111", "4242", "4000", "Sig1111", null, "123", "intent"] }]);
-      expect((await new DispatchStore(scripted(() => ({ rows: [] })).pool, "w").gateOneStatement(intent())).kind).toBe("refused");
-      const lost = scripted(() => new Error("Query read timeout"));
-      expect((await new DispatchStore(lost.pool, "w").gateOneStatement(intent())).kind).toBe("unacknowledged");
-      expect(lost.releases).toEqual([true]);
+      // NOTHING INSERTED: the lock found no row (lease), or it did and the plan was under the floor (plan-floor).
+      const lost = await new DispatchStore(scripted(() => ({ rows: [{ id: null, held: false, plan_floor: "9000" }] })).pool, "w").gateOneStatement(intent());
+      expect(lost).toMatchObject({ kind: "refused", reason: "lease" });
+      const early = await new DispatchStore(scripted(() => ({ rows: [{ id: null, held: true, plan_floor: "4000" }] })).pool, "w").gateOneStatement(intent());
+      expect(early).toMatchObject({ kind: "refused", reason: "plan-floor" });
+      expect(early.kind === "refused" && early.detail).toContain("planned with plan_cleared_height 4000, which is not above 4000");
+      const silent = scripted(() => new Error("Query read timeout"));
+      expect((await new DispatchStore(silent.pool, "w").gateOneStatement(intent())).kind).toBe("unacknowledged");
+      expect(silent.releases).toEqual([true]);
       expect((await new DispatchStore(scripted(() => serverError("23505")).pool, "w").gateOneStatement(intent())).kind).toBe("unavailable");
     });
   });
@@ -399,6 +454,27 @@ describe("connections (ADR §3.11, the queue section's when.out)", () => {
     expect(fits(1, 2)).toBe(false);
   });
 
+  it("counts the carry store's own pool on a legacy profit keeper that runs one: 3 + 2 + 3 + 2 = 10 at r = 1, 20 through a deploy", () => {
+    // THE SHADOW STAGE S-4 ASKS FOR: profit with SIP_SOLANA_CARRY_STORE on (its read model's 2 + the carry pool's 1), volume (2).
+    expect(dispatchConnections({ workerReplicas: 1, legacyKeepers: 2, legacyCarryStores: 1 })).toBe(10);
+    expect(dispatchConnections({ workerReplicas: 1, deploying: true, legacyKeepers: 2, legacyCarryStores: 1 })).toBe(20);
+    expect(dispatchConnections({ workerReplicas: 1, legacyKeepers: 2, legacyCarryStores: 1 }) - dispatchConnections({ workerReplicas: 1, legacyKeepers: 2 })).toBe(
+      LEGACY_CARRY_POOL_CONNECTIONS,
+    );
+    expect([LEGACY_KEEPER_CONNECTIONS, LEGACY_CARRY_POOL_CONNECTIONS]).toEqual([2, 1]);
+    // MORE CARRY STORES THAN LEGACY KEEPERS IS A MISCOUNT, not a fleet.
+    expect(() => dispatchConnections({ workerReplicas: 1, legacyKeepers: 1, legacyCarryStores: 2 })).toThrow(/legacyCarryStores/);
+    expect(() => dispatchConnections({ workerReplicas: 1, legacyCarryStores: -1 })).toThrow(/legacyCarryStores/);
+  });
+
+  it("LEGACY_CARRY_POOL_CONNECTIONS and LEGACY_KEEPER_CONNECTIONS are the pools the legacy keeper really builds", async () => {
+    const url = new Secret("postgresql://u:p@127.0.0.1:1/db?sslmode=disable", "databaseUrl");
+    const carry = createCarryPool(url, () => undefined);
+    expect(carry.options.max).toBe(LEGACY_CARRY_POOL_CONNECTIONS);
+    await carry.end();
+    expect(source("src/read-model.ts")).toMatch(new RegExp(`\\n\\s+max: ${LEGACY_KEEPER_CONNECTIONS},\\n`));
+  });
+
   it("sizes each pool to the table and bounds every statement and every wait for a connection", async () => {
     const warned: string[] = [];
     const worker = createDispatchPool(new Secret("postgresql://u:p@127.0.0.1:1/db?sslmode=disable", "databaseUrl"), "worker", "app-w", (m) => warned.push(m));
@@ -408,14 +484,23 @@ describe("connections (ADR §3.11, the queue section's when.out)", () => {
       connectionTimeoutMillis: DISPATCH_STATEMENT_TIMEOUT_MS,
       statement_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
       query_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
+      // THE GAP BETWEEN A GATE'S STATEMENTS: a process stopped mid-transaction loses its row lock at the same bound.
+      idle_in_transaction_session_timeout: DISPATCH_STATEMENT_TIMEOUT_MS,
       application_name: "app-w",
     });
+    expect(scheduler.options).toMatchObject({ idle_in_transaction_session_timeout: DISPATCH_STATEMENT_TIMEOUT_MS });
     expect(scheduler.options.max).toBe(SCHEDULER_POOL_MAX);
     expect([WORKER_POOL_MAX, SCHEDULER_POOL_MAX]).toEqual([2, 1]);
     // AN IDLE CLIENT'S ERROR IS HEARD, NOT THROWN.
     expect(worker.listenerCount("error")).toBe(1);
     worker.emit("error", new Error("idle client died"), undefined as never);
     expect(warned).toEqual(["dispatch pool idle client error (ignored)"]);
+    // AND A LENT CLIENT'S: pg-pool takes its own listener off while it is lent, and
+    // an 'error' nobody hears throws (the idle-in-transaction bound ending a stalled gate).
+    const lent = new EventEmitter();
+    worker.emit("connect", lent as never);
+    expect(() => lent.emit("error", new Error("terminating connection due to idle-in-transaction timeout"))).not.toThrow();
+    expect(warned.at(-1)).toBe("dispatch pool client error while lent (its next statement fails)");
     await Promise.all([worker.end(), scheduler.end()]);
   });
 });
@@ -508,15 +593,16 @@ describe("the merge's wiring, over a scripted client: the quota hand-out, worker
 
   it("writes into worker.stats only the counters the public page names, each a whole number of zero or more", () => {
     expect(workerStatsJson(undefined)).toBeNull();
-    expect(JSON.parse(workerStatsJson({ fenceRejects: 1, leaseLosses: 2, jobsLast10Min: 3, releasedOnSigterm: 4 })!)).toEqual({
+    expect(JSON.parse(workerStatsJson({ fenceRejects: 1, fenceRejectsLastHour: 1, leaseLosses: 2, jobsLast10Min: 3, releasedOnSigterm: 4 })!)).toEqual({
       fenceRejects: 1,
+      fenceRejectsLastHour: 1,
       leaseLosses: 2,
       jobsLast10Min: 3,
       releasedOnSigterm: 4,
     });
     expect(Object.keys(JSON.parse(workerStatsJson({ fenceRejects: 1 })!))).toEqual(["fenceRejects"]);
     expect(JSON.parse(workerStatsJson({ fenceRejects: 1.5, leaseLosses: Number.NaN, jobsLast10Min: -2, ...({ secret: 1 } as object) })!)).toEqual({});
-    expect([...WORKER_STATS_KEYS]).toEqual(["fenceRejects", "leaseLosses", "jobsLast10Min", "releasedOnSigterm"]);
+    expect([...WORKER_STATS_KEYS]).toEqual(["fenceRejects", "fenceRejectsLastHour", "leaseLosses", "jobsLast10Min", "releasedOnSigterm"]);
   });
 
   it("is the follower's source: each read IS the beat, one statement, and the follower sets what it answered", async () => {
@@ -580,6 +666,26 @@ describe("the merge's wiring, over a scripted client: the quota hand-out, worker
         values: [["1760000400000", "1760000400000"], ["w", "w"], ["helius-rpc", "helius-rpc"], ["send", "rest"], ["standard", "archival"], ["3", "3"], ["1", "1"], ["0", "0"]],
       },
     ]);
+  });
+
+  it("PgRpcUsageFeed: summarizes in SQL — Helius's providers and the code's lanes only, by class, recent and rest — and adds up what it answers", async () => {
+    expect(USAGE_SUMMARY_SQL).toContain("sum(calls) AS calls");
+    expect(USAGE_SUMMARY_SQL).toContain("GROUP BY 1, 2, 3");
+    expect(USAGE_SUMMARY_SQL).toContain("provider = ANY($4::text[]) AND lane = ANY($5::text[])");
+    const db = scripted(() => ({
+      rows: [
+        { class: "standard", rest: false, recent: false, calls: "100" },
+        { class: "standard", rest: true, recent: true, calls: "7" },
+        { class: "standard", rest: false, recent: true, calls: "3" },
+        { class: "archival", rest: false, recent: true, calls: "2" },
+      ],
+    }));
+    expect(await new PgRpcUsageFeed(db.pool).summarize(10, 20, 30)).toEqual({
+      total: { standard: 110, archival: 2 },
+      recentRest: { standard: 7 },
+      recentOther: { standard: 3, archival: 2 },
+    });
+    expect(db.sent).toEqual([{ text: USAGE_SUMMARY_SQL, values: [10, 20, 30, ["helius-rpc", "helius-rest"], ["send", "hot", "rest", "sched"]] }]);
   });
 
   it("PgRpcUsageFeed: reads buckets back as ms, skips a provider or lane the code does not name, and destroys a failed client", async () => {

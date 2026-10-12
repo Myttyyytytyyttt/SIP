@@ -24,7 +24,7 @@ import type { FleetSnapshot, FleetWorkerRow } from "../src/fleet-status.js";
 const WINDOW = 60_000;
 const T0 = Date.parse("2026-10-12T12:00:00Z");
 
-function worker(workerId: string, fenceRejects: number | null): FleetWorkerRow {
+function worker(workerId: string, fenceRejects: number | null, fenceRejectsLastHour: number | null = null): FleetWorkerRow {
   return {
     workerId,
     kind: "worker",
@@ -39,7 +39,7 @@ function worker(workerId: string, fenceRejects: number | null): FleetWorkerRow {
     rpsQuota: null,
     jupQuota: null,
     quotaAgeMs: null,
-    stats: { fenceRejects, leaseLosses: null, jobsLast10Min: null, releasedOnSigterm: null },
+    stats: { fenceRejects, fenceRejectsLastHour, leaseLosses: null, jobsLast10Min: null, releasedOnSigterm: null },
   };
 }
 
@@ -159,6 +159,37 @@ describe("the evaluator", () => {
     expect(alerts.status().fenceRejectsLastHour).toBe(1);
     alerts.observeSnapshot(snapshot({ workers: [worker("w1", 5), worker("w2", 2)] }), { acting: true });
     expect(alerts.status().fenceRejectsLastHour).toBe(3);
+  });
+
+  it("pages, at its FIRST snapshot, a reject inside the worker's own last hour: one met between the old scheduler's last read and this one's first is not lost", () => {
+    // THE REVIEW'S CASE: the scheduler service is redeployed (SIGKILL, draining 0);
+    // worker w1's gate refused a send ~10 s after the old acting replica's last read.
+    const { alerts, at, keys, clearedKeys } = evaluator();
+    alerts.observeSnapshot(snapshot({ workers: [worker("w1", 1, 1), worker("w2", 6, 0)] }), { acting: true });
+    expect(keys()).toContain(`${FENCE_REJECT_ALERT_KEY}:critical`);
+    // w2'S SIX ARE OLDER THAN ITS HOUR: a baseline, as before.
+    expect(alerts.status().fenceRejectsLastHour).toBe(1);
+    // THE WORKER'S OWN HOUR IS WHAT ENDS IT: still in it, still paging; out of it, cleared.
+    at(T0 + 20 * 60_000);
+    alerts.observeSnapshot(snapshot({ workers: [worker("w1", 1, 1), worker("w2", 6, 0)] }), { acting: true });
+    expect(alerts.status().fenceRejectsLastHour).toBe(1);
+    at(T0 + 50 * 60_000);
+    alerts.observeSnapshot(snapshot({ workers: [worker("w1", 1, 0), worker("w2", 6, 0)] }), { acting: true });
+    expect(alerts.status().fenceRejectsLastHour).toBe(0);
+    expect(clearedKeys).toContain(FENCE_REJECT_ALERT_KEY);
+    // A NEW REJECT AFTER THAT: counted once, by growth, not again by its last-hour figure.
+    at(T0 + 55 * 60_000);
+    alerts.observeSnapshot(snapshot({ workers: [worker("w1", 2, 1), worker("w2", 6, 0)] }), { acting: true });
+    expect(alerts.status().fenceRejectsLastHour).toBe(1);
+  });
+
+  it("forgets a seeded reject an hour after it read it, when its worker is gone and cannot report its hour", () => {
+    const { alerts, at } = evaluator();
+    alerts.observeSnapshot(snapshot({ workers: [worker("w1", 3, 2)] }), { acting: true });
+    expect(alerts.status().fenceRejectsLastHour).toBe(2);
+    at(T0 + 61 * 60_000);
+    alerts.observeSnapshot(snapshot({ workers: [] }), { acting: true });
+    expect(alerts.status().fenceRejectsLastHour).toBe(0);
   });
 
   it("raises the fleet's conditions only while acting, and hands them back when it stops", () => {

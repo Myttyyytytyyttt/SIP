@@ -181,7 +181,7 @@ async function runJob(job: Job): Promise<void> {
       const answer: GateAnswer = i % 2 === 0 ? await store.gate(draft) : await store.gateOneStatement(draft);
       if (answer.kind !== "gated") {
         // DROP THE SIGNED BYTES: nothing goes to the chain.
-        emit("gate-refused", { vault: claimed.vault, fence: claimed.fence, answer: answer.kind, detail: answer.detail });
+        emit("gate-refused", { vault: claimed.vault, fence: claimed.fence, answer: answer.kind, reason: answer.kind === "refused" ? answer.reason : null, detail: answer.detail });
         job.lost = true;
         break;
       }

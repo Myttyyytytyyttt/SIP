@@ -285,8 +285,13 @@ export class FleetAlerts {
   #latestExpiry: string | null = null;
   /** worker id → its fenceRejects at the last snapshot; null before the first snapshot. */
   #rejectsSeen: Map<string, number> | null = null;
-  /** What each snapshot found a worker's counter had grown by, and when this process saw it. */
-  #rejectEvents: { readonly at: number; readonly worker: string; readonly count: number }[] = [];
+  /**
+   * What each snapshot found a worker's counter had grown by, and when this
+   * process saw it; `seeded` for what the first snapshot took from a worker's
+   * own last hour (fenceRejectsLastHour), whose count that worker's later reports
+   * can only lower.
+   */
+  #rejectEvents: { readonly at: number; readonly worker: string; count: number; readonly seeded: boolean }[] = [];
   #rejectsTotal = 0;
   #acting: boolean | null = null;
   #queueOldestDueMs: number | null = null;
@@ -331,12 +336,15 @@ export class FleetAlerts {
     for (const [key, at] of this.#expiries) if (now - at > HOUR_MS) this.#expiries.delete(key);
 
     // FENCE REJECTS: what each worker's counter grew by since the last snapshot.
-    // A worker already there at this process's FIRST snapshot is a baseline —
-    // what it rejected before may have paged on the scheduler before this one,
-    // and repeating it after every scheduler restart would teach the owner to
-    // mute it. A worker that APPEARS later was registered after that first read,
-    // so all of its count is new here. (The worker that met the reject is the
-    // first to know; Q3 may page it at the gate as well.)
+    // A worker already there at this process's FIRST snapshot has its counter
+    // since boot taken as a baseline — that number says how many, not when — but
+    // NOT the rejects of its own last hour (fenceRejectsLastHour): the ADR pages
+    // on any reject within the hour, and one a worker met between the old
+    // scheduler's last read and this one's first (a scheduler redeploy, SIGKILLed
+    // at RAILWAY_DEPLOYMENT_DRAINING_SECONDS 0) would otherwise page on no
+    // replica at all. A reject still inside the hour may page again after a
+    // scheduler restart; losing one is the worse error. A worker that APPEARS
+    // later was registered after that first read, so all of its count is new.
     const first = this.#rejectsSeen === null;
     const seen = new Map<string, number>();
     let total = 0;
@@ -344,13 +352,18 @@ export class FleetAlerts {
       const count = worker.stats.fenceRejects ?? 0;
       total += count;
       seen.set(worker.workerId, count);
-      if (first) continue;
+      if (first) {
+        const lastHour = worker.stats.fenceRejectsLastHour ?? 0;
+        if (lastHour > 0) this.#rejectEvents.push({ at: now, worker: worker.workerId, count: lastHour, seeded: true });
+        continue;
+      }
       const before = this.#rejectsSeen!.get(worker.workerId) ?? 0;
-      if (count > before) this.#rejectEvents.push({ at: now, worker: worker.workerId, count: count - before });
+      if (count > before) this.#rejectEvents.push({ at: now, worker: worker.workerId, count: count - before, seeded: false });
+      this.#trimSeeded(worker.workerId, worker.stats.fenceRejectsLastHour);
     }
     this.#rejectsSeen = seen;
     this.#rejectsTotal = total;
-    this.#rejectEvents = this.#rejectEvents.filter((event) => now - event.at <= HOUR_MS);
+    this.#rejectEvents = this.#rejectEvents.filter((event) => event.count > 0 && now - event.at <= HOUR_MS);
 
     this.#queueOldestDueMs = snapshot.queue.oldestDueMs;
     this.#tickAgeMs = snapshot.scheduler?.tickAgeMs ?? null;
@@ -384,6 +397,21 @@ export class FleetAlerts {
     this.#pool = { waiting, total, idle };
     this.#saturatedStreak = waiting > 0 ? this.#saturatedStreak + 1 : 0;
     this.#apply(pgSaturatedAlert({ streak: this.#saturatedStreak, waiting, total }), PG_SATURATED_ALERT_KEY);
+  }
+
+  /**
+   * A seeded event is the worker's own last hour as the first snapshot read it,
+   * timed by THIS process at that read; its rejects happened earlier and leave
+   * the worker's hour earlier. So each later report of that hour lowers it: no
+   * more than what the worker still counts, less what this process has seen it
+   * grow by since. Gone once the worker's hour is.
+   */
+  #trimSeeded(worker: string, lastHour: number | null): void {
+    if (lastHour === null) return;
+    const seeded = this.#rejectEvents.find((event) => event.seeded && event.worker === worker);
+    if (seeded === undefined) return;
+    const grownSince = this.#rejectEvents.filter((event) => !event.seeded && event.worker === worker).reduce((sum, event) => sum + event.count, 0);
+    seeded.count = Math.min(seeded.count, Math.max(0, lastHour - grownSince));
   }
 
   #rejectsLastHour(): number {

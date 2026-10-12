@@ -79,8 +79,47 @@ export interface RpcUsageRow {
  */
 export interface RpcUsageFeed {
   add(rows: readonly RpcUsageRow[]): Promise<void>;
-  /** Every row whose bucket starts in [fromMs, toMs). */
+  /** Every row whose bucket starts in [fromMs, toMs). For tests, parity and inspection: the governor never reads rows. */
   read(fromMs: number, toMs: number): Promise<readonly RpcUsageRow[]>;
+  /**
+   * The governor's whole read, AGGREGATED WHERE THE ROWS ARE: Helius's calls by
+   * bill line over the buckets that start in [fromMs, toMs), and over those that
+   * start in [recentFromMs, toMs) split into the rest lane and every other.
+   * A month at r = 2 can be hundreds of thousands of rows by its last week
+   * ([QUEUE] §2.3 bounds rpc_usage at ≤ 16k a day); this is a few dozen
+   * numbers, whatever the day.
+   */
+  summarize(fromMs: number, recentFromMs: number, toMs: number): Promise<HeliusUsageSummary>;
+}
+
+/** What the governor reads of a month: Helius calls by bill line (summarizeUsage, PgRpcUsageFeed.summarize). */
+export interface HeliusUsageSummary {
+  readonly total: Readonly<Record<string, number>>;
+  readonly recentRest: Readonly<Record<string, number>>;
+  readonly recentOther: Readonly<Record<string, number>>;
+}
+
+/** The two providers on the credit bill; every other row is priced by nobody here. */
+export const HELIUS_USAGE_PROVIDERS: readonly UsageProvider[] = ["helius-rpc", "helius-rest"];
+
+/**
+ * HeliusUsageSummary over rows already in hand: the reference PgRpcUsageFeed's
+ * SQL is held to (test/dispatch-wiring-pg.test.ts), and InMemoryRpcUsageFeed's
+ * summarize.
+ */
+export function summarizeUsage(rows: readonly RpcUsageRow[], fromMs: number, recentFromMs: number, toMs: number): HeliusUsageSummary {
+  const total: Record<string, number> = {};
+  const recentRest: Record<string, number> = {};
+  const recentOther: Record<string, number> = {};
+  for (const row of rows) {
+    if (!HELIUS_USAGE_PROVIDERS.includes(row.provider) || row.bucket < fromMs || row.bucket >= toMs) continue;
+    total[row.usageClass] = (total[row.usageClass] ?? 0) + row.calls;
+    if (row.bucket >= recentFromMs) {
+      const into = row.lane === "rest" ? recentRest : recentOther;
+      into[row.usageClass] = (into[row.usageClass] ?? 0) + row.calls;
+    }
+  }
+  return { total, recentRest, recentOther };
 }
 
 export const bucketStart = (at: number): number => Math.floor(at / USAGE_BUCKET_MS) * USAGE_BUCKET_MS;
@@ -109,6 +148,10 @@ export class InMemoryRpcUsageFeed implements RpcUsageFeed {
 
   async read(fromMs: number, toMs: number): Promise<readonly RpcUsageRow[]> {
     return [...this.#rows.values()].filter((row) => row.bucket >= fromMs && row.bucket < toMs);
+  }
+
+  async summarize(fromMs: number, recentFromMs: number, toMs: number): Promise<HeliusUsageSummary> {
+    return summarizeUsage([...this.#rows.values()], fromMs, recentFromMs, toMs);
   }
 
   /** The 35-day prune the scheduler's reap runs ([QUEUE] §2.3). */
@@ -324,8 +367,6 @@ export interface CreditGovernorOptions {
   readonly readTimeoutMs?: number;
 }
 
-const HELIUS_PROVIDERS: ReadonlySet<UsageProvider> = new Set(["helius-rpc", "helius-rest"]);
-
 const pct = (credits: number, plan: number): number => Math.round((credits / plan) * 1_000) / 10;
 
 /**
@@ -406,11 +447,11 @@ export class CreditGovernor {
     };
   }
 
-  async #read(from: number, to: number): Promise<readonly RpcUsageRow[] | null> {
+  async #read(from: number, recentFrom: number, to: number): Promise<HeliusUsageSummary | null> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.#feed.read(from, to),
+        this.#feed.summarize(from, recentFrom, to),
         new Promise<never>((_, fail) => {
           timer = setTimeout(() => fail(new Error("the rpc_usage read timed out")), this.#readTimeoutMs);
         }),
@@ -425,24 +466,18 @@ export class CreditGovernor {
   async evaluate(): Promise<GovernorVerdict> {
     const now = this.#now();
     const { start, end } = this.#month(now);
-    const rows = await this.#read(start, now + 1);
-    if (rows === null) {
+    const recentFrom = Math.max(start, bucketStart(now - GOVERNOR_RECENT_MS));
+    // ONE AGGREGATED READ (RpcUsageFeed.summarize), never the month's rows: on
+    // the scheduler's single pooled connection, a read that grew with the month
+    // would time out late in it — every verdict feed-failed, the rotation never
+    // stretched — while still holding the connection the tick and the receiver need.
+    const summary = await this.#read(start, recentFrom, now + 1);
+    if (summary === null) {
       this.#last = { ...this.#last, step: this.#step, safetyPassMs: this.safetyPassMs, evaluatedAt: new Date(now).toISOString(), held: "feed-failed", alert: { fire: null, clear: false } };
       return this.#last;
     }
-    const recentFrom = Math.max(start, bucketStart(now - GOVERNOR_RECENT_MS));
     const observedMs = now - recentFrom;
-    const total: Record<string, number> = {};
-    const recentRest: Record<string, number> = {};
-    const recentOther: Record<string, number> = {};
-    for (const row of rows) {
-      if (!HELIUS_PROVIDERS.has(row.provider)) continue;
-      total[row.usageClass] = (total[row.usageClass] ?? 0) + row.calls;
-      if (row.bucket >= recentFrom) {
-        const into = row.lane === "rest" ? recentRest : recentOther;
-        into[row.usageClass] = (into[row.usageClass] ?? 0) + row.calls;
-      }
-    }
+    const { total, recentRest, recentOther } = summary;
     // WHILE THE ARCHIVAL PRICE IS UNSETTLED, THE DEARER READING (header): 10,
     // which can only price the same calls higher than 1.
     const price: ArchivalCredits = this.#unsettled ? 10 : this.#archival;

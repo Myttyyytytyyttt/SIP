@@ -35,9 +35,12 @@ import {
   DispatchStore,
   LANE_PRIORITY,
   LEASE_SECONDS,
+  OVERLAP_AUDIT_SQL,
   createDispatchPool,
   dispatchConnections,
   type ClaimedVault,
+  type DispatchClient,
+  type DispatchPool,
   type DispatchWorld,
   type GateAnswer,
   type IntentDraft,
@@ -521,6 +524,50 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
         locker.release();
       }
     });
+
+    it("refuses an intent whose plan did not clear every earlier fence's intent — a NULL height or one not above the floor — and the audit catches one written past the store", async () => {
+      // THE REVIEW'S CASE: an earlier holder's wrap landed at 990 (its lvbh was
+      // 1,000), so nothing is open; the floor is 990 and the finalized height 980.
+      const [vault] = await seed(1, `floor-${form}-`);
+      const a = worker("floor-a");
+      const b = worker("floor-b");
+      const first = await claimOne(a, vault!);
+      // THE FIRST FENCE EVER ON THE VAULT: no earlier intent, so a NULL plan height is fine.
+      const opened = await gateWith(a, draft(vault!, first.fence, { lastValidBlockHeight: 1_000n, planClearedHeight: null }));
+      expect(opened.kind).toBe("gated");
+      expect(await a.resolveIntent(opened.kind === "gated" ? opened.intentId : -1n, "landed", 990n)).toBe(true);
+      await leaseIn(vault!, -1);
+      const second = await claimOne(b, vault!);
+      const prior = await b.priorIntents(second);
+      expect(prior).toEqual({ open: [], planFloor: 990n });
+      // NO OPEN INTENT IS NOT "NOTHING TO WAIT FOR": the landed wrap is not final yet.
+      for (const planClearedHeight of [null, 980n, 990n]) {
+        const early = await gateWith(b, draft(vault!, second.fence, { planClearedHeight }));
+        expect(early, String(planClearedHeight)).toMatchObject({ kind: "refused", reason: "plan-floor" });
+        expect(early.kind === "refused" && early.detail).toContain("which is not above 990");
+      }
+      expect((await intents(vault!)).map((i) => i.fence)).toEqual([String(first.fence)]);
+      // ONE ABOVE THE FLOOR, AND THE SAME HOLDER'S OWN LATER SENDS AT ITS FENCE, PASS.
+      expect((await gateWith(b, draft(vault!, second.fence, { planClearedHeight: 991n }))).kind).toBe("gated");
+      expect((await gateWith(b, draft(vault!, second.fence, { planClearedHeight: 991n }))).kind).toBe("gated");
+      expect(await b.overlapAudit()).toEqual([]);
+      // A ROW WRITTEN PAST THE STORE, AS THE ADR'S AUDIT TEXT WOULD HAVE MISSED IT: a later fence, no plan height.
+      const planted = await db.query(
+        `INSERT INTO sip_solana.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height, plan_cleared_height, signature)
+         VALUES ($1, 'wrap', $2, 'outside-the-store', 'h', 5000, NULL, $3) RETURNING id`,
+        [vault, String(second.fence + 1n), randomUUID()],
+      );
+      const caught = BigInt(planted.rows[0].id);
+      // ONE ROW PER EARLIER INTENT IT OVERLAPS (three here), every one of them the planted row.
+      const audit = await b.overlapAudit();
+      expect(audit.length).toBeGreaterThan(0);
+      expect(new Set(audit)).toEqual(new Set([caught]));
+      const adrText = await db.query(
+        `SELECT b.id FROM sip_solana.send_intent a JOIN sip_solana.send_intent b ON b.vault_addr = a.vault_addr AND b.fence > a.fence
+          WHERE b.plan_cleared_height <= COALESCE(a.resolved_height, a.last_valid_block_height)`,
+      );
+      expect(adrText.rows, "the ADR's text misses it").toEqual([]);
+    });
   });
 
   describe("GATE: a COMMIT that is never acknowledged (ADR §4.9 row 4)", () => {
@@ -555,6 +602,47 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
       const answer = await pending;
       expect(answer.kind).toBe("unacknowledged");
     }, 15_000);
+
+    it("a gate whose process stops between its lock and its COMMIT loses the row lock at the idle-in-transaction bound: the vault is claimed once the lease is over, and the late COMMIT is not gated", async () => {
+      // THE PROCESS FREEZES (a paused container, SIGSTOP, a host that suspends)
+      // after the lock and the insert, with its COMMIT not yet sent. Without the
+      // bound its session sits "idle in transaction" holding FOR SHARE for as long
+      // as the connection lives, and every claim skips the vault.
+      const [vault] = await seed(1, "frozen-");
+      const real = processPool("frozen-a");
+      let frozenFor = 0;
+      const freezing: DispatchPool = {
+        async connect(): Promise<DispatchClient> {
+          const client = await real.connect();
+          return {
+            query: async (text, values) => {
+              if (text === "COMMIT" && frozenFor > 0) await sleep(frozenFor);
+              return client.query(text, values);
+            },
+            release: (destroy) => client.release(destroy),
+          };
+        },
+      };
+      const a = new DispatchStore(freezing, "frozen-a");
+      const b = worker("frozen-b");
+      const held = await claimOne(a, vault!);
+      await leaseIn(vault!, 10.5);
+      frozenFor = 14_000;
+      const pending = a.gate(draft(vault!, held.fence));
+      const idleInTransaction = async () =>
+        (await db.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND state = 'idle in transaction'`, [database])).rows[0].n > 0;
+      await until("the gate to sit idle in its transaction", idleInTransaction);
+      await until("the lease to run out", async () => (await db.query("SELECT lease_until < clock_timestamp() AS over FROM sip_solana.vault_work WHERE vault_addr = $1", [vault])).rows[0].over, 12_000);
+      // WITHIN THE BOUND THE SERVER HAS ENDED THAT SESSION: no lock left, and the vault goes to the next claim.
+      expect(await idleInTransaction()).toBe(false);
+      const next = await claimOne(b, vault!);
+      expect(next.fence).toBe(held.fence + 1n);
+      // THE PROCESS WAKES AND SENDS ITS COMMIT ON A DEAD CONNECTION: never gated, and nothing was committed.
+      const answer = await pending;
+      expect(answer.kind).toBe("unacknowledged");
+      expect(await intents(vault!)).toEqual([]);
+      expect((await b.priorIntents(next)).open).toEqual([]);
+    }, 30_000);
   });
 
   describe("GATE: the carry write-ahead of a PROFIT settle (ADR §4.6, S-4)", () => {
@@ -669,7 +757,9 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
         const held = await claimOne(a, vaults[0]!);
         const loss = step % 3 === 2 ? null : { lossLamports: BigInt(100 + step), walletSignedTxCount: step };
         const endSlot = state.frontier + 50n + BigInt(step);
-        const gated = await a.gate(settle(vaults[0]!, held.fence, at(33, state.nonce, state.frontier)), {
+        // EACH CLAIM IS A NEW FENCE: its plan clears the last one's intent (lvbh 1,000 × step).
+        const heights = { lastValidBlockHeight: 1_000n * BigInt(step + 1), planClearedHeight: 1_000n * BigInt(step) + 1n };
+        const gated = await a.gate({ ...settle(vaults[0]!, held.fence, at(33, state.nonce, state.frontier)), ...heights }, {
           carry: { link: at(33, state.nonce, state.frontier), endSlot, carry: loss, validUntilSlot: 9n },
         });
         expect(gated.kind).toBe("gated");
@@ -691,9 +781,11 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
       const b = worker("shadow-b", "shadow");
       const c = worker("shadow-c", "shadow");
       const first = await claimOne(a, vault!);
-      const gated = await a.gate(draft(vault!, first.fence, { lastValidBlockHeight: 1_000n, planClearedHeight: 10n }), {
-        carry: { link: { linkAddress: new PublicKey(Buffer.alloc(32, 41)), epoch: 1n, settlementNonce: 1n, frontierSlot: 1n }, endSlot: 2n, carry: { lossLamports: 5n, walletSignedTxCount: 1 }, validUntilSlot: 3n },
-      });
+      const shadowLink = new PublicKey(Buffer.alloc(32, 41));
+      const gated = await a.gate(
+        draft(vault!, first.fence, { kind: "settle", link: shadowLink.toBase58(), signature: null, lastValidBlockHeight: 1_000n, planClearedHeight: 10n }),
+        { carry: { link: { linkAddress: shadowLink, epoch: 1n, settlementNonce: 1n, frontierSlot: 1n }, endSlot: 2n, carry: { lossLamports: 5n, walletSignedTxCount: 1 }, validUntilSlot: 3n } },
+      );
       expect(gated).toMatchObject({ kind: "gated", carryWritten: false });
       expect((await db.query("SELECT count(*)::int AS n FROM sip_solana.loss_carry WHERE link_addr = $1", [new PublicKey(Buffer.alloc(32, 41)).toBase58()])).rows[0].n).toBe(0);
       expect((await intents(vault!)).map((i) => i.state)).toEqual(["shadow"]);
@@ -710,12 +802,17 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
       expect((await intents(vault!))[0]).toMatchObject({ state: "shadow", resolved_height: "1000" });
       expect(await b.gate(draft(vault!, second.fence, { lastValidBlockHeight: 2_000n, planClearedHeight: 1_001n }))).toMatchObject({ kind: "gated" });
       expect(await b.overlapAudit()).toEqual([]);
-      // A PLANTED OVERLAP: a third holder plans before the second's intent could have expired.
+      // A THIRD HOLDER PLANNING BEFORE THE SECOND'S INTENT COULD HAVE EXPIRED: the store refuses it, in shadow as live.
       await leaseIn(vault!, -1);
       const third = await claimOne(c, vault!);
-      const planted = await c.gate(draft(vault!, third.fence, { planClearedHeight: 1_500n }));
-      expect(planted.kind).toBe("gated");
-      expect(await c.overlapAudit()).toEqual([planted.kind === "gated" ? planted.intentId : -1n]);
+      expect(await c.gate(draft(vault!, third.fence, { planClearedHeight: 1_500n }))).toMatchObject({ kind: "refused", reason: "plan-floor" });
+      // AND ONE PLANTED PAST THE STORE IS WHAT THE AUDIT CATCHES.
+      const planted = await db.query(
+        `INSERT INTO sip_solana.send_intent (vault_addr, kind, fence, worker_id, blockhash, last_valid_block_height, plan_cleared_height, signature, state)
+         VALUES ($1, 'wrap', $2, 'shadow-c', 'h', 3000, 1500, $3, 'shadow') RETURNING id`,
+        [vault, String(third.fence), randomUUID()],
+      );
+      expect(await c.overlapAudit()).toEqual([BigInt(planted.rows[0].id)]);
     });
   });
 
@@ -1106,15 +1203,13 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
           takeoverResolved: count("takeover-resolved"),
           takeoverDeferred: count("takeover-deferred"),
           gateRefused: count("gate-refused"),
+          // A JOB THAT WAITED FOR THE FLOOR AS IT SHOULD IS NEVER REFUSED FOR IT.
+          planFloorRefused: events.filter((e) => e.event === "gate-refused" && e.reason === "plan-floor").length,
           sigterms: count("sigterm"),
           jobErrors: events.filter((e) => e.event === "job-error" || e.event === "fatal" || e.event === "stderr"),
         };
-        // THE ADR'S PROOF: no later holder planned before an earlier intent was over.
-        const audit = await db.query(
-          `SELECT b.id FROM sip_solana.send_intent a JOIN sip_solana.send_intent b
-             ON b.vault_addr = a.vault_addr AND b.fence > a.fence
-            WHERE b.plan_cleared_height <= COALESCE(a.resolved_height, a.last_valid_block_height)`,
-        );
+        // THE ADR'S PROOF, as the store states it (NULL-aware): no later holder planned before an earlier intent was over.
+        const audit = await db.query(OVERLAP_AUDIT_SQL);
         // AND THE CHAIN'S: no transaction landed on a state other than the one it was planned from.
         const doubles = await db.query("SELECT count(*)::int AS n FROM fence_drill.tx WHERE landed_height IS NOT NULL AND state_before <> planned_state");
         // ONE FENCE, ONE PROCESS: every intent of a fence was gated by the process that claimed it.
@@ -1127,6 +1222,7 @@ describe.skipIf(!usable)("the dispatcher's store on Postgres 16 (needs KEEPER_TE
         console.log(`fence-pg drill (${FULL ? "full" : "compressed"}): ${JSON.stringify({ ...summary, jobErrors: summary.jobErrors.length, landed })}`);
         expect(summary.jobErrors, JSON.stringify(summary.jobErrors.slice(0, 5))).toEqual([]);
         expect(audit.rows, "overlap audit").toEqual([]);
+        expect(summary.planFloorRefused, "refused for planning under the floor").toBe(0);
         expect(doubles.rows[0].n, "transactions landed on a state they were not planned from").toBe(0);
         expect(mixed.rows).toEqual([]);
         expect(exits.filter((e) => e.code !== 0), JSON.stringify(exits)).toEqual([]);

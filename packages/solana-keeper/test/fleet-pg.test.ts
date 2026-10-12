@@ -371,7 +371,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         ["w-dead", true, 0],
         ["w-alive", false, 2],
       ]);
-      expect(snapshot.workers[1]!.stats).toEqual({ fenceRejects: 1, leaseLosses: null, jobsLast10Min: 4, releasedOnSigterm: null });
+      expect(snapshot.workers[1]!.stats).toEqual({ fenceRejects: 1, fenceRejectsLastHour: null, leaseLosses: null, jobsLast10Min: 4, releasedOnSigterm: null });
       expect(snapshot.queue.bySystem).toEqual({ queue: 6, legacy: 1, draining: 1 });
       // CLAIMABLE ONLY: queue, not parked, due, free or lapsed. Q4's lapsed lease is claimable; Q3 and Q5 are held.
       expect(Object.fromEntries(Object.entries(snapshot.queue.lanes).map(([lane, lag]) => [lane, lag.due]))).toEqual({ bell: 1, busy: 1, safety: 1 });
