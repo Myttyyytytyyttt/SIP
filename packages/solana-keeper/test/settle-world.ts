@@ -1,6 +1,7 @@
 // One wallet's chain, small enough to read and real enough for runSettleTick:
-// the tests of the `rest-skip` cut (test/rest-book.test.ts) turn the real settle
-// tick over it, and it already answers what a live turn asks.
+// the tests of the `rest-skip` cut (test/rest-book.test.ts) and of the
+// loss-carry store (test/carry-store*.test.ts) both turn the real settle tick
+// over it, dry and live.
 //
 // IT GROWS AS THE CHAIN DOES. A ledger, oldest first, that trades, a stranger's
 // transfers and our own settles append to; a confirmed tip the probe reads and a
@@ -261,7 +262,7 @@ export class SettleWorld {
 }
 
 /** What a WorldKeeper's turn may add to the deps it builds: `link` turns a link as an earlier read saw it. */
-export type TurnOptions = Partial<Pick<SettleDeps, "live" | "link">>;
+export type TurnOptions = Partial<Pick<SettleDeps, "carryStore" | "live" | "link">>;
 
 /**
  * One keeper's view of one world: its own connection, call log, walk cache and
@@ -313,6 +314,7 @@ export class WorldKeeper {
       carries: this.carries,
       walkCache: this.walkCache,
       ...(this.options.restBook === undefined ? {} : { restBook: this.options.restBook }),
+      ...(over.carryStore === undefined ? {} : { carryStore: over.carryStore }),
     });
     return { result, calls: this.calls.slice(before) };
   }

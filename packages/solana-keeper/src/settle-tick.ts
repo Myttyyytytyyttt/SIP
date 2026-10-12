@@ -64,6 +64,7 @@ import {
 } from "./settle-decision.js";
 import { classifySettleRefusal, type SettleRefusal } from "./settle-refusal.js";
 import type { RestBook } from "./rest-book.js";
+import type { CarryStoreTurn } from "./carry-store.js";
 
 export type { SettleOutcome } from "./settle-decision.js";
 
@@ -171,6 +172,17 @@ export interface SettleDeps {
    * without a word. In memory: a restart forgets it.
    */
   readonly carries: CarryBook;
+  /**
+   * SIP_SOLANA_CARRY_STORE's store (src/carry-store.ts), passed only when it is
+   * `dual` or `on`. ABSENT IS `off`, which is today: `carries` is read and written
+   * here, in memory, exactly as before the store existed.
+   *
+   * PRESENT, IT OWNS BOTH THE READ AND THE WRITE, `carries` included. In `on` a
+   * read it cannot make ends the turn RETRY before anything is decided, and a
+   * write it cannot make — or its gate refuses — ends it RETRY before anything is
+   * sent: a settle never leaves without the carry it owes or hands on.
+   */
+  readonly carryStore?: CarryStoreTurn;
   /**
    * What earlier sweeps' walks read, kept by keeper.mts for the life of the
    * process (WalkCache). Absent, every turn whose walk reaches its frontier
@@ -430,7 +442,21 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // THE CARRY FOR THIS LINK'S EXACT STATE, read after the walk and before the base.
   // Only a zero settle that landed leaves a link in the state a carry was recorded
   // for, so a loss is netted once, by the window right above that settle.
-  const carry = carryFor(deps.carries, link);
+  let carry: LossCarry | null;
+  if (deps.carryStore === undefined) {
+    carry = carryFor(deps.carries, link);
+  } else {
+    // A CARRY THAT CANNOT BE READ IS A BASE THAT CANNOT BE KNOWN (`on` only; `dual`
+    // decides from memory whatever Postgres says).
+    const read = await deps.carryStore.carryFor(deps.carries, link, vault.skimMode);
+    if ("unavailable" in read) {
+      return {
+        outcome: "RETRY",
+        detail: `${read.unavailable}: the loss this span may owe is unknown, so nothing was attested or sent; the next sweep reads it again`,
+      };
+    }
+    carry = read.carry;
+  }
   const decision = await decideFromMeasurement(measured, {
     from,
     finalizedSlot,
@@ -635,7 +661,19 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   // an earlier attempt from this state may have left a carry under the state this
   // settle leaves, for another window, and it must not net against this one. A dry
   // run and BELOW_RESERVE returned above, so neither records anything.
-  recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null);
+  if (deps.carryStore === undefined) {
+    recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null);
+  } else {
+    // IN `on`, NOTHING LEAVES UNLESS THE STORE HAS IT: a write it cannot make, or
+    // one its gate refuses because another settle's carry stands in the way, ends
+    // the turn here, before the wallet signs anything.
+    const write = await deps.carryStore.recordCarry(deps.carries, link, decision.endSlot, decision.carry ?? null, vault.skimMode, {
+      currentSlot,
+      validUntilSlot: inputs.validUntilSlot,
+      nonceNow: () => readSettlementNonce(program, link.linkAddress).catch(() => null),
+    });
+    if (write.kind === "refused") return { outcome: "RETRY", detail: write.detail, ...carried };
+  }
 
   const route: SettleSend["route"] = walletSigner instanceof Keypair ? "local-keypair" : "privy";
   const sentAt = Date.now();

@@ -43,8 +43,8 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
-import { readCuts, readDiscoveryLkgMs, type CutToken } from "./cuts.js";
-import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, type KeeperRole } from "./role-registry.js";
+import { readCarryStore, readCuts, readDiscoveryLkgMs, type CarryStoreMode, type CutToken } from "./cuts.js";
+import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, roleCarriesLosses, type KeeperRole } from "./role-registry.js";
 import { DEFAULT_ARCHIVAL_CREDITS, type ArchivalCredits } from "./rpc-usage.js";
 
 /**
@@ -101,6 +101,9 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   // failed listing may fall back to. Both strict, both off when unset.
   "SIP_SOLANA_CUTS",
   "SIP_SOLANA_DISCOVERY_LKG_MS",
+  // WHERE THE LOSS CARRIES LIVE (src/carry-store.ts): off, dual or on. Strict,
+  // off when unset, and refused without DATABASE_URL or on a role with no loss to carry.
+  "SIP_SOLANA_CARRY_STORE",
   ...SIGNING_SECRET_VARS,
 ]);
 
@@ -306,6 +309,12 @@ export interface KeeperConfig {
    * listing fails the sweep.
    */
   readonly discoveryLkgMs: number;
+  /**
+   * SIP_SOLANA_CARRY_STORE (src/carry-store.ts): `off` keeps the loss carries in
+   * memory, which is today; `dual` also writes them to Postgres and compares;
+   * `on` decides from Postgres and sends nothing it cannot read or write there.
+   */
+  readonly carryStore: CarryStoreMode;
   /** mint (base58) → Raydium CLMM pool. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly alertWebhook: Secret | null;
@@ -637,6 +646,9 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     // NAMES ONLY, in the order the ADR rolls them out, so two keepers' lines compare.
     cuts: [...config.cuts],
     discoveryLkgMs: config.discoveryLkgMs,
+    // ONLY WHEN IT IS NOT `off`: a keeper without the variable describes itself
+    // exactly as it did before the variable existed.
+    ...(config.carryStore === "off" ? {} : { carryStore: config.carryStore }),
     pools: config.pools.size,
     alertWebhook: config.alertWebhook !== null,
     alertMinSeverity: config.alertMinSeverity,
@@ -907,6 +919,28 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   if ("problem" in roleRead) problems.push(roleRead.problem);
   const { doorbellAllowed } = ROLE_PROFILES[role];
 
+  // --- where the loss carries live: strict, off unless named --------------------
+  const carryRead = readCarryStore(env["SIP_SOLANA_CARRY_STORE"]);
+  const carryStore: CarryStoreMode = "mode" in carryRead ? carryRead.mode : "off";
+  if ("problem" in carryRead) problems.push(carryRead.problem);
+  // A STORE IN POSTGRES NEEDS POSTGRES. Refused rather than quietly kept in
+  // memory: the owner who set `on` believes a restart no longer forgets a loss.
+  if (carryStore !== "off" && databaseUrl === null) {
+    problems.push(
+      `SIP_SOLANA_CARRY_STORE is ${carryStore}, which keeps the loss carries in Postgres, but DATABASE_URL is not set to a usable ` +
+        "postgres:// URL. Set it, or unset SIP_SOLANA_CARRY_STORE to keep them in memory.",
+    );
+  }
+  // A ROLE WITH NO LOSS TO CARRY HAS NOTHING TO STORE (VOLUME carries none): a
+  // store accepted there would do nothing, and its boot seed would show the profit
+  // keeper's carries on this keeper's /status.
+  if (carryStore !== "off" && !roleCarriesLosses(role)) {
+    problems.push(
+      `SIP_SOLANA_CARRY_STORE is ${carryStore}, but the ${role} keeper settles no mode that carries a loss, so it has no carry to store; ` +
+        "unset SIP_SOLANA_CARRY_STORE on this service.",
+    );
+  }
+
   // --- the doorbell: every value optional, none of them a problem ----------------
   // ONLY THE ROLE ALLOWED IT RUNS ANY OF IT (doorbellAllowed: the profit keeper).
   // The doorbell manages a Helius webhook for this service's own URL, and one per
@@ -955,6 +989,7 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     sweepMs,
     cuts,
     discoveryLkgMs,
+    carryStore,
     pools,
     alertWebhook,
     alertMinSeverity,

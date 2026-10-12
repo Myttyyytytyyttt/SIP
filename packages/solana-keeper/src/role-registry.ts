@@ -321,6 +321,16 @@ export function measuredBase(profile: RoleProfile, byte: number): KeeperMode["ba
   return settlesMode(profile, byte) ? (keeperModeFor(byte)?.base ?? null) : null;
 }
 
+/**
+ * Whether any mode this role settles carries a loss forward (carriesLosses):
+ * only such a keeper has anything to keep in a loss-carry store
+ * (SIP_SOLANA_CARRY_STORE, src/carry-store.ts). The profit keeper does; the
+ * volume keeper settles VOLUME alone, which carries none.
+ */
+export function roleCarriesLosses(role: KeeperRole): boolean {
+  return ROLE_PROFILES[role].settles.some((byte) => keeperModeFor(byte)?.carriesLosses === true);
+}
+
 /** The compile-time end of a switch over a closed union: reached only by a value the union does not have. */
 export function unreachable(value: never): never {
   throw new Error(`unreachable: ${String(value)}`);

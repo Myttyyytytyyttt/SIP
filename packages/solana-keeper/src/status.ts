@@ -21,6 +21,7 @@ import type { BoardRefreshStatus } from "./board-refresh.js";
 import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
 import type { RestBookStatus } from "./rest-book.js";
+import type { CarryStoreStatus } from "./carry-store.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
@@ -413,6 +414,15 @@ export interface KeeperStatus {
   discovery?: DiscoveryStatus;
   /** The cost cuts this process runs (src/cuts.ts). Folded in at render. */
   cuts?: CutsStatus;
+  /**
+   * The loss-carry store (SIP_SOLANA_CARRY_STORE, src/carry-store.ts): its phase,
+   * whether its table is there, the boot seed, writes and failures, and `dual`'s
+   * comparison with memory — `mismatches` 0 with `seenInBoth` above 0 is the gate
+   * to `on`. ABSENT WHILE THE STORE IS `off`, so a keeper without the variable
+   * serves the page it served before the store existed. `pendingCarries` above
+   * stays what it was: memory, which `on` keeps as a mirror of Postgres.
+   */
+  carryStore?: CarryStoreStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

@@ -27,6 +27,10 @@
 // list it may fall back to, so it has a variable of its own
 // (SIP_SOLANA_DISCOVERY_LKG_MS, ADR §6.2 L3), read here beside the tokens and by
 // the same strict rule: 0 or unset is off, which is today.
+//
+// NOR IS L2. Where the loss carries live (SIP_SOLANA_CARRY_STORE, ADR §4.6) has
+// three phases, off, dual and on, and is read here by the same rule: unset is
+// off, which is today, and anything unknown refuses to start.
 
 /**
  * The cuts this build implements, in the ADR's rollout order.
@@ -91,6 +95,30 @@ export function readCuts(raw: string | undefined): { readonly cuts: ReadonlySet<
     cuts.add(token);
   });
   return problems.length > 0 ? { problems } : { cuts };
+}
+
+/**
+ * SIP_SOLANA_CARRY_STORE's phases, in rollout order (ADR §4.6, rollout L2):
+ * where the losses zero settles carry forward are kept. NOT A TOKEN, for L3's
+ * reason: it has three values, not on and off. `off` is today — memory, and a
+ * restart forgets a pending carry; the store itself is src/carry-store.ts.
+ */
+export const CARRY_STORE_MODES = ["off", "dual", "on"] as const;
+export type CarryStoreMode = (typeof CARRY_STORE_MODES)[number];
+
+/**
+ * SIP_SOLANA_CARRY_STORE, read strictly: unset or blank is `off`; otherwise
+ * exactly `off`, `dual` or `on`, as written. Anything else REFUSES TO START, by
+ * shape and never by value, as an unknown token does: an `On` that quietly meant
+ * memory would be an owner who believes a restart no longer forgets a loss.
+ */
+export function readCarryStore(raw: string | undefined): { readonly mode: CarryStoreMode } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return { mode: "off" };
+  if ((CARRY_STORE_MODES as readonly string[]).includes(value)) return { mode: value as CarryStoreMode };
+  return {
+    problem: `SIP_SOLANA_CARRY_STORE must be one of ${CARRY_STORE_MODES.join(", ")}; it holds a ${value.length}-character value.`,
+  };
 }
 
 /**
