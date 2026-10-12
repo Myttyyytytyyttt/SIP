@@ -93,6 +93,7 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
+import { type JupiterAccess, type JupiterReservation, buyingTurnJupiterCalls, jupiterApiForTurn } from "./jupiter-pacer.js";
 import { method, type MethodCall } from "./methods.js";
 // FOUR NAMES LEFT WITH THE RAYDIUM ARM. raydiumLegVenue, raydiumSides,
 // readRouteAccounts and vaultOwnedAmong were imported here for the pool-reading
@@ -105,7 +106,15 @@ import { method, type MethodCall } from "./methods.js";
 // with it; it only stopped being called from here.
 import { VenueMeasurementRefusal, measureLegVenue } from "./venue-depth.js";
 import type { TransferFeeTerms } from "./min-out.js";
-import { JupiterRouteRefusal, type JupiterRoute, type LandingEpoch, investAmountIn, investMinOut, verifyRouteFresh } from "./program-scripts.js";
+import {
+  JupiterRouteRefusal,
+  type JupiterApi,
+  type JupiterRoute,
+  type LandingEpoch,
+  investAmountIn,
+  investMinOut,
+  verifyRouteFresh,
+} from "./program-scripts.js";
 import {
   PYTH_RECEIVER_PROGRAM,
   PYTH_SOL_USD_FEED,
@@ -273,8 +282,18 @@ export function investCall(
   });
 }
 
-/** PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke. */
-export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED";
+/**
+ * PAUSED, like NO_POLICY and IDLE, is a resting state: nothing moved and nothing broke.
+ *
+ * DEFERRED IS NOT. It is a buying turn that did not START — nothing quoted,
+ * wrapped or sent — because something outside the vault said "not now": the
+ * Jupiter budget under the `jupiter-key` cut (src/jupiter-pacer.ts). It is busy,
+ * never resting (doorbell.ts investRests), so the next sweep turns the vault
+ * again; it neither counts toward nor ends a FAILED streak (investFailedStreak),
+ * because nothing was attempted. ONLY A CUT PRODUCES IT: with SIP_SOLANA_CUTS
+ * empty no turn can end here.
+ */
+export type InvestOutcome = "IDLE" | "NO_POLICY" | "PAUSED" | "INVESTED" | "REFUSED" | "FAILED" | "DEFERRED";
 
 export interface InvestPurchase {
   readonly target: string;
@@ -338,6 +357,16 @@ export interface InvestDeps {
   readonly live: boolean;
   /** The protocol's emergency switch, from the ProtocolConfig this sweep read. */
   readonly protocolPaused: boolean;
+  /**
+   * THE `jupiter-key` CUT (src/jupiter-pacer.ts): the host, the key and the
+   * process's pacer. ABSENT IS TODAY — lite-api.jup.ag, keyless, unpaced — and
+   * bin/keeper.mts passes it only while SIP_SOLANA_CUTS names the token.
+   *
+   * PRESENT, A BUYING TURN RESERVES EVERY JUPITER CALL IT CAN MAKE before its
+   * first one, at the point below where nothing has been asked of Jupiter yet,
+   * and ends DEFERRED, having moved nothing, when the budget cannot cover it.
+   */
+  readonly jupiter?: JupiterAccess;
 }
 
 /** What a turn learns on its way through, whichever way it then ends. */
@@ -374,6 +403,13 @@ interface TurnFindings {
    * reads.
    */
   feeWarnings?: readonly Alert[];
+  /**
+   * The Jupiter calls this turn reserved under the `jupiter-key` cut, once it
+   * did. A FINDING, NOT A LOCAL, for the same reason the rest are: the turn has
+   * a dozen ways out below the reservation, and runInvestTick releases it once,
+   * in a `finally`, whichever of them it took — or whatever it threw.
+   */
+  reservation?: JupiterReservation;
 }
 
 /**
@@ -383,7 +419,13 @@ interface TurnFindings {
  */
 export async function runInvestTick(deps: InvestDeps): Promise<InvestResult> {
   const found: TurnFindings = {};
-  const result = await investTurn(deps, found);
+  let result: InvestResult;
+  try {
+    result = await investTurn(deps, found);
+  } finally {
+    // WHAT THE TURN DID NOT SPEND GOES BACK, on every way out, a throw included.
+    found.reservation?.release();
+  }
   // In order, and they cannot both be set: a turn with conversion off never
   // reaches the convert that writes `converted`.
   const notes = [found.conversionOff, found.converted].filter((note): note is string => note !== undefined);
@@ -658,6 +700,31 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
 
   if (!admission.admit) return { outcome: admission.outcome, detail: admission.detail };
 
+  // ── the Jupiter budget, under the jupiter-key cut: reserved before the first call ──
+  //
+  // HERE, AND NOT ONE LINE LATER. Everything above decided from the chain alone;
+  // everything below asks Jupiter, starting with the gate's first quote. So this
+  // is the last moment at which "not now" costs nothing: no quote, no wrap, no
+  // send, no budget. A turn that started and then met a 429 on its thirteenth
+  // call would have spent twelve and refused the basket anyway — measured,
+  // against the keyless api.jup.ag, on call 6 (test/fixtures/
+  // jupiter-turn-run2-apijup-unpaced.jsonl).
+  //
+  // THE CEILING, NOT AN ESTIMATE: every leg and the convert, measured twice
+  // (buyingTurnJupiterCalls). What the turn does not spend is handed back by
+  // runInvestTick when it ends.
+  //
+  // A BASKET THAT CAN NEVER FIT THE PLAN'S MINUTE IS REFUSED, NOT DEFERRED: a
+  // deferral is "next sweep", and next sweep it would not fit either. REFUSED
+  // raises `invest-refused`, whose detail names the remedy.
+  let jupiterApi: JupiterApi | undefined;
+  if (deps.jupiter !== undefined) {
+    const answer = deps.jupiter.pacer.reserve(buyingTurnJupiterCalls(policy.legs.length, converts));
+    if (!answer.granted) return { outcome: answer.reason === "never-fits" ? "REFUSED" : "DEFERRED", detail: answer.detail };
+    found.reservation = answer.reservation;
+    jupiterApi = jupiterApiForTurn(deps.jupiter, answer.reservation);
+  }
+
   // AND ON THE SAME LINE AGAIN: whether the VENUES this turn would trade
   // against can actually serve what it would push at them, RIGHT NOW.
   //
@@ -739,6 +806,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
       convertCeiling,
       admissionFees: admission.worstCaseFees,
       landing,
+      ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
     });
   } catch (error) {
     // A MEASUREMENT THAT COULD NOT BE TAKEN IS A REFUSAL, NEVER A PASS, and it
@@ -865,6 +933,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           // min_convert_rate_wad — which is exactly what convert.rs would
           // answer with FloorTooLow, only without the fee.
           ownerFloorRateWad: policy.minConvertRateWad,
+          ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
         });
         // BOTH NUMBERS INSIDE THE SAME try, because both are derived from this
         // route's own bytes and both can refuse: investAmountIn if the blob
@@ -1046,6 +1115,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
           ownerFloorRateWad: leg.minOutRateWad,
           landing,
+          ...(jupiterApi === undefined ? {} : { api: jupiterApi }),
         });
       } catch (error) {
         // THE FIRST REFUSED IN THIS FILE THAT CAN BE REACHED AFTER MONEY HAS
@@ -1249,6 +1319,8 @@ async function measureBasketVenues(
     readonly admissionFees: ReadonlyMap<string, TransferFeeTerms>;
     /** The turn's epoch and slots-left, the read admissionFees was decided from. */
     readonly landing: LandingEpoch;
+    /** The jupiter-key cut's per-turn API; absent is today's keyless host. */
+    readonly api?: JupiterApi;
   },
 ): Promise<{ readonly legs: LegVenue[] }> {
   const legs: LegVenue[] = [];
@@ -1285,6 +1357,7 @@ async function measureBasketVenues(
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
       ownerFloorRateWad: leg.minOutRateWad,
       landing: params.landing,
+      ...(params.api === undefined ? {} : { api: params.api }),
     });
     legs.push(venue);
   }
@@ -1304,6 +1377,7 @@ async function measureBasketVenues(
       spend: params.convertCeiling,
       feeBps: 0n,
       maxAge: { maxAgeMs: ROUTE_MAX_AGE_MS },
+      ...(params.api === undefined ? {} : { api: params.api }),
       // NO ownerFloorRateWad HERE, DELIBERATELY. This gate asks whether the
       // venue is DEEP, and its verdict refuses the whole basket. The owner's
       // min_convert_rate_wad is a PRICE floor, and a price below it is a

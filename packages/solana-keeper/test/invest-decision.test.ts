@@ -2024,6 +2024,10 @@ describe("the invest-failed alert", () => {
     expect(investFailedStreak(0, "FAILED")).toBe(1);
     expect(investFailedStreak(2, "FAILED")).toBe(3);
     expect(investFailedStreak(2, "REFUSED")).toBe(2);
+    // A turn the jupiter-key pacer held back attempted nothing: it neither
+    // escalates a healthy vault nor clears a failing one's run.
+    expect(investFailedStreak(2, "DEFERRED")).toBe(2);
+    expect(investFailedStreak(0, "DEFERRED")).toBe(0);
     for (const outcome of ["INVESTED", "IDLE", "PAUSED", "NO_POLICY"] as const) {
       expect(investFailedStreak(2, outcome)).toBe(0);
     }

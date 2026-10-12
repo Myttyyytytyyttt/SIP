@@ -2313,10 +2313,16 @@ export const INVEST_FAILED_CRITICAL_STREAK = 3;
  * A vault's count of consecutive FAILED invest turns, after one more turn.
  * REFUSED neither counts nor ends the run: it has its own alert. INVESTED and
  * every resting outcome end it.
+ *
+ * DEFERRED HOLDS IT TOO, like REFUSED. A turn the Jupiter pacer held back
+ * attempted nothing (jupiter-pacer.ts), so it is no evidence either way: it
+ * must not escalate a vault that is not failing, and it must not end the run of
+ * one that is — a FAILED streak cleared by a deferral would re-warn from one on
+ * the next failure instead of paging on the third.
  */
 export function investFailedStreak(previous: number, outcome: InvestOutcome): number {
   if (outcome === "FAILED") return previous + 1;
-  if (outcome === "REFUSED") return previous;
+  if (outcome === "REFUSED" || outcome === "DEFERRED") return previous;
   return 0;
 }
 

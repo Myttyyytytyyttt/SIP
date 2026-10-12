@@ -78,6 +78,28 @@ describe("privy-address", () => {
 describe("/status", () => {
   it("serves the discovery block and the cuts block on every render", () => {
     expect(keeper).toContain("doorbell: doorbellStatus(), ...cutsStatusBlocks() }");
-    expect(keeper).toMatch(/discovery: linkDiscovery\.status\(Date\.now\(\)\),\n\s+cuts: \{ on: \[\.\.\.config\.cuts\], privyAddressBook: privyBook\?\.status\(\) \?\? null, board: boardRefresh\?\.status\(\) \?\? null \},/);
+    expect(keeper).toMatch(
+      /discovery: linkDiscovery\.status\(Date\.now\(\)\),\n\s+cuts: \{\n\s+on: \[\.\.\.config\.cuts\],\n\s+privyAddressBook: privyBook\?\.status\(\) \?\? null,\n\s+board: boardRefresh\?\.status\(\) \?\? null,/,
+    );
+  });
+});
+
+describe("jupiter-key", () => {
+  it("builds the host, the key and ONE pacer only under its token — the keyed host only with a key", () => {
+    expect(keeper).toMatch(
+      /const jupiterAccess: JupiterAccess \| null = config\.cuts\.has\("jupiter-key"\)\n\s+\? \{\n\s+baseUrl: config\.jupiterApiKey === null \? LITE_API : KEYED_API,\n\s+apiKey: config\.jupiterApiKey,\n\s+pacer: new JupiterPacer\(\{ perMinute: config\.jupiterCallsPerMinute \}\),\n\s+\}\n\s+: null;/,
+    );
+    expect(keeper.match(/new JupiterPacer\(/g)).toHaveLength(1);
+  });
+
+  it("hands it to the invest turn only when it exists, so a keeper without the token runs today's turn", () => {
+    expect(sweepBody).toContain("...(jupiterAccess === null ? {} : { jupiter: jupiterAccess }),");
+    expect(keeper.match(/runInvestTick\(/g)).toHaveLength(1);
+  });
+
+  it("changes /status only under the token: the budget the per-minute view is judged on, and an absent-when-off block", () => {
+    expect(keeper).toContain("if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.perMinute);");
+    expect(keeper.match(/setBudgetPerMinute\(/g)).toHaveLength(1);
+    expect(keeper).toMatch(/\.\.\.\(jupiterAccess === null\n\s+\? \{\}\n\s+: \{ jupiter: \{ host: new URL\(jupiterAccess\.baseUrl\)\.host, keyed: jupiterAccess\.apiKey !== null, \.\.\.jupiterAccess\.pacer\.status\(\) \} \}\),/);
   });
 });

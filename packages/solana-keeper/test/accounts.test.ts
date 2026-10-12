@@ -31,6 +31,7 @@ import {
   type Transaction,
   type VersionedTransaction,
 } from "@solana/web3.js";
+import { Secret } from "@sip/solana-log";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   configAddress,
@@ -45,8 +46,9 @@ import {
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
-import { LANDING_WINDOW_SLOTS, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
+import { KEYED_API, LANDING_WINDOW_SLOTS, LITE_API, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
+import { JupiterPacer } from "../src/jupiter-pacer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
 import {
   PYTH_RECEIVER_PROGRAM,
@@ -2228,5 +2230,319 @@ describe("the ticks' first steps, over the same bytes", () => {
     ]);
     expect(MAX_SUPPORTED_TRANSACTION_VERSION).toBeGreaterThan(0);
     expect(callArgs[8]).toEqual([link.wallet, "confirmed"]);
+  });
+
+  // ── the jupiter-key cut: the measured unpaced turn, replayed through a real turn ──
+  //
+  // WHAT WAS MEASURED (test/fixtures/jupiter-turn-run2-apijup-unpaced.jsonl,
+  // 2026-10-11, the owner's two-leg converting basket against the keyless
+  // api.jup.ag): five calls answered 200 with x-ratelimit-remaining counting
+  // 4, 3, 2, 1, 0, and the SIXTH, 0.85 s in, answered 429. The gate's convert
+  // quote met the same wall, which in the keeper throws the gate: the whole
+  // basket REFUSED. Every call after that was refused too.
+  //
+  // WHAT THESE PROVE, through runInvestTick over the stub chain and the stub
+  // venue (nothing higher is faked): today's path reproduces that refusal call
+  // for call; under the cut the same gateway answers every call of a turn
+  // spaced at the plan's rate, a turn the minute cannot cover is DEFERRED
+  // before its first call — nothing quoted, wrapped or sent — and a 429 holds
+  // the next turn back instead of letting it spend another gate. And one the
+  // replay cannot show on its own, because the keyless gate is refused before
+  // the wrap: on a gateway wide enough to pass the gate, the unpaced turn
+  // WRAPS and then fails at send time — the mid-basket failure the reservation
+  // exists to prevent.
+  describe("the jupiter-key cut, against the measured rate limiter", () => {
+    /** The Jupiter requests of the measured turn, in the order they were made. */
+    const measured = readFileSync(new URL("./fixtures/jupiter-turn-run2-apijup-unpaced.jsonl", import.meta.url), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { kind: string; status?: number | string; rl?: string; phase?: string })
+      .filter((entry) => entry.kind === "jupiter");
+
+    /** One request as the gateway saw it. */
+    interface Seen {
+      readonly at: number;
+      readonly host: string;
+      readonly path: string;
+      readonly status: number;
+      readonly key: string | null;
+    }
+
+    const refusedBody = () =>
+      new Response(JSON.stringify({ code: 429, message: "[API Gateway] Too many requests" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "x-ratelimit-remaining": "0" },
+      });
+
+    /**
+     * A gateway in front of the venue stub: `answer` decides each request's fate
+     * from what came before it, and an accepted one is served by stubJupiter.
+     * Installed AFTER stubJupiter, over it.
+     */
+    function gateway(now: () => number, answer: (accepted: readonly number[], index: number, at: number) => boolean) {
+      const venue = globalThis.fetch;
+      const accepted: number[] = [];
+      const seen: Seen[] = [];
+      vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+        const at = now();
+        const url = new URL(String(input));
+        const key = new Headers(init?.headers).get("x-api-key");
+        const ok = answer(accepted, seen.length, at);
+        seen.push({ at, host: url.host, path: url.pathname, status: ok ? 200 : 429, key });
+        if (!ok) return refusedBody();
+        accepted.push(at);
+        return venue(input as string, init);
+      });
+      return { seen, accepted };
+    }
+
+    /** The measured gateway, replayed: the n-th request gets the n-th recorded status, and anything past the recording is refused. */
+    const replayed = (now: () => number) =>
+      gateway(now, (_accepted, index) => (measured[index]?.status ?? 429) === 200);
+
+    /** The measured SHAPE: five accepted per ten seconds (x-ratelimit-reset +10 s, api-keyless-probe.log), refused ones not counted. */
+    const fivePerTen = (now: () => number, perWindow = 5) =>
+      gateway(now, (accepted, _index, at) => accepted.filter((t) => t > at - 10_000).length < perWindow);
+
+    /** A clock the pacer sleeps on: spacing advances it, real time does not. */
+    function fakeClock(start = 1_791_760_456_000) {
+      let now = start;
+      return {
+        now: () => now,
+        advance: (ms: number) => {
+          now += ms;
+        },
+        pacer: (perMinute: number) =>
+          new JupiterPacer({
+            perMinute,
+            now: () => now,
+            sleep: async (ms) => {
+              now += ms;
+            },
+          }),
+      };
+    }
+
+    /**
+     * The owner's vault on 2026-10-09 (smallVault: two legs at 50/50 under a
+     * $149 max_per_call, 0.0197 SOL free), on a chain that CONFIRMS what it is
+     * sent — so a turn that is let through can buy, and every send is counted.
+     */
+    function buyingVault(basket: ReturnType<typeof basketOnChain>) {
+      const crank = Keypair.generate();
+      let sent = 0;
+      let wsolAta: PublicKey | undefined;
+      let usdcAta: PublicKey | undefined;
+      const chain = smallVault(basket, {
+        sendRawTransaction: async () => {
+          sent += 1;
+          return Keypair.generate().publicKey.toBase58();
+        },
+        confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+        getSlot: async () => 1,
+        getTokenAccountBalance: async (address) => {
+          const raw = (amount: bigint) => ({ context: { slot: 1 }, value: { amount: amount.toString(), decimals: 6, uiAmount: null } });
+          if (wsolAta !== undefined && (address as PublicKey).equals(wsolAta) && sent >= 1) return raw(BigInt(SMALL_FREE));
+          if (usdcAta !== undefined && (address as PublicKey).equals(usdcAta) && sent >= 2) return raw(2_000_000n);
+          throw new Error("could not find account");
+        },
+      });
+      wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      usdcAta = getAssociatedTokenAddressSync(USDC_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      const signing = async <T extends Transaction | VersionedTransaction>(tx: T): Promise<T> => tx;
+      const program = new anchor.Program(
+        idl,
+        new anchor.AnchorProvider(
+          chain.connection,
+          { publicKey: crank.publicKey, signTransaction: signing, signAllTransactions: async (txs) => txs },
+          { commitment: "confirmed" },
+        ),
+      );
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      return { deps, sent: () => sent };
+    }
+
+    const TEST_KEY = "jupiter-test-key-0000000001";
+
+    it("REPLAYS the measured turn on today's path: 429 on call 6, the gate throws, the whole basket REFUSED, nothing sent", async () => {
+      // THE RECORDING ITSELF, read rather than retyped.
+      expect(measured.map((entry) => entry.status)).toEqual([200, 200, 200, 200, 200, 429, 429, 429, 429, 429]);
+      expect(measured.map((entry) => entry.rl).slice(0, 5)).toEqual(["4", "3", "2", "1", "0"]);
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = replayed(clock.now);
+      const vault = buyingVault(basket);
+
+      const result = await runInvestTick(vault.deps);
+
+      // CALL FOR CALL WHAT THE MEASUREMENT SAW: leg 0 measured (3), leg 1's
+      // build (2) and its probe — the sixth call, refused, which ARM 2 takes as
+      // an abstention — and then the convert's quote, refused, which throws the
+      // gate.
+      expect(wire.seen.map((s) => s.status)).toEqual([200, 200, 200, 200, 200, 429, 429]);
+      expect(wire.seen.map((s) => s.path)).toEqual([
+        "/swap/v1/quote", "/swap/v1/swap-instructions", "/swap/v1/quote",
+        "/swap/v1/quote", "/swap/v1/swap-instructions", "/swap/v1/quote",
+        "/swap/v1/quote",
+      ]);
+      expect(result.outcome).toBe("REFUSED");
+      // THE DETAIL CANNOT SAY 429 — summarizeUpstreamError cuts the quoted URL
+      // before the status, today as in the measurement — so the wire above is
+      // the witness, and the detail says what was refused.
+      expect(result.detail).toContain("could not be measured");
+      expect(result.detail).toContain("refusing the whole basket");
+      // BEFORE THE WRAP, as the doctrine says — but having spent seven calls of
+      // an organisation's budget on a basket it then refused.
+      expect(vault.sent()).toBe(0);
+      // Today's host, keyless: no header was ever sent.
+      expect(new Set(wire.seen.map((s) => s.host))).toEqual(new Set(["lite-api.jup.ag"]));
+      expect(wire.seen.every((s) => s.key === null)).toBe(true);
+    });
+
+    it("under the cut, the same limiter answers all 18 calls of the turn — spaced, keyed, at api.jup.ag — and the basket is bought", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const vault = buyingVault(basket);
+
+      const result = await runInvestTick({ ...vault.deps, jupiter: { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer } });
+
+      expect(result.outcome).toBe("INVESTED");
+      // 6(L+1) at L = 2: the ADR's 18 calls per buy, unchanged by the cut.
+      expect(wire.seen).toHaveLength(18);
+      expect(wire.seen.every((s) => s.status === 200)).toBe(true);
+      // J1: every request to the keyed host, every one carrying the key.
+      expect(new Set(wire.seen.map((s) => s.host))).toEqual(new Set(["api.jup.ag"]));
+      expect(wire.seen.every((s) => s.key === TEST_KEY)).toBe(true);
+      // P8: two seconds apart, so no ten-second window ever held a sixth.
+      const gaps = wire.seen.slice(1).map((s, i) => s.at - wire.seen[i]!.at);
+      expect(Math.min(...gaps)).toBeGreaterThanOrEqual(2_000);
+      // The wrap, the convert and one invest per leg.
+      expect(vault.sent()).toBe(4);
+      expect(pacer.status()).toMatchObject({ granted: 1, calls: 18, overdrawn: 0, http429: 0, reservedOutstanding: 0 });
+    });
+
+    it("DEFERS a second buying turn in the same minute BEFORE ITS FIRST CALL, where today's path starts it and is refused", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const jupiter = { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer };
+
+      expect((await runInvestTick({ ...buyingVault(basket).deps, jupiter })).outcome).toBe("INVESTED");
+      const before = wire.seen.length;
+      // ANOTHER VAULT'S TURN, the same sweep: 18 more would make 36 of 30 in one minute.
+      const second = buyingVault(basket);
+      const deferred = await runInvestTick({ ...second.deps, jupiter });
+      expect(deferred.outcome).toBe("DEFERRED");
+      expect(deferred.detail).toContain("needs 18 calls and 18 of this keeper's 30 a minute");
+      expect(deferred.detail).toContain("nothing was quoted, wrapped or sent");
+      expect(wire.seen.length - before).toBe(0);
+      expect(second.sent()).toBe(0);
+      expect(pacer.status().deferred).toEqual({ budget: 1, backoff: 0, neverFits: 0 });
+
+      // TODAY'S PATH, the same turn at the same instant: it starts, and the
+      // gateway refuses it — a request spent, a basket refused, a warning raised.
+      const unpaced = await runInvestTick(buyingVault(basket).deps);
+      expect(unpaced.outcome).toBe("REFUSED");
+      expect(wire.seen.length - before).toBeGreaterThan(0);
+      expect(wire.seen.slice(before).some((s) => s.status === 429)).toBe(true);
+
+      // A MINUTE LATER the budget is back and the deferred vault buys.
+      clock.advance(60_000);
+      expect((await runInvestTick({ ...second.deps, jupiter })).outcome).toBe("INVESTED");
+    });
+
+    it("prevents the MID-BASKET failure: on a gateway wide enough for the gate, today's path WRAPS and then fails at send time", async () => {
+      // TEN PER TEN SECONDS: the free key's burst as the ADR assumes it (open
+      // question 10). The gate's nine calls fit; the send path's do not.
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now, 10);
+      const unpaced = buyingVault(basket);
+      const result = await runInvestTick(unpaced.deps);
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("429");
+      // THE WRAP WENT OUT: the owner's SOL is wSOL now, and no basket was bought with it.
+      expect(unpaced.sent()).toBe(1);
+      expect(wire.seen.filter((s) => s.status === 429)).toHaveLength(1);
+
+      // Under the cut, one call a second against the same gateway: all eighteen answered, the basket bought.
+      clock.advance(60_000);
+      const paced = buyingVault(basket);
+      const pacer = clock.pacer(60);
+      const bought = await runInvestTick({ ...paced.deps, jupiter: { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer } });
+      expect(bought.outcome).toBe("INVESTED");
+      expect(paced.sent()).toBe(4);
+      expect(pacer.status().http429).toBe(0);
+    });
+
+    it("backs off after a 429 it could not prevent: the refused turn's successor is DEFERRED with no request at all, then let through", async () => {
+      // ANOTHER CONSUMER OF THE SAME ORGANISATION — the web, a script — has
+      // just spent the gateway's window. The pacer cannot see it; the 429 says it.
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      for (let i = 0; i < 5; i++) wire.accepted.push(clock.now());
+      const pacer = clock.pacer(30);
+      const jupiter = { baseUrl: KEYED_API, apiKey: new Secret(TEST_KEY, "jupiterApiKey"), pacer };
+
+      const refused = await runInvestTick({ ...buyingVault(basket).deps, jupiter });
+      expect(refused.outcome).toBe("REFUSED");
+      expect(refused.detail).toContain("could not be measured");
+      // ONE request, refused: the gate stops at its first build that throws.
+      expect(wire.seen.map((s) => s.status)).toEqual([429]);
+      expect(pacer.status().http429).toBe(1);
+
+      // THE NEXT SWEEP: deferred on the backoff, no request at all.
+      clock.advance(30_000);
+      const held = await runInvestTick({ ...buyingVault(basket).deps, jupiter });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("429 Too Many Requests");
+      expect(wire.seen).toHaveLength(1);
+
+      // Past the backoff, through — and bought.
+      clock.advance(30_000);
+      expect((await runInvestTick({ ...buyingVault(basket).deps, jupiter })).outcome).toBe("INVESTED");
+      expect(pacer.status().deferred).toEqual({ budget: 0, backoff: 1, neverFits: 0 });
+    });
+
+    it("refuses a basket the plan's minute can never cover — with the remedy — and asks Jupiter nothing", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      const wire = fivePerTen(clock.now);
+      const result = await runInvestTick({ ...buyingVault(basket).deps, jupiter: { baseUrl: LITE_API, apiKey: null, pacer: clock.pacer(12) } });
+      expect(result.outcome).toBe("REFUSED");
+      expect(result.detail).toContain("needs 18 Jupiter calls per buying turn");
+      expect(result.detail).toContain("can never be bought at this budget");
+      expect(wire.seen).toHaveLength(0);
+    });
+
+    it("releases the reservation on every way out — a FAILED turn included — so one bad turn cannot hold the budget for the life of the process", async () => {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      stubJupiter();
+      const clock = fakeClock();
+      fivePerTen(clock.now);
+      const pacer = clock.pacer(30);
+      const vault = buyingVault(basket);
+      const exploding = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          if (prop === "getBalance") return async () => {
+            throw new Error("the crank's balance could not be read");
+          };
+          return (target as unknown as Record<string | symbol, unknown>)[prop];
+        },
+      }) as Connection;
+      const result = await runInvestTick({ ...vault.deps, connection: exploding, jupiter: { baseUrl: LITE_API, apiKey: null, pacer } });
+      expect(result.outcome).toBe("FAILED");
+      expect(pacer.status().reservedOutstanding).toBe(0);
+    });
   });
 });

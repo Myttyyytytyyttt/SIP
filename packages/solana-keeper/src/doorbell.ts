@@ -282,6 +282,11 @@ export function investRests(outcome: TurnInvest): boolean {
     // A depth or route refusal: pools refill with TIME, and nothing rings when they do.
     case "REFUSED":
       return false;
+    // A buying turn the jupiter-key pacer held back before its first call: the budget frees with
+    // TIME, and nothing rings when it does. Resting it would park the buy until a bell or the
+    // 30-minute safety pass; busy turns it again next sweep, which is what "deferred" promised.
+    case "DEFERRED":
+      return false;
     // The FAILED streak escalates per sweep, and only a turned vault advances it.
     case "FAILED":
       return false;

@@ -66,6 +66,7 @@ import {
   wrapShortStreak,
 } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
+import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
 import { SERVICE, createChangeLog, createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { runPreflight } from "../src/preflight.js";
 import {
@@ -103,7 +104,7 @@ import { KeeperClaim, advisoryKeyFor } from "../src/singleton.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { readTransaction, WalkCache, type WalkCounters } from "../src/measure-window.js";
-import { MODE_PROFIT } from "../src/program-scripts.js";
+import { KEYED_API, LITE_API, MODE_PROFIT } from "../src/program-scripts.js";
 import { measuredBase, resolvesSignerFor, roleProfile, unreachable } from "../src/role-registry.js";
 import { createVolumeBase } from "../src/volume-base.js";
 import { previewLastSettled, previewVolume, type PreviewBook } from "../src/volume-preview.js";
@@ -957,6 +958,25 @@ async function refreshLeaderboard(): Promise<void> {
 const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? new CoalescedRefresh(refreshLeaderboard) : null;
 
 /**
+ * THE `jupiter-key` CUT (src/jupiter-pacer.ts). Without the token, null, and
+ * every buying turn quotes lite-api.jup.ag keyless and unpaced, as it always
+ * has. With it: api.jup.ag and the key when SIP_SOLANA_JUPITER_API_KEY is set
+ * (today's host when it is not), and ONE pacer for the process — the budget is
+ * the organisation's, so two pacers in one process would each grant what the
+ * other already spent.
+ */
+const jupiterAccess: JupiterAccess | null = config.cuts.has("jupiter-key")
+  ? {
+      baseUrl: config.jupiterApiKey === null ? LITE_API : KEYED_API,
+      apiKey: config.jupiterApiKey,
+      pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),
+    }
+  : null;
+// /status's per-minute view judged against the budget the pacer enforces, not
+// the keyless 30 — only under the token, so a keeper without it reads as before.
+if (jupiterAccess !== null) jupiterCalls.setBudgetPerMinute(jupiterAccess.pacer.perMinute);
+
+/**
  * /status's two blocks for the cuts, folded in at render like the doorbell's:
  * where the last sweep's links came from, and what each cut that keeps counters
  * has done. Additive: a keeper with no cut and no L3 serves `cuts.on: []` and a
@@ -965,7 +985,15 @@ const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? n
 function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
   return {
     discovery: linkDiscovery.status(Date.now()),
-    cuts: { on: [...config.cuts], privyAddressBook: privyBook?.status() ?? null, board: boardRefresh?.status() ?? null },
+    cuts: {
+      on: [...config.cuts],
+      privyAddressBook: privyBook?.status() ?? null,
+      board: boardRefresh?.status() ?? null,
+      // Only while the token is on: absent, the block is the one it always was.
+      ...(jupiterAccess === null
+        ? {}
+        : { jupiter: { host: new URL(jupiterAccess.baseUrl).host, keyed: jupiterAccess.apiKey !== null, ...jupiterAccess.pacer.status() } }),
+    },
   };
 }
 
@@ -1934,6 +1962,8 @@ async function sweep(): Promise<void> {
           // carry it and a config key that starts erroring is its own outage.
           live: investTurn.live,
           protocolPaused,
+          // THE jupiter-key CUT, only while its token is on (jupiterAccess above).
+          ...(jupiterAccess === null ? {} : { jupiter: jupiterAccess }),
         });
         // The same rule for a basket: a live turn that INVESTED, sends and all.
         if (investTurn.live && invest.outcome === "INVESTED") turnTimers.record("investInvestedMs", Date.now() - investAt);

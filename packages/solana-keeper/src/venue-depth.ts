@@ -55,6 +55,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 import {
   type AgeTolerance,
+  type JupiterApi,
   type JupiterQuote,
   type JupiterRoute,
   type LandingEpoch,
@@ -353,6 +354,14 @@ export async function measureLegVenue(
      * (readDestinationTransferFee) instead of re-deciding it minutes later.
      */
     readonly landing?: LandingEpoch;
+    /**
+     * The host, key and pacing every Jupiter request of this measurement goes
+     * through — the `jupiter-key` cut's per-turn API (src/jupiter-pacer.ts,
+     * jupiterApiForTurn). ABSENT IS TODAY: lite-api.jup.ag, keyless, through
+     * the global fetch, unpaced. Both the route build and ARM 2's probe take
+     * it, because both spend the same organisation's budget.
+     */
+    readonly api?: JupiterApi;
   },
 ): Promise<{ readonly route: JupiterRoute; readonly venue: LegVenue }> {
   // STRICTLY ABOVE THE FEE, DECIDED BEFORE THE QUOTE IS ASKED FOR. This is the
@@ -378,6 +387,7 @@ export async function measureLegVenue(
     maxAge: params.maxAge,
     ...(params.ownerFloorRateWad === undefined ? {} : { ownerFloorRateWad: params.ownerFloorRateWad }),
     ...(params.landing === undefined ? {} : { landing: params.landing }),
+    ...(params.api === undefined ? {} : { api: params.api }),
   });
 
   // WHERE THE WARNING BECOMES A REFUSAL.
@@ -422,7 +432,7 @@ export async function measureLegVenue(
       outputMint: params.targetMint,
       amountIn: probeIn,
       slippageBps: Number(slippageBps),
-    });
+    }, params.api);
     takeFloorRaw = takeAtProbeRate(params.spend, BigInt(probe.inAmount), BigInt(probe.outAmount));
     impact = impactFrom({
       turnIn: BigInt(quote.inAmount),

@@ -7,15 +7,19 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`jupiter-key`, `rest-skip`, `invest-batch`, `explicit-send`, …); they land
-// with their own code, each on its own soak, and until then naming one REFUSES
-// TO START. A token that is accepted and does nothing is the one failure this
+// (`rest-skip`, `invest-batch`, `explicit-send`, …); they land with their own
+// code, each on its own soak, and until then naming one REFUSES TO START. A token that is accepted and does nothing is the one failure this
 // list exists to prevent: the owner reads Railway, sees `rest-skip`, and
 // believes the walk is being skipped.
 //
-// NONE OF THESE IS ON THE MONEY PATH. Each changes how a fact is read — the
-// link list, a wallet's Privy record, when the rankings are recomputed — and
+// THE FIRST THREE ARE NOT ON THE MONEY PATH. Each changes how a fact is read —
+// the link list, a wallet's Privy record, when the rankings are recomputed — and
 // never what is settled, for whom, or how much (ADR §6.2, L1b non-money).
+//
+// THE REST ARE, ONE TOKEN EACH, and the ADR's rule for them is that only one
+// soaks at a time (§6.1 rule 1): a money token changes whether, when or how a
+// buy is sent, so each has its own go gate and its rollback is removing it. They
+// are listed after the non-money three, in the order they are switched on.
 //
 // L3 IS NOT A TOKEN. The last-known-good link list carries a number, how old a
 // list it may fall back to, so it has a variable of its own
@@ -34,8 +38,16 @@
  *   * `board-timer`: the rankings recomputed at most every
  *     BOARD_REFRESH_MIN_GAP_MS after a settlement, one in flight and one queued,
  *     instead of once per SETTLED (src/board-refresh.ts).
+ *
+ *   MONEY PATH, one at a time:
+ *
+ *   * `jupiter-key` (J1 + P8, ADR §6.2 L1b-m1): every Jupiter call of a buying
+ *     turn through api.jup.ag with SIP_SOLANA_JUPITER_API_KEY when one is set
+ *     (today's host otherwise), paced, with the turn's calls RESERVED before its
+ *     first one — a turn the budget cannot cover ends DEFERRED having moved
+ *     nothing — and a backoff after a 429 (src/jupiter-pacer.ts).
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer"] as const;
+export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key"] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 

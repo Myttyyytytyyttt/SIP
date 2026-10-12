@@ -44,6 +44,7 @@ export type { AttestationInputs } from "@sip/solana-program/attestation";
 export type {
   AgeTolerance,
   BuildJupiterRouteParams,
+  JupiterApi,
   JupiterQuote,
   JupiterRoute,
   LandingEpoch,
@@ -95,6 +96,11 @@ export const verifySharedAccountsRoute = jupiterRoute.verifySharedAccountsRoute;
 export const LANDING_WINDOW_SLOTS = jupiterRoute.LANDING_WINDOW_SLOTS;
 export const feeRiseCanLand = jupiterRoute.feeRiseCanLand;
 export const resolveDestinationTransferFee = jupiterRoute.resolveDestinationTransferFee;
+// THE TWO HOSTS, added 2026-10-12 with the `jupiter-key` cut (src/jupiter-pacer.ts):
+// which base a keyed turn quotes against, and which one every other turn still
+// does. Strings, so they get a check of their own below.
+export const LITE_API = jupiterRoute.LITE_API;
+export const KEYED_API = jupiterRoute.KEYED_API;
 export const RAYDIUM_CLMM = raydiumSwap.RAYDIUM_CLMM;
 export const buildSwapV2AccountMetas = raydiumSwap.buildSwapV2AccountMetas;
 export const buildSwapV2Data = raydiumSwap.buildSwapV2Data;
@@ -153,4 +159,13 @@ for (const [name, value] of Object.entries({ RAYDIUM_CLMM, JUPITER_PROGRAM })) {
 // rise at the next epoch reach min_out — the direction that reverts.
 if (typeof LANDING_WINDOW_SLOTS !== "bigint") {
   throw new Error("@sip/solana-program did not provide LANDING_WINDOW_SLOTS as a bigint: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads");
+}
+
+// AND THE TWO HOSTS, STRINGS: an unwrap that lost one would send a keyed turn's
+// quote to "undefined/quote", which fetch refuses as a URL — a refused basket
+// whose detail names no host — rather than to the host the owner paid for.
+for (const [name, value] of Object.entries({ LITE_API, KEYED_API })) {
+  if (typeof value !== "string" || !value.startsWith("https://")) {
+    throw new Error(`@sip/solana-program did not provide ${name} as an https URL: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads`);
+  }
 }

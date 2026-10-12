@@ -44,6 +44,7 @@ import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
 import { readCuts, readDiscoveryLkgMs, type CutToken } from "./cuts.js";
+import { readJupiterKeySettings } from "./jupiter-pacer.js";
 import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, type KeeperRole } from "./role-registry.js";
 import { DEFAULT_ARCHIVAL_CREDITS, type ArchivalCredits } from "./rpc-usage.js";
 
@@ -101,6 +102,13 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   // failed listing may fall back to. Both strict, both off when unset.
   "SIP_SOLANA_CUTS",
   "SIP_SOLANA_DISCOVERY_LKG_MS",
+  // THE jupiter-key CUT'S TWO SETTINGS (src/jupiter-pacer.ts): the key, and the
+  // plan's calls a minute. Read only while the token is on; set without it they
+  // warn and are not used, so removing the token stays the whole rollback. The
+  // key is a credential and is registered with the redactor the moment it is
+  // read; it buys quotes, never a signature.
+  "SIP_SOLANA_JUPITER_API_KEY",
+  "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE",
   ...SIGNING_SECRET_VARS,
 ]);
 
@@ -306,6 +314,19 @@ export interface KeeperConfig {
    * listing fails the sweep.
    */
   readonly discoveryLkgMs: number;
+  /**
+   * THE jupiter-key CUT (src/jupiter-pacer.ts): the Jupiter API key, or null —
+   * always null while the token is off, whatever the environment holds. A
+   * secret: registered with the redactor when read, and served nowhere.
+   */
+  readonly jupiterApiKey: Secret | null;
+  /**
+   * The Jupiter calls a minute the pacer budgets buying turns against: the
+   * plan's (SIP_SOLANA_JUPITER_CALLS_PER_MINUTE), else 60 with a key and 30
+   * without. Read, and meaningful, only while the token is on.
+   */
+  readonly jupiterCallsPerMinute: number;
+  readonly jupiterCallsPerMinuteSource: "default" | "env";
   /** mint (base58) → Raydium CLMM pool. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly alertWebhook: Secret | null;
@@ -637,6 +658,17 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     // NAMES ONLY, in the order the ADR rolls them out, so two keepers' lines compare.
     cuts: [...config.cuts],
     discoveryLkgMs: config.discoveryLkgMs,
+    // ONLY UNDER ITS TOKEN, so a keeper without the cut describes itself exactly
+    // as it did before the cut existed. WHETHER a key is set, never the key.
+    ...(config.cuts.has("jupiter-key")
+      ? {
+          jupiter: {
+            keyed: config.jupiterApiKey !== null,
+            callsPerMinute: config.jupiterCallsPerMinute,
+            callsPerMinuteSource: config.jupiterCallsPerMinuteSource,
+          },
+        }
+      : {}),
     pools: config.pools.size,
     alertWebhook: config.alertWebhook !== null,
     alertMinSeverity: config.alertMinSeverity,
@@ -796,6 +828,16 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
   const lkgRead = readDiscoveryLkgMs(env["SIP_SOLANA_DISCOVERY_LKG_MS"]);
   const discoveryLkgMs = "ms" in lkgRead ? lkgRead.ms : 0;
   if ("problem" in lkgRead) problems.push(lkgRead.problem);
+  // THE jupiter-key CUT'S SETTINGS, read only under the token (jupiter-pacer.ts
+  // says why a stray value warns instead of refusing). The key is registered
+  // BEFORE anything else can quote it: every problem and warning below is
+  // scrubbed with this redactor on the way out.
+  const jupiterRead = readJupiterKeySettings(env, cuts.has("jupiter-key"));
+  const jupiterKeyRaw = trimmed(env["SIP_SOLANA_JUPITER_API_KEY"]);
+  if (jupiterKeyRaw !== undefined) redactor.register(jupiterKeyRaw, "jupiterApiKey");
+  problems.push(...jupiterRead.problems);
+  warnings.push(...jupiterRead.warnings);
+  const jupiterApiKey = jupiterRead.apiKey === null ? null : new Secret(jupiterRead.apiKey, "jupiterApiKey");
   const pools = parsePools(env["SIP_SOLANA_POOLS"], problems);
   const credits = readCreditSettings(env);
   problems.push(...credits.problems);
@@ -955,6 +997,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     sweepMs,
     cuts,
     discoveryLkgMs,
+    jupiterApiKey,
+    jupiterCallsPerMinute: jupiterRead.callsPerMinute,
+    jupiterCallsPerMinuteSource: jupiterRead.callsPerMinuteSource,
     pools,
     alertWebhook,
     alertMinSeverity,
