@@ -48,6 +48,7 @@ import { accountDiscriminator, idl } from "../src/idl.js";
 import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
 import { KEYED_API, LANDING_WINDOW_SLOTS, LITE_API, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
+import { CrankSender, QUIET_AFTER_TAKEOVER_MS } from "../src/explicit-send.js";
 import { readSweepState } from "../src/invest-snapshot.js";
 import { JupiterPacer } from "../src/jupiter-pacer.js";
 import { MAX_SUPPORTED_TRANSACTION_VERSION } from "../src/measure-window.js";
@@ -2762,6 +2763,151 @@ describe("the ticks' first steps, over the same bytes", () => {
       // THE BYTES: every transaction the batch-led turn sent is the one today's sent.
       expect(raw).toEqual(todayBytes);
       expect(fromBatch.purchases?.map((p) => p.spentRaw)).toEqual(asToday.purchases?.map((p) => p.spentRaw));
+    });
+  });
+
+  // ── the explicit-send cut, through whole turns ──────────────────────────────
+  //
+  // L1d's three behaviours, each against today's path on the same chain: the
+  // same four transactions for the same blockhash (wrap, convert, two legs);
+  // isLive() asked per SEND, so a claim lost after the wrap sends no convert and
+  // no leg — where today's turn, which asked once, sends all four; and no buy
+  // at all inside the takeover quiet period, nothing quoted either.
+  describe("the explicit-send cut", () => {
+    /**
+     * The owner's small converting vault (smallVault), on a chain that confirms
+     * what it is sent — by websocket for Anchor, by status for the sender — and
+     * records the bytes. The blockhash and the crank are fixed and the state is
+     * resettable, so two runs on ONE chain sign the same messages.
+     */
+    function sendingVault() {
+      const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY]);
+      const crank = Keypair.fromSeed(new Uint8Array(32).fill(4));
+      const raw: string[] = [];
+      let sent = 0;
+      let wsolAta: PublicKey | undefined;
+      let usdcAta: PublicKey | undefined;
+      const chain = smallVault(basket, {
+        getLatestBlockhash: async () => ({ blockhash: "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk", lastValidBlockHeight: 1_000 }),
+        sendRawTransaction: async (bytes) => {
+          sent += 1;
+          raw.push(Buffer.from(bytes as Uint8Array).toString("base64"));
+          return `sig-${sent}`;
+        },
+        confirmTransaction: async () => ({ context: { slot: 1 }, value: { err: null } }),
+        getSignatureStatuses: async () => ({ context: { slot: 1 }, value: [{ confirmationStatus: "confirmed", err: null, slot: 1, confirmations: 1 }] }),
+        getBlockHeight: async () => 0,
+        getSlot: async () => 1,
+        getTokenAccountBalance: async (address) => {
+          const amount = (value: bigint) => ({ context: { slot: 1 }, value: { amount: value.toString(), decimals: 6, uiAmount: null } });
+          if (wsolAta !== undefined && (address as PublicKey).equals(wsolAta) && sent >= 1) return amount(BigInt(SMALL_FREE));
+          if (usdcAta !== undefined && (address as PublicKey).equals(usdcAta) && sent >= 2) return amount(2_000_000n);
+          throw new Error("could not find account");
+        },
+      });
+      wsolAta = getAssociatedTokenAddressSync(NATIVE_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      usdcAta = getAssociatedTokenAddressSync(USDC_MINT, chain.vault, true, TOKEN_PROGRAM_ID);
+      // THE KEEPER'S WALLET IS THE CRANK (bin/keeper.mts): it signs what it is handed, as anchor.Wallet does.
+      const wallet = {
+        publicKey: crank.publicKey,
+        async signTransaction<T extends Transaction | VersionedTransaction>(tx: T): Promise<T> {
+          if ("partialSign" in tx) (tx as Transaction).partialSign(crank);
+          else (tx as VersionedTransaction).sign([crank]);
+          return tx;
+        },
+        async signAllTransactions<T extends Transaction | VersionedTransaction>(txs: T[]): Promise<T[]> {
+          return txs;
+        },
+      };
+      const program = new anchor.Program(idl, new anchor.AnchorProvider(chain.connection, wallet, { commitment: "confirmed" }));
+      const deps = { connection: chain.connection, program, vault: chain.vault, crank, crankLamports: 10_000_000_000n, live: true, protocolPaused: false };
+      /** A sender on a clock the test owns, already past its quiet period unless asked otherwise. */
+      const sender = (isLive: () => boolean, options: { quiet?: boolean } = {}) => {
+        let now = 1_000_000;
+        const made = new CrankSender({ connection: chain.connection, wallet, isLive, now: () => now, sleep: async (ms) => void (now += ms) });
+        if (options.quiet !== true) now += QUIET_AFTER_TAKEOVER_MS;
+        return { sender: made, advance: (ms: number) => void (now += ms) };
+      };
+      return { chain, deps, raw, sender, reset: () => ((sent = 0), raw.splice(0)) };
+    }
+
+    it("sends the wrap, the convert and both legs as the very bytes today's turn sends, for the same blockhash", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      const today = await runInvestTick(vault.deps);
+      const todayBytes = [...vault.raw];
+      expect(today.outcome).toBe("INVESTED");
+      expect(todayBytes).toHaveLength(4);
+
+      vault.reset();
+      const { sender } = vault.sender(() => true);
+      const explicit = await runInvestTick({ ...vault.deps, sender });
+      expect(explicit.outcome).toBe("INVESTED");
+      expect(vault.raw).toEqual(todayBytes);
+      expect(explicit.purchases?.map((p) => p.spentRaw)).toEqual(today.purchases?.map((p) => p.spentRaw));
+      // CONFIRMED BY POLLING, NEVER BY THE WEBSOCKET: no confirmTransaction on the explicit run.
+      expect(sender.status()).toMatchObject({ sent: 4, landed: 4, refused: { notLive: 0, quiet: 0, draining: 0 } });
+    });
+
+    it("asks isLive() before EACH send: a claim lost after the wrap sends no convert and no leg — today's turn sends all four", async () => {
+      stubJupiter();
+      const vault = sendingVault();
+      // TODAY: keysForTurn asked once, at the top of the turn, and nothing asks
+      // again — whatever happens to the claim after that, all four go out.
+      const today = await runInvestTick(vault.deps);
+      expect(today.outcome).toBe("INVESTED");
+      expect(vault.raw).toHaveLength(4);
+
+      vault.reset();
+      let live = true;
+      // The claim goes the moment the wrap's bytes have left.
+      const wrapThenLose = new Proxy(vault.deps.connection, {
+        get(target, prop) {
+          const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+          if (prop !== "sendRawTransaction") return value;
+          return async (...args: unknown[]) => {
+            const signature = await (value as (...a: unknown[]) => Promise<string>)(...args);
+            live = false;
+            return signature;
+          };
+        },
+      }) as Connection;
+      const lostSender = new CrankSender({ connection: wrapThenLose, wallet: (vault.deps.program.provider as anchor.AnchorProvider).wallet, isLive: () => live, quietMs: 0 });
+      const result = await runInvestTick({ ...vault.deps, sender: lostSender });
+      expect(vault.raw).toHaveLength(1);
+      expect(result.outcome).toBe("FAILED");
+      expect(result.detail).toContain("no longer holds the claim");
+      expect(result.purchases).toBeUndefined();
+      expect(lostSender.status()).toMatchObject({ sent: 1, landed: 1, refused: { notLive: 1 } });
+    });
+
+    it("buys NOTHING inside the takeover quiet period — nothing quoted, wrapped or sent — and buys once it is over", async () => {
+      const { urls } = stubJupiter();
+      const vault = sendingVault();
+      const { sender, advance } = vault.sender(() => true, { quiet: true });
+      const held = await runInvestTick({ ...vault.deps, sender });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("the takeover quiet period");
+      expect(held.detail).toContain("settles go as usual");
+      expect(urls).toHaveLength(0);
+      expect(vault.raw).toHaveLength(0);
+
+      advance(QUIET_AFTER_TAKEOVER_MS);
+      const bought = await runInvestTick({ ...vault.deps, sender });
+      expect(bought.outcome).toBe("INVESTED");
+      expect(vault.raw).toHaveLength(4);
+    });
+
+    it("starts no buy while draining after SIGTERM", async () => {
+      const { urls } = stubJupiter();
+      const vault = sendingVault();
+      const { sender } = vault.sender(() => true);
+      sender.beginDrain();
+      const held = await runInvestTick({ ...vault.deps, sender });
+      expect(held.outcome).toBe("DEFERRED");
+      expect(held.detail).toContain("draining after SIGTERM");
+      expect(urls).toHaveLength(0);
+      expect(vault.raw).toHaveLength(0);
     });
   });
 });

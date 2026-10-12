@@ -7,7 +7,7 @@
 // before any of these existed, request for request.
 //
 // ONLY THE TOKENS THIS BUILD IMPLEMENTS ARE ACCEPTED. The ADR lists more
-// (`rest-skip`, `explicit-send`, …); they land with their own
+// (`rest-skip`, `lamports-filter`, …); they land with their own
 // code, each on its own soak, and until then naming one REFUSES TO START. A token that is accepted and does nothing is the one failure this
 // list exists to prevent: the owner reads Railway, sees `rest-skip`, and
 // believes the walk is being skipped.
@@ -53,8 +53,13 @@
  *     decide a turn that sends nothing; one that would act is run again on
  *     fresh reads, so every transaction is built as today
  *     (src/invest-snapshot.ts). The profit keeper's census goes 19 → 7.
+ *   * `explicit-send` (L1d, ADR §4.3, §6.2): the wrap, the convert and every
+ *     leg sent in the keeper's own order — blockhash, build, sign, ask, send,
+ *     poll — with isLive() asked before EACH send, no wrap/convert/invest for
+ *     75 s after taking the claim, and a SIGTERM drain; the bytes are Anchor's
+ *     (src/explicit-send.ts).
  */
-export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch"] as const;
+export const CUT_TOKENS = ["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch", "explicit-send"] as const;
 
 export type CutToken = (typeof CUT_TOKENS)[number];
 

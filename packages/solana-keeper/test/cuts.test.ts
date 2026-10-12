@@ -32,7 +32,7 @@ describe("SIP_SOLANA_CUTS", () => {
   });
 
   it("implements the three non-money cuts of the ADR's L1b, then the money tokens built so far, in rollout order", () => {
-    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch"]);
+    expect(CUT_TOKENS).toEqual(["gpa-v2", "privy-address", "board-timer", "jupiter-key", "invest-batch", "explicit-send"]);
     const read = readCuts("jupiter-key");
     expect("cuts" in read && [...read.cuts]).toEqual(["jupiter-key"]);
   });
@@ -49,7 +49,7 @@ describe("SIP_SOLANA_CUTS", () => {
   });
 
   it("REFUSES TO START on a token this build does not implement — a money cut named early included", () => {
-    for (const bad of ["rest-skip", "explicit-send", "JUPITER-KEY", "invest_batch", "GPA-V2", "gpa_v2", "gpa-v2,", "everything"]) {
+    for (const bad of ["rest-skip", "lamports-filter", "JUPITER-KEY", "invest_batch", "explicit_send", "GPA-V2", "gpa_v2", "gpa-v2,", "everything"]) {
       const message = refusal(dry({ SIP_SOLANA_CUTS: bad }));
       expect(message, bad).toMatch(/SIP_SOLANA_CUTS entry #\d+ is not a cut this keeper implements/);
     }

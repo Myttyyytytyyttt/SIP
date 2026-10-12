@@ -138,3 +138,46 @@ describe("invest-batch", () => {
     expect(keeper).toContain("...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),");
   });
 });
+
+describe("explicit-send", () => {
+  it("builds ONE sender, only under its token, on the provider's own wallet, asking isLive() — never a cached answer", () => {
+    expect(keeper).toMatch(
+      /const crankSender: CrankSender \| null = config\.cuts\.has\("explicit-send"\)\n\s+\? new CrankSender\(\{\n\s+connection,\n\s+wallet: provider\.wallet,\n\s+isLive: \(\) => isLive\(\),/,
+    );
+    expect(keeper.match(/new CrankSender\(/g)).toHaveLength(1);
+  });
+
+  it("starts the quiet period again at every takeover", () => {
+    const takeover = keeper.slice(keeper.indexOf("onTakeover: () => {"), keeper.indexOf("onTakeover: () => {") + 400);
+    expect(takeover).toContain("crankSender?.noteTakeover();");
+  });
+
+  it("makes a draining process not live, so no turn is handed a key after SIGTERM — and is today's liveBlocker without the token", () => {
+    expect(keeper).toMatch(
+      /const liveBlocker = \(\): string \| null =>\n[\s\S]{0,400}\(crankSender\?\.draining === true \? "draining after SIGTERM[^"]*" : null\) \?\?\n\s+missingLiveCondition\(\{ armed: config\.armed, verification, claimLive: claim\.live, lockName: profile\.lockName \}\);/,
+    );
+  });
+
+  it("hands the sender to the invest turn only when it exists, and never to the settle turn", () => {
+    expect(sweepBody).toContain("...(crankSender === null ? {} : { sender: crankSender }),");
+    const settleCall = sweepBody.slice(sweepBody.indexOf("const settle = await runSettleTick({"), sweepBody.indexOf("settleOutcome = settle.outcome;"));
+    expect(settleCall).not.toContain("crankSender");
+  });
+
+  it("on SIGTERM drains first — no new send, the one in flight confirmed for up to SIGTERM_DRAIN_MS — and only then releases and exits", () => {
+    const handler = keeper.slice(keeper.indexOf('for (const signal of ["SIGTERM", "SIGINT"] as const) {'));
+    const drain = handler.slice(0, handler.indexOf("return;\n    }"));
+    expect(drain).toContain("if (crankSender !== null) {");
+    expect(drain).toContain("crankSender.beginDrain();");
+    expect(drain).toContain("void crankSender.idle(SIGTERM_DRAIN_MS).then((drained) => {");
+    expect(drain.indexOf("crankSender.idle(SIGTERM_DRAIN_MS)")).toBeLessThan(drain.indexOf("claim.release();"));
+    expect(drain.indexOf("claim.release();")).toBeLessThan(drain.indexOf("process.exit(0);"));
+    // WITHOUT THE TOKEN, TODAY'S HANDLER: release and exit at once.
+    const today = handler.slice(handler.indexOf("return;\n    }"));
+    expect(today).toMatch(/if \(config\.armed && readModel\.enabled && claim\.held\) \{\n\s+log\.info\("releasing the keeper claim", \{ signal \}\);\n\s+claim\.release\(\);\n\s+\}\n\s+process\.exit\(0\);/);
+  });
+
+  it("serves its counters only under the token", () => {
+    expect(keeper).toContain("...(crankSender === null ? {} : { explicitSend: crankSender.status() }),");
+  });
+});

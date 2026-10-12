@@ -20,6 +20,7 @@ import type { Redactor, Secret } from "@sip/solana-log";
 import type { BoardRefreshStatus } from "./board-refresh.js";
 import type { HeliusApiKeySource } from "./config.js";
 import type { CutToken } from "./cuts.js";
+import type { CrankSenderStatus } from "./explicit-send.js";
 import type { JupiterPacerStatus } from "./jupiter-pacer.js";
 import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
@@ -288,6 +289,13 @@ export interface CutsStatus {
    * new path". Absent while the token is off.
    */
   readonly investBatch?: InvestBatchStatus;
+  /**
+   * explicit-send: what the crank's sender sent, landed, saw revert or expire,
+   * and REFUSED before sending (not live, quiet, draining); the takeover quiet
+   * period while it runs; and the SIGTERM drain once one started — the ADR's
+   * `deploy.releasedOnSigterm`. Absent while the token is off.
+   */
+  readonly explicitSend?: CrankSenderStatus;
 }
 
 /** The `cuts.investBatch` block (src/invest-snapshot.ts; counted in bin/keeper.mts). */

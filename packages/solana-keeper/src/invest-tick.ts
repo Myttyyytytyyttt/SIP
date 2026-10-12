@@ -94,6 +94,7 @@ import {
   type WrapPlan,
   type WrapReport,
 } from "./invest-decision.js";
+import type { CrankSender } from "./explicit-send.js";
 import { type InvestSnapshot, cachedRentFloor } from "./invest-snapshot.js";
 import { type JupiterAccess, type JupiterReservation, buyingTurnJupiterCalls, jupiterApiForTurn } from "./jupiter-pacer.js";
 import { method, type MethodCall } from "./methods.js";
@@ -389,6 +390,19 @@ export interface InvestDeps {
    * vault that settled or sent anything earlier in the sweep.
    */
   readonly snapshot?: InvestSnapshot;
+  /**
+   * THE `explicit-send` CUT (src/explicit-send.ts, L1d): the crank's sends in an
+   * order the keeper owns — blockhash, build, sign, ASK, send, poll — instead of
+   * Anchor's `.rpc()` and `provider.sendAndConfirm`. ABSENT IS TODAY, byte for
+   * byte and request for request.
+   *
+   * PRESENT, the turn also asks it once before anything of the acting half: a
+   * keeper in its takeover quiet period, or draining after SIGTERM, ends the
+   * turn DEFERRED having quoted, wrapped and sent nothing. Each send then asks
+   * again — live, quiet, draining — after signing and before sending, so a claim
+   * lost after the wrap sends no convert and no leg.
+   */
+  readonly sender?: CrankSender;
 }
 
 /** What a turn learns on its way through, whichever way it then ends. */
@@ -707,6 +721,19 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     return { outcome: "FAILED", detail: "a live invest turn arrived without the crank; nothing was sent" };
   }
 
+  // ── under the explicit-send cut: may a buy start at all? ──────────────────
+  //
+  // BEFORE EVERY READ OF THE ACTING HALF — the leg mints, every Jupiter quote,
+  // the token accounts. A keeper inside its takeover quiet period, or draining
+  // after SIGTERM, would refuse the wrap anyway (CrankSender asks before every
+  // send); asking here as well means it also spends no RPC and no Jupiter
+  // budget on a basket it is not going to send. DEFERRED: busy, asked again next
+  // sweep, and nothing moved.
+  if (deps.sender !== undefined) {
+    const blocked = deps.sender.buyingBlocked();
+    if (blocked !== null) return { outcome: "DEFERRED", detail: blocked };
+  }
+
   // ── the all-or-nothing gate: nothing below moves money until all of it passes ──
   //
   // THE VENUE THE POLICY NAMES COMES FIRST, because it is the cheapest of the
@@ -1005,10 +1032,20 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         // account this turn certainly used. The create chains onto the
         // EXTRACTED builder, which hands back the call and not the
         // instruction precisely so that it still can.
-        await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
-          .preInstructions(await plan.createsFor(wsolAta))
-          .signers([crank])
-          .rpc();
+        if (deps.sender === undefined) {
+          await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
+            .preInstructions(await plan.createsFor(wsolAta))
+            .signers([crank])
+            .rpc();
+        } else {
+          // THE EXPLICIT-SEND CUT: the very Transaction `.rpc()` would have built
+          // — `.transaction()` is the builder `.rpc()` calls — handed to the
+          // sender, which signs it as Anchor would and asks before it sends.
+          const transaction = await wrapSolCall(program, { crank: crank.publicKey, vault, policy: policyPda, vaultWsol: wsolAta }, wrap.amount)
+            .preInstructions(await plan.createsFor(wsolAta))
+            .transaction();
+          await deps.sender.sendLegacy(transaction, [crank]);
+        }
         found.wrap = wrapReport(wrap, wrap.amount);
       }
 
@@ -1124,7 +1161,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
           )
             .remainingAccounts(venueAccountsOf(route))
             .instruction(),
-        ], route, await tables.tablesFor(lookupTablesOf(route)));
+        ], route, await tables.tablesFor(lookupTablesOf(route)), deps.sender);
         if (toConvert < held) found.converted = `converted ${toConvert} of ${held} wSOL; ${held - toConvert} left for later sweeps`;
       }
       }
@@ -1311,7 +1348,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
         )
           .remainingAccounts(venueAccountsOf(route))
           .instruction(),
-      ], route, await tables.tablesFor(lookupTablesOf(route)));
+      ], route, await tables.tablesFor(lookupTablesOf(route)), deps.sender);
       const bought = (await balanceOf(connection, targetAta)) - before;
       filled.push(`${Number(weight) / 100}% ${mint.toBase58().slice(0, 8)}… ${amountIn}→${bought}`);
       purchases.push({
@@ -1818,6 +1855,13 @@ export async function sendWithBudget(
    * route DOES name are always applied, never dropped for being inconvenient.
    */
   lookupTables: readonly AddressLookupTableAccount[] = [],
+  /**
+   * THE `explicit-send` CUT (src/explicit-send.ts): when given, the SAME
+   * transaction — the same budgeted instructions, the same fee payer, the same
+   * signatures — goes out through the sender's explicit order instead of
+   * Anchor's sendAndConfirm. Absent, the two Anchor calls below, as before.
+   */
+  sender?: CrankSender,
 ): Promise<string> {
   // AND IT IS THE BUILDER'S OWN CHECK, not a second spelling of it: the same
   // pure function, the same ROUTE_MAX_AGE_MS the build used, so a refusal here
@@ -1826,6 +1870,7 @@ export async function sendWithBudget(
   verifyRouteFresh(route, { nowMs: Date.now() }, { maxAgeMs: ROUTE_MAX_AGE_MS });
   const budgeted = budgetedInstructions(instructions);
   if (lookupTables.length === 0) {
+    if (sender !== undefined) return sender.sendLegacy(new Transaction().add(...budgeted), [crank]);
     return provider.sendAndConfirm(new Transaction().add(...budgeted), [crank]);
   }
 
@@ -1849,6 +1894,16 @@ export async function sendWithBudget(
     throw new Error(
       `this transaction is payable by the crank ${crank.publicKey.toBase58()} but the provider's wallet is ${wallet.toBase58()}: ` +
         "Anchor signs a VersionedTransaction with its own wallet, which is not a signer of this message",
+    );
+  }
+
+  // UNDER THE explicit-send CUT the sender reads the blockhash — with its last
+  // valid block height, which the line below drops — and the message is
+  // compiled around it by the same pure builder.
+  if (sender !== undefined) {
+    return sender.sendVersioned(
+      (recentBlockhash) => buildV0Transaction({ payer: crank.publicKey, recentBlockhash, instructions: budgeted, lookupTables }),
+      [crank],
     );
   }
 

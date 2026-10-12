@@ -65,6 +65,7 @@ import {
   wrapShortAlert,
   wrapShortStreak,
 } from "../src/invest-decision.js";
+import { CrankSender, SIGTERM_DRAIN_MS } from "../src/explicit-send.js";
 import { runInvestTick } from "../src/invest-tick.js";
 import { investLeavesSnapshotTrue, readSweepState, settleLeavesSnapshotTrue, type InvestSnapshot } from "../src/invest-snapshot.js";
 import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
@@ -338,6 +339,26 @@ const providerWallet: ProviderWallet =
     : { publicKey: PublicKey.default, signTransaction: refuseToSign, signAllTransactions: refuseToSign };
 const provider = new anchor.AnchorProvider(connection, providerWallet, { commitment: "confirmed" });
 const program = new anchor.Program(idl, provider);
+
+/**
+ * THE `explicit-send` CUT (src/explicit-send.ts, L1d). Without the token, null,
+ * and every crank transaction goes through Anchor's `.rpc()` and
+ * `provider.sendAndConfirm`, as always. With it: the same transactions, signed
+ * by the same wallet, sent in the keeper's own order with isLive() asked before
+ * each one, no wrap/convert/invest for QUIET_AFTER_TAKEOVER_MS after this
+ * process starts or takes the claim, and a SIGTERM drain.
+ *
+ * isLive IS ASKED THROUGH A CLOSURE because it is defined below, beside the
+ * claim — and because the sender must never hold a cached answer to it.
+ */
+const crankSender: CrankSender | null = config.cuts.has("explicit-send")
+  ? new CrankSender({
+      connection,
+      wallet: provider.wallet,
+      isLive: () => isLive(),
+      onConfirmed: (ms) => turnTimers.record("investConfirmMs", ms),
+    })
+  : null;
 
 // History for the website. Absent DATABASE_URL it is a no-op; a write failure
 // is a warning and never touches the settlement path. See src/read-model.ts.
@@ -1008,6 +1029,7 @@ function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
         ? {}
         : { jupiter: { host: new URL(jupiterAccess.baseUrl).host, keyed: jupiterAccess.apiKey !== null, ...jupiterAccess.pacer.status() } }),
       ...(investBatchStats === null ? {} : { investBatch: { ...investBatchStats } }),
+      ...(crankSender === null ? {} : { explicitSend: crankSender.status() }),
     },
   };
 }
@@ -1096,12 +1118,20 @@ const claim: KeeperClaim = new KeeperClaim({
     }),
   onTakeover: () => {
     log.info("took over as the acting keeper");
+    // THE explicit-send CUT: a new holder buys nothing until the previous one's
+    // last transaction can no longer land unseen (the takeover quiet period).
+    crankSender?.noteTakeover();
     alerter.clear("not-acting");
     alerter.clear("claim-lost");
   },
 });
 
 const liveBlocker = (): string | null =>
+  // UNDER THE explicit-send CUT, A DRAINING PROCESS IS NOT LIVE: after SIGTERM no
+  // turn is handed a key — no settle and no buy starts — while a crank send
+  // already on the wire is confirmed. Without the cut crankSender is null and
+  // this is the line it always was.
+  (crankSender?.draining === true ? "draining after SIGTERM: no new send starts while the last ones confirm" : null) ??
   missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName });
 /** Never cached by a caller — always asked. */
 const isLive = (): boolean => liveBlocker() === null;
@@ -2010,6 +2040,8 @@ async function sweep(): Promise<void> {
           // THE invest-batch CUT: the batch's picture of this vault, unless this
           // sweep already moved money into or out of it.
           ...(investSnapshot === undefined ? {} : { snapshot: investSnapshot }),
+          // THE explicit-send CUT, only while its token is on (crankSender above).
+          ...(crankSender === null ? {} : { sender: crankSender }),
         });
         if (investSnapshots !== null) {
           if (!investLeavesSnapshotTrue(invest.outcome)) dirtyVaults.add(vaultAddr);
@@ -2387,6 +2419,26 @@ log.info("keeper starting", {
  */
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
+    // THE explicit-send CUT'S DRAIN (ADR §4.3 item 4): stop starting sends, give
+    // a crank send already on the wire up to SIGTERM_DRAIN_MS to confirm, THEN
+    // let the claim go — so the successor cannot read balances its predecessor's
+    // last transaction is about to change. It needs Railway's
+    // RAILWAY_DEPLOYMENT_DRAINING_SECONDS >= 30; at 0 the process is killed
+    // first and the successor's quiet period covers the gap instead.
+    if (crankSender !== null) {
+      crankSender.beginDrain();
+      health.mode = "dry-run";
+      health.missingLiveCondition = liveBlocker();
+      void crankSender.idle(SIGTERM_DRAIN_MS).then((drained) => {
+        log.info("drained the crank's sends", { signal, drained, sender: crankSender.status().drain });
+        if (config.armed && readModel.enabled && claim.held) {
+          log.info("releasing the keeper claim", { signal });
+          claim.release();
+        }
+        process.exit(0);
+      });
+      return;
+    }
     if (config.armed && readModel.enabled && claim.held) {
       log.info("releasing the keeper claim", { signal });
       claim.release();
