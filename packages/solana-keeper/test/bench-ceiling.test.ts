@@ -164,7 +164,9 @@ describe("the ceiling as a function of the hot share", () => {
 describe("a provider's rate limit, which is a refusal and not a slowdown", () => {
   it("has the keeper's pool THROW on a 429 rather than wait — the premise the bench models", async () => {
     // If rpc-pool.ts ever learns to back off, this goes red and the bench's
-    // 429-as-refusal model has to be revisited with it.
+    // 429-as-refusal model has to be revisited with it. The dispatcher's
+    // budgeted pool does wait out a short Retry-After (test/rpc-pool-budget.test.ts),
+    // but only with a budget, which no keeper the bench runs is handed.
     const answered = vi.fn(async () => new Response("", { status: 429 }));
     vi.stubGlobal("fetch", answered);
     const fetcher = poolFetch([new Secret("https://rpc.example.test/?api-key=NeverServed", "rpcUrl:0")]);
