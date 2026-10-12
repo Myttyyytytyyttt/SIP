@@ -48,14 +48,18 @@
 
 import { sharedRedactor, type Redactor } from "@sip/solana-log";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, shape, type KeeperConfig } from "./config.js";
-import { CUT_TOKENS } from "./cuts.js";
+import { CUT_TOKENS, DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_CREDITS_MONTH } from "./credit-governor.js";
 import { JUPITER_MAX_CALLS_PER_MINUTE } from "./jupiter-pacer.js";
 import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
-import type { DispatchMode } from "./scheduler.js";
 import { JUPITER_KEYLESS_CALLS_PER_MINUTE } from "./sweep-cost.js";
 
-export const DISPATCH_MODES = ["off", "shadow", "on"] as const satisfies readonly DispatchMode[];
+/**
+ * SIP_SOLANA_DISPATCH has ONE READER, src/cuts.ts's, for the legacy keepers, the
+ * scheduler and the workers alike (re-exported here for bin/scheduler.mts): the
+ * three processes of one fleet can never disagree about what a value means.
+ */
+export { DISPATCH_MODES, readDispatchMode };
 
 /** The cuts a scheduler acts on. */
 export const SCHEDULER_CUT_TOKENS = ["gpa-v2", "lamports-filter"] as const;
@@ -102,14 +106,6 @@ export interface SchedulerConfig {
   readonly jupiterCallsPerMinute: number;
   /** Already scrubbed. */
   readonly warnings: readonly string[];
-}
-
-/** SIP_SOLANA_DISPATCH, strictly: unset or blank is `off`; otherwise exactly off, shadow or on. */
-export function readDispatchMode(raw: string | undefined): { readonly mode: DispatchMode } | { readonly problem: string } {
-  const value = raw?.trim();
-  if (value === undefined || value === "") return { mode: "off" };
-  if ((DISPATCH_MODES as readonly string[]).includes(value)) return { mode: value as DispatchMode };
-  return { problem: `SIP_SOLANA_DISPATCH must be one of ${DISPATCH_MODES.join(", ")}; it holds ${shape(value)}.` };
 }
 
 /** SIP_SOLANA_CUTS on a scheduler: readCuts's rules (src/cuts.ts) over the scheduler's accepted list. */

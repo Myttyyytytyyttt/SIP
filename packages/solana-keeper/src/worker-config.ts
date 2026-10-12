@@ -25,10 +25,15 @@
 // needs its database.
 
 import type { KeeperConfig } from "./config.js";
+import { DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
 
-export const DISPATCH_MODES = ["off", "shadow", "on"] as const;
-export type DispatchMode = (typeof DISPATCH_MODES)[number];
+/**
+ * SIP_SOLANA_DISPATCH has ONE READER, src/cuts.ts's, for the legacy keepers, the
+ * scheduler and the workers alike: the processes of one fleet can never disagree
+ * about what a value means. Re-exported for this file's callers.
+ */
+export { DISPATCH_MODES, readDispatchMode, type DispatchMode };
 
 /** The variables this file reads; loadConfig is handed the environment without them. */
 export const WORKER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_WORKER_SLOTS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_RPS"] as const;
@@ -56,18 +61,6 @@ function wholeIn(raw: string, min: number, max: number): number | null {
   if (!/^[0-9]{1,6}$/.test(raw)) return null;
   const value = Number(raw);
   return value >= min && value <= max ? value : null;
-}
-
-/** SIP_SOLANA_DISPATCH, strictly: unset or empty is `off`. */
-export function readDispatchMode(raw: string | undefined): { readonly mode: DispatchMode } | { readonly problem: string } {
-  const value = trimmed(raw);
-  if (value === undefined) return { mode: "off" };
-  if ((DISPATCH_MODES as readonly string[]).includes(value)) return { mode: value as DispatchMode };
-  return {
-    problem:
-      `SIP_SOLANA_DISPATCH must be one of ${DISPATCH_MODES.join(", ")} (unset is off); it holds a ${value.length}-character value ` +
-      "that is none of them, and a dispatcher mode that is guessed at is one that sends when nobody meant it to.",
-  };
 }
 
 /** Every worker variable, strictly. */

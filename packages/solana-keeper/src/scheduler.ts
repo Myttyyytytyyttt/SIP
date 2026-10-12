@@ -66,6 +66,7 @@
 import { summarizeUpstreamError } from "@sip/solana-log";
 import type { Alert, Alerter } from "./alerts.js";
 import type { ChainSnapshot } from "./chain-state.js";
+import type { DispatchMode } from "./cuts.js";
 import { CREDIT_GOVERNOR_ALERT_KEY, type CreditGovernor, type GovernorVerdict } from "./credit-governor.js";
 import { DISCOVERY_STALE_ALERT_KEY, DISCOVERY_STALE_CRITICAL_AGE_MS, discoveryStaleAlert } from "./discovery-lkg.js";
 import type { DiscoveryMethod, DiscoveryReport, ManagedLink } from "./discovery.js";
@@ -92,8 +93,8 @@ export const PRUNE_EVERY_MS = 60 * 60_000;
 export const CRANK_LOW_WARN_LAMPORTS = 20_000_000n;
 export const CRANK_LOW_CRITICAL_LAMPORTS = 5_000_000n;
 
-/** SIP_SOLANA_DISPATCH's values (src/scheduler-config.ts). */
-export type DispatchMode = "off" | "shadow" | "on";
+/** SIP_SOLANA_DISPATCH's values: src/cuts.ts's one reader, shared with the legacy keepers and the workers. */
+export type { DispatchMode };
 
 /** Each vault's invest half, decided dry from one batch snapshot (C5 inside the scheduler). */
 export interface InvestRestVerdict {

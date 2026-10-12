@@ -6,11 +6,18 @@ import { Keypair } from "@solana/web3.js";
 import { Redactor } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { BROADCAST_ACK, ConfigError, SIGNING_SECRET_VARS, loadConfig } from "../src/config.js";
-import { readCuts } from "../src/cuts.js";
+import { DISPATCH_MODES as LEGACY_DISPATCH_MODES, readCuts, readDispatchMode as readLegacyDispatchMode } from "../src/cuts.js";
 import { HELIUS_DEVELOPER_CREDITS_MONTH } from "../src/credit-governor.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { HELIUS_DEVELOPER_RPS } from "../src/rpc-quota.js";
-import { SCHEDULER_REFUSED_VARS, loadSchedulerConfig, readDispatchMode, readSchedulerCuts } from "../src/scheduler-config.js";
+import {
+  DISPATCH_MODES as SCHEDULER_DISPATCH_MODES,
+  SCHEDULER_REFUSED_VARS,
+  loadSchedulerConfig,
+  readDispatchMode,
+  readSchedulerCuts,
+} from "../src/scheduler-config.js";
+import { DISPATCH_MODES as WORKER_DISPATCH_MODES, readDispatchMode as readWorkerDispatchMode } from "../src/worker-config.js";
 import { JUPITER_KEYLESS_CALLS_PER_MINUTE } from "../src/sweep-cost.js";
 
 const BASE = {
@@ -122,8 +129,28 @@ describe("SIP_SOLANA_CUTS on a scheduler", () => {
     ).toThrow(ConfigError);
   });
 
-  it("leaves the legacy keeper's reading of SIP_SOLANA_DISPATCH as it was: a variable it does not read, and says so", () => {
-    const legacy = loadConfig({ SIP_SOLANA_RPC_URLS: BASE.SIP_SOLANA_RPC_URLS, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_SOLANA_DISPATCH: "on" }, new Redactor());
-    expect(legacy.warnings.join(" ")).toContain("SIP_SOLANA_DISPATCH: not a variable this keeper reads");
+  it("SIP_SOLANA_DISPATCH means one thing to every process of a fleet: the legacy keeper reads it (its selection), and the scheduler's shared config never does", () => {
+    // THE LEGACY KEEPER READS IT since the selection landed (src/dispatch-select.ts): strict, and refused without its database.
+    const legacy = loadConfig({ ...BASE, SIP_SOLANA_DISPATCH: "on" }, new Redactor());
+    expect(legacy.dispatch).toBe("on");
+    expect(legacy.warnings.join(" ")).not.toContain("SIP_SOLANA_DISPATCH");
+    expect(() =>
+      loadConfig({ SIP_SOLANA_RPC_URLS: BASE.SIP_SOLANA_RPC_URLS, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, SIP_SOLANA_DISPATCH: "on" }, new Redactor()),
+    ).toThrow(/DATABASE_URL is not set/);
+    // THE SCHEDULER'S SHARED CONFIG IS LOADED WITHOUT IT: a scheduler is never a legacy keeper that leaves vaults alone.
+    for (const mode of ["shadow", "on"] as const) {
+      const config = load({ ...BASE, SIP_SOLANA_DISPATCH: mode });
+      expect(config.dispatch).toBe(mode);
+      expect(config.base.dispatch).toBe("off");
+    }
+  });
+});
+
+describe("one reader of SIP_SOLANA_DISPATCH for the whole fleet", () => {
+  it("the scheduler's and the worker's are src/cuts.ts's own, which the legacy keepers read", () => {
+    expect(readDispatchMode).toBe(readLegacyDispatchMode);
+    expect(readWorkerDispatchMode).toBe(readLegacyDispatchMode);
+    expect(SCHEDULER_DISPATCH_MODES).toBe(LEGACY_DISPATCH_MODES);
+    expect(WORKER_DISPATCH_MODES).toBe(LEGACY_DISPATCH_MODES);
   });
 });
