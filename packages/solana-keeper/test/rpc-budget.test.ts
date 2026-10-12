@@ -169,6 +169,47 @@ describe("the lanes: send first, then hot and rest 80 : 20", () => {
   });
 });
 
+describe("a wall clock that steps", () => {
+  it("keeps earning when the wall clock steps back a minute: a send waits one token's time, not the minute", async () => {
+    // THE REVIEW'S PROBE: ten a second, drained, then an NTP step or a VM
+    // migration puts Date.now 60 s back. Node's timers keep their own clock.
+    const clock = manualClock();
+    const budget = budgetOn(clock, 10);
+    await drain(budget);
+    clock.jump(-60_000);
+    let sent = false;
+    void budget.acquire("send", 1).then(() => {
+      sent = true;
+    });
+    await clock.advance(150);
+    expect(sent, "a send held while the wall clock catches up").toBe(true);
+    expect(budget.status().waiting.send).toBe(0);
+    // AND IT PACES AT ITS RATE FROM THERE: ten more in about a second.
+    const order: string[] = [];
+    queue(budget, "hot", 10, order);
+    await clock.advance(1_000);
+    expect(order).toHaveLength(10);
+  });
+
+  it("keeps a 429's hold its length across a backward step, instead of stretching it by the step", async () => {
+    const clock = manualClock();
+    const budget = budgetOn(clock, 10);
+    const permit = await budget.acquire("hot", 1);
+    budget.answered(permit, 429);
+    expect(budget.status().multiplier).toBe(0.5);
+    await clock.advance(10_000);
+    // REQUESTS FLOWING ON EITHER SIDE OF THE STEP (each reads the clock), as they do while a hold matters.
+    budget.status();
+    clock.jump(-60_000);
+    budget.status();
+    // 20 s OF THE 30 s HOLD LEFT, whatever the wall clock now says.
+    await clock.advance(19_000);
+    expect(budget.status().multiplier).toBe(0.5);
+    await clock.advance(1_000);
+    expect(budget.status().multiplier).toBeGreaterThan(0.5);
+  });
+});
+
 describe("rpc-bucket-429: rate halves, send lane served first", () => {
   it("halves the rate for 30 s, empties the bucket, and serves a send ahead of the backlog the 429 left", async () => {
     const clock = manualClock();

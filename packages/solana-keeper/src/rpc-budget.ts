@@ -320,7 +320,30 @@ export class RpcBudget {
     return total;
   }
 
+  /**
+   * Tokens earned up to `now`.
+   *
+   * A WALL CLOCK THAT STEPS BACK (an NTP step, a VM migration) is followed, not
+   * waited out. `now` is Date.now by default, and Node's timers run on a
+   * monotonic clock: a bucket that earned only once `now` passed the last refill
+   * again would earn nothing for as long as the step, while its timer kept
+   * waking — every lane frozen, the send lane included, and a 60 s step is about
+   * a blockhash's whole life. So the step moves every instant this bucket keeps
+   * by the same amount: the refill restarts from `now`, and a 429's hold keeps
+   * the length it had left. Nothing is earned for the step itself. The step is
+   * seen at the first refill after it, as the distance back to the last one, so
+   * the hold can stretch by at most the time between those two refills —
+   * nothing while requests flow, which is the only time a hold matters. A step
+   * FORWARD needs no care: what it earns is capped at one second's burst, and a
+   * hold it shortens only ends early.
+   */
   #refill(now: number): void {
+    if (now < this.#refilledAt) {
+      const step = this.#refilledAt - now;
+      this.#refilledAt = now;
+      if (Number.isFinite(this.#cutUntil)) this.#cutUntil -= step;
+      return;
+    }
     if (now > this.#refilledAt) {
       this.#tokens = Math.min(this.#capacityAt(now), this.#tokens + this.#earned(this.#refilledAt, now));
       this.#refilledAt = now;

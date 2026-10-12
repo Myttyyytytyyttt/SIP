@@ -6,16 +6,27 @@
 // NOT A TEST FILE: vitest collects test/**/*.test.ts only, and this is imported
 // by the files that need it.
 
-/** A clock and a timer queue the test advances by hand; due timers fire in order, with the microtasks they release. */
+/**
+ * A clock and a timer queue the test advances by hand; due timers fire in order,
+ * with the microtasks they release.
+ *
+ * `jump` STEPS THE WALL CLOCK ONLY (an NTP step, a VM migration): what `now()`
+ * reads moves, the timers do not — as Node's setTimeout runs on a monotonic
+ * clock while Date.now follows the wall.
+ */
 export function manualClock(start = 1_000_000) {
   let now = start;
+  let wallOffset = 0;
   let seq = 0;
   const timers: { at: number; seq: number; fn: () => void }[] = [];
   const settle = async (): Promise<void> => {
     for (let i = 0; i < 50; i++) await Promise.resolve();
   };
   return {
-    now: () => now,
+    now: () => now + wallOffset,
+    jump(ms: number): void {
+      wallOffset += ms;
+    },
     setTimer: (fn: () => void, ms: number): (() => void) => {
       const timer = { at: now + ms, seq: seq++, fn };
       timers.push(timer);
