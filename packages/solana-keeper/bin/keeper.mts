@@ -447,7 +447,7 @@ const crankSender: CrankSender | null = config.cuts.has("explicit-send")
 const readModel = SolanaReadModel.create(
   config.databaseUrl,
   (message, fields) => log.warn(message, fields ?? {}),
-  depWatch === null ? undefined : (answered) => depWatch.record("postgres", Date.now(), answered ? { ok: true } : { ok: false, reason: "no answer from the database" }),
+  depWatch === null ? undefined : (answered) => depWatch.record("database", Date.now(), answered ? { ok: true } : { ok: false, reason: "no answer from the database" }),
 );
 
 /**

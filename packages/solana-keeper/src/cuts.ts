@@ -57,7 +57,7 @@
  *   * `watchdog-exit` (RT-11): the process exits non-zero once its sweep has not
  *     MOVED for /health's own bound, max(3 × sweepMs, 10 min), so Railway's
  *     ON_FAILURE policy starts a fresh one (src/watchdog.ts).
- *   * `dep-down` (RT-14): one `dep-down:<rpc|privy|jupiter|postgres>` page per
+ *   * `dep-down` (RT-14): one `dep-down:<rpc|privy|jupiter|database>` page per
  *     shared dependency that is down, instead of a generic sweep-failed and a
  *     page per wallet; the per-wallet alerts that outage explains are held while
  *     it lasts (src/dependency-watch.ts).

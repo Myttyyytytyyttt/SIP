@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { createAlerter, type Alert, type Alerter } from "../src/alerts.js";
 import { discoveryStaleAlert } from "../src/discovery-lkg.js";
 import {
+  DEPENDENCIES,
   DEP_DOWN_MIN_MS,
   DEP_DOWN_STREAK,
   DependencyWatch,
@@ -28,7 +29,11 @@ import {
   watchedRpcFetch,
 } from "../src/dependency-watch.js";
 import { investFailedAlert } from "../src/invest-decision.js";
-import { Secret } from "@sip/solana-log";
+import { Redactor, Secret } from "@sip/solana-log";
+import { loadConfig } from "../src/config.js";
+import { SIP_PROGRAM_ID } from "../src/idl.js";
+import { scrubbedForExport } from "../src/keeper-log.js";
+import { renderStatus, type KeeperStatus } from "../src/status.js";
 import { SETTLE_RETRY_CRITICAL_AFTER, settleAlert, settleThrewAlert } from "../src/settle-decision.js";
 import { vaultReadAlert } from "../src/sweep-decision.js";
 
@@ -81,19 +86,19 @@ describe("DependencyWatch: the down rule", () => {
 
   it("is ended by any answer, and a new run starts its clock again", () => {
     const watch = new DependencyWatch();
-    for (let i = 0; i < 3; i += 1) watch.failed("postgres", T0 + i * DEP_DOWN_MIN_MS, "no answer from the database");
-    expect(watch.isDown("postgres", T0 + 2 * DEP_DOWN_MIN_MS)).toBe(true);
-    watch.ok("postgres", T0 + 3 * DEP_DOWN_MIN_MS);
-    expect(watch.isDown("postgres", T0 + 3 * DEP_DOWN_MIN_MS)).toBe(false);
-    for (let i = 0; i < 3; i += 1) watch.failed("postgres", T0 + 4 * DEP_DOWN_MIN_MS + i, "no answer from the database");
-    expect(watch.isDown("postgres", T0 + 4 * DEP_DOWN_MIN_MS + 10)).toBe(false);
+    for (let i = 0; i < 3; i += 1) watch.failed("database", T0 + i * DEP_DOWN_MIN_MS, "no answer from the database");
+    expect(watch.isDown("database", T0 + 2 * DEP_DOWN_MIN_MS)).toBe(true);
+    watch.ok("database", T0 + 3 * DEP_DOWN_MIN_MS);
+    expect(watch.isDown("database", T0 + 3 * DEP_DOWN_MIN_MS)).toBe(false);
+    for (let i = 0; i < 3; i += 1) watch.failed("database", T0 + 4 * DEP_DOWN_MIN_MS + i, "no answer from the database");
+    expect(watch.isDown("database", T0 + 4 * DEP_DOWN_MIN_MS + 10)).toBe(false);
   });
 
   it("keeps each dependency's run apart", () => {
     const watch = new DependencyWatch();
     for (let i = 0; i < 3; i += 1) watch.failed("rpc", T0 + i * DEP_DOWN_MIN_MS, RPC_POOL_REFUSED);
     expect(watch.isDown("rpc", T0 + 2 * DEP_DOWN_MIN_MS)).toBe(true);
-    for (const other of ["privy", "jupiter", "postgres"] as const) expect(watch.isDown(other, T0 + 2 * DEP_DOWN_MIN_MS)).toBe(false);
+    for (const other of ["privy", "jupiter", "database"] as const) expect(watch.isDown(other, T0 + 2 * DEP_DOWN_MIN_MS)).toBe(false);
   });
 });
 
@@ -139,7 +144,7 @@ describe("explainedBy: what an outage holds, from the keeper's own alerts", () =
     expect(explainedBy(settleAlert("FAILED", where(1), "WrongAttester").fire!)).toEqual([]);
   });
 
-  it("holds the sweep's own failures for the RPC, a basket for the RPC or Jupiter, and not-acting for Postgres", () => {
+  it("holds the sweep's own failures for the RPC, a basket for the RPC or Jupiter, and not-acting for the database", () => {
     const sweepFailed: Alert = { key: "sweep-failed", severity: "critical", title: "The keeper's sweep is failing", detail: "x" };
     expect(explainedBy(sweepFailed)).toEqual(["rpc"]);
     expect(explainedBy(vaultReadAlert(3, "x"))).toEqual(["rpc"]);
@@ -147,7 +152,7 @@ describe("explainedBy: what an outage holds, from the keeper's own alerts", () =
     expect(explainedBy(investFailedAlert("Vault1", 3, "x"))).toEqual(["rpc", "jupiter"]);
     expect(explainedBy({ key: "invest-refused:Vault1", severity: "warn", title: "A basket cannot be bought", detail: "x" })).toEqual(["rpc", "jupiter"]);
     expect(explainedBy({ key: "not-acting", severity: "critical", title: "Armed, but another keeper holds the claim", detail: "x" })).toEqual([
-      "postgres",
+      "database",
     ]);
   });
 
@@ -282,6 +287,48 @@ describe("depDownAlert", () => {
     expect(page!.detail).toContain("3 requests in a row failed over 60 s; last: HTTP 502.");
     expect(page!.detail).toContain("invest-refused, invest-failed");
     expect(page!.detail).not.toMatch(/https?:/);
+  });
+});
+
+describe("the dependencies' names, through the redactor every exported byte passes", () => {
+  // THE INCIDENT (review, 2026-10-12): the database was `postgres`, which is
+  // DATABASE_URL's username on Railway's Postgres and Supabase's direct
+  // connection, and config.ts registers the username as a secret. /status served
+  // ops.deps under "<redacted:databaseUrl>", and the page pointed at
+  // "ops.deps.<redacted:databaseUrl>.held".
+  it("serve ops.deps.database and page dep-down:database whole, under a DATABASE_URL whose user is postgres", () => {
+    const redactor = new Redactor();
+    loadConfig(
+      {
+        SIP_SOLANA_RPC_URLS: "https://rpc.example.test/",
+        SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+        DATABASE_URL: "postgres://postgres:not-a-real-password@db.example.test:5432/railway",
+        SIP_SOLANA_CUTS: "dep-down",
+      },
+      redactor,
+    );
+    // THE PREMISE: the username is a needle now, so any name equal to it is scrubbed.
+    expect(redactor.scrub("ops.deps.postgres.held")).toBe("ops.deps.<redacted:databaseUrl>.held");
+    // EVERY DEPENDENCY, the database last: whatever it is called, it must come out whole.
+    const database = DEPENDENCIES[DEPENDENCIES.length - 1]!;
+    const watch = new DependencyWatch();
+    for (let i = 0; i < DEP_DOWN_STREAK; i += 1) watch.failed(database, T0 + i * DEP_DOWN_MIN_MS, "no answer from the database");
+    const now = T0 + (DEP_DOWN_STREAK - 1) * DEP_DOWN_MIN_MS;
+    const served = JSON.parse(renderStatus({ ops: { deps: watch.status(now) } } as unknown as KeeperStatus, redactor)) as {
+      ops: { deps: Record<string, { down: boolean }> };
+    };
+    expect(Object.keys(served.ops.deps)).toEqual([...DEPENDENCIES]);
+    expect(served.ops.deps[database]?.down).toBe(true);
+    // AND THE PAGE, as the alerter's sanitize hands it to the webhook.
+    const [page] = depDownAlerts(watch, now).fire;
+    const body = scrubbedForExport(JSON.stringify(page), redactor);
+    expect(body).not.toBeNull();
+    expect(body).not.toContain("<redacted");
+    const sent = JSON.parse(body!) as Alert;
+    expect(sent.key).toBe(`dep-down:${database}`);
+    expect(sent.detail).toContain(`counted on /status as ops.deps.${database}.held`);
+    expect(sent.context).toMatchObject({ dependency: database });
+    expect(database).toBe("database");
   });
 });
 

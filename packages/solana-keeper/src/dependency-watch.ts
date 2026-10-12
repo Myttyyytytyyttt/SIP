@@ -57,8 +57,21 @@ import { DISCOVERY_STALE_ALERT_KEY } from "./discovery-lkg.js";
 import { SETTLE_KEEPS_NOT_LANDING_TITLE, SETTLE_TURN_THREW_TITLE } from "./settle-decision.js";
 import { VAULT_READ_ALERT_KEY } from "./sweep-decision.js";
 
-/** The shared dependencies, in the order /status lists them. */
-export const DEPENDENCIES = ["rpc", "privy", "jupiter", "postgres"] as const;
+/**
+ * The shared dependencies, in the order /status lists them.
+ *
+ * THE DATABASE IS `database`, NEVER `postgres` (review, 2026-10-12). config.ts
+ * registers every part of DATABASE_URL with the redactor, its username
+ * included, and `postgres` is the username of Railway's Postgres and of
+ * Supabase's direct connection. Named `postgres`, this dependency was scrubbed
+ * out of everything that leaves the box: /status served `ops.deps` under the key
+ * `<redacted:databaseUrl>`, and the page told the operator to read
+ * `ops.deps.<redacted:databaseUrl>.held` — a key no dashboard finds, in an alert
+ * that looks as if a secret had leaked into it. No provider's default user is
+ * called `database`; test/dependency-watch.test.ts renders /status under a
+ * DATABASE_URL whose user is `postgres` to keep it that way.
+ */
+export const DEPENDENCIES = ["rpc", "privy", "jupiter", "database"] as const;
 export type Dependency = (typeof DEPENDENCIES)[number];
 
 /** Failed requests in a row, with no answer between, before a dependency is called down: 3. */
@@ -221,7 +234,7 @@ const EXPLAINED: Readonly<Record<string, readonly Dependency[]>> = {
   "invest-refused": ["rpc", "jupiter"],
   "invest-failed": ["rpc", "jupiter"],
   // "Another keeper holds the claim" — or nobody could take it, because the database is down.
-  "not-acting": ["postgres"],
+  "not-acting": ["database"],
 };
 
 /** The dependencies whose outage would explain this alert; empty when none would. */
@@ -262,7 +275,7 @@ const TITLES: Readonly<Record<Dependency, string>> = {
   rpc: "Every Solana RPC endpoint is failing",
   privy: "Privy is failing: settles that need its signature wait",
   jupiter: "Jupiter is failing: baskets cannot be bought",
-  postgres: "The database is failing: the single-keeper claim and the history are at risk",
+  database: "The database is failing: the single-keeper claim and the history are at risk",
 };
 
 /** What the people woken by it can do first, per dependency. Fixed words. */
@@ -270,7 +283,7 @@ const NEXT: Readonly<Record<Dependency, string>> = {
   rpc: "Check the Helius dashboard (a key out of credits answers 429), then rpc.byEndpointPerDay on /status.",
   privy: "Check status.privy.io; settles retry every sweep and nothing is signed until it answers.",
   jupiter: "Check status.jup.ag; vaults keep their SOL and USDC and buy on a later sweep.",
-  postgres:
+  database:
     "Check the database host (DATABASE_URL's pooler); while it is down no keeper can take the claim, and settlements are not mirrored to the history.",
 };
 
