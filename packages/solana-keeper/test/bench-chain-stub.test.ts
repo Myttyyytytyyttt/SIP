@@ -22,7 +22,8 @@ import { describe, expect, it } from "vitest";
 import { readInvestmentPolicy, readVaults } from "../src/accounts.js";
 import { BenchChain, WRITE_PATH_REFUSAL } from "../src/bench/chain-stub.js";
 import { benchKey, buildFleet, buildHistory } from "../src/bench/fleet.js";
-import { discoverLinks } from "../src/discovery.js";
+import { discoverLinks, discoverLinksPreferringV2, rereadLinks } from "../src/discovery.js";
+import { LastKnownGoodDiscovery } from "../src/discovery-lkg.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { USDC_MINT } from "../src/invest-decision.js";
 import { runInvestTick } from "../src/invest-tick.js";
@@ -54,7 +55,12 @@ interface RpcCall {
  * the only check that the bench's chain is shaped like the real one.
  */
 function stubConnection(chain: BenchChain): Connection {
-  const fetch = async (_input: unknown, init?: { readonly body?: unknown }): Promise<Response> => {
+  return new Connection("http://127.0.0.1:1", { commitment: "confirmed", fetch: stubFetch(chain) as never });
+}
+
+/** The stub as a transport: what the keeper's pool fetch is to the real endpoints. */
+function stubFetch(chain: BenchChain): typeof globalThis.fetch {
+  const transport = async (_input: unknown, init?: { readonly body?: unknown }): Promise<Response> => {
     const payload: unknown = JSON.parse(String(init?.body ?? "{}"));
     const answer = (call: RpcCall): unknown => {
       const result = chain.handle(String(call.method), Array.isArray(call.params) ? call.params : []);
@@ -65,7 +71,7 @@ function stubConnection(chain: BenchChain): Connection {
     const body = Array.isArray(payload) ? payload.map((one) => answer(one as RpcCall)) : answer(payload as RpcCall);
     return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
   };
-  return new Connection("http://127.0.0.1:1", { commitment: "confirmed", fetch: fetch as never });
+  return transport as typeof globalThis.fetch;
 }
 
 function stubProgram(connection: Connection): anchor.Program {
@@ -76,8 +82,13 @@ function stubProgram(connection: Connection): anchor.Program {
   return new anchor.Program(idl as anchor.Idl, new anchor.AnchorProvider(connection, wallet, { commitment: "confirmed" }));
 }
 
-function chainWith(links: number, hotRatio: number, hotTxCount = 8): { chain: BenchChain; connection: Connection; program: anchor.Program } {
-  const chain = new BenchChain({ programId, crank });
+function chainWith(
+  links: number,
+  hotRatio: number,
+  hotTxCount = 8,
+  options: { readonly speaksGpaV2?: boolean } = {},
+): { chain: BenchChain; connection: Connection; program: anchor.Program } {
+  const chain = new BenchChain({ programId, crank, ...options });
   chain.setFleet(buildFleet({ links, hotRatio, hotTxCount, programId, seed: 1 }));
   const connection = stubConnection(chain);
   return { chain, connection, program: stubProgram(connection) };
@@ -109,6 +120,161 @@ describe("the fleet the ceiling bench serves is one the keeper's own readers dec
     expect(policy!.enabled).toBe(true);
     expect(policy!.inMint.equals(USDC_MINT)).toBe(true);
     expect(policy!.bucketAmounts).toHaveLength(31);
+  });
+});
+
+describe("the gpa-v2 cut: discovery through getProgramAccountsV2, V1 in the same sweep when it cannot be used", () => {
+  const DISC = accountDiscriminator("TradingLink");
+  const addresses = (links: readonly { readonly linkAddress: PublicKey }[]): string[] => links.map((link) => link.linkAddress.toBase58()).sort();
+
+  it("finds the same links as V1 through V2 alone, and never calls the 10-credit method", async () => {
+    const { chain, connection } = chainWith(3, 0, 8, { speaksGpaV2: true });
+    const v1 = await discoverLinks(connection, programId, DISC);
+    chain.takeCalls();
+
+    const report = await discoverLinksPreferringV2(connection, programId, DISC, stubFetch(chain));
+    expect(report.method).toBe("v2");
+    expect(addresses(report.links)).toEqual(addresses(v1));
+    // EVERY FIELD, NOT ONLY THE ADDRESS: the frontier and the nonce are what the
+    // attester signs, and a page decoded differently would attest the wrong one.
+    expect(report.links.map((link) => [link.wallet.toBase58(), link.vault.toBase58(), link.settlementNonce, link.frontierSlot]).sort()).toEqual(
+      v1.map((link) => [link.wallet.toBase58(), link.vault.toBase58(), link.settlementNonce, link.frontierSlot]).sort(),
+    );
+    // TWO PAGES, TWO CREDITS, AGAINST V1's TEN: the page with the links carries
+    // a key, and only the empty page after it ends the listing (Helius's rule).
+    const calls = chain.takeCalls();
+    expect([...calls]).toEqual([["getProgramAccountsV2", 2]]);
+    expect(report.requests).toBe(2);
+  });
+
+  it("falls back to V1 IN THE SAME SWEEP on an endpoint that does not speak V2, with the same links", async () => {
+    const { chain, connection } = chainWith(3, 0);
+    const report = await discoverLinksPreferringV2(connection, programId, DISC, stubFetch(chain));
+    expect(report.method).toBe("v1-fallback");
+    expect(report.fallbackReason).toMatch(/JSON-RPC error \(-32601\)/);
+    expect(report.links).toHaveLength(3);
+    expect([...chain.takeCalls()].sort()).toEqual([
+      ["getProgramAccounts", 1],
+      ["getProgramAccountsV2", 1],
+    ]);
+    expect(report.requests).toBe(2);
+  });
+
+  it("walks every page to a null key, a short page that carries a key included", async () => {
+    const { chain, connection } = chainWith(5, 0, 8, { speaksGpaV2: true });
+    const report = await discoverLinksPreferringV2(connection, programId, DISC, stubFetch(chain), { pageLimit: 2 });
+    expect(report.method).toBe("v2");
+    expect(report.links).toHaveLength(5);
+    // 2 + 2 + 1 (short, and still carrying a key) + the empty page that ends it.
+    expect(chain.takeCalls().get("getProgramAccountsV2")).toBe(4);
+  });
+
+  it("discards every page it read and falls back on a malformed one, rather than serving half a listing", async () => {
+    const { chain, connection } = chainWith(4, 0, 8, { speaksGpaV2: true });
+    const real = stubFetch(chain);
+    let pages = 0;
+    // THE SECOND PAGE IS BROKEN: the first one's links must not survive into the sweep alone.
+    const brokenSecondPage = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const response = await real(input as string, init);
+      const body = (await response.json()) as { result?: { accounts?: unknown[] } };
+      pages += 1;
+      if (pages === 2 && body.result !== undefined) body.result.accounts = [{ pubkey: 42 }];
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    const report = await discoverLinksPreferringV2(connection, programId, DISC, brokenSecondPage, { pageLimit: 2 });
+    expect(report.method).toBe("v1-fallback");
+    expect(report.fallbackReason).toMatch(/malformed page: an entry is not \{ pubkey, account \}/);
+    expect(report.links).toHaveLength(4);
+    expect(chain.takeCalls().get("getProgramAccounts")).toBe(1);
+  });
+
+  it("refuses an entry the program does not own, and a cursor that never ends", async () => {
+    const { chain, connection } = chainWith(2, 0, 8, { speaksGpaV2: true });
+    const real = stubFetch(chain);
+    const foreignOwner = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const body = (await (await real(input as string, init)).json()) as { result?: { accounts?: { account: { owner: string } }[] } };
+      for (const entry of body.result?.accounts ?? []) entry.account.owner = crank.toBase58();
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as typeof fetch;
+    const foreign = await discoverLinksPreferringV2(connection, programId, DISC, foreignOwner);
+    expect(foreign.method).toBe("v1-fallback");
+    expect(foreign.fallbackReason).toMatch(/not owned by the program/);
+
+    const endless = (async (): Promise<Response> =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { accounts: [], paginationKey: "again" } }), { status: 200 })) as typeof fetch;
+    const looped = await discoverLinksPreferringV2(connection, programId, DISC, endless, { maxPages: 3 });
+    expect(looped.method).toBe("v1-fallback");
+    expect(looped.fallbackReason).toMatch(/still paginating after 3 pages/);
+    expect(looped.links).toHaveLength(2);
+  });
+
+  it("falls back on a transport that throws, and lets V1's own failure through unchanged", async () => {
+    const { connection } = chainWith(2, 0);
+    const refused = (async (): Promise<Response> => {
+      throw new TypeError("fetch failed: https://secret-host.example.test/?api-key=SHOULD_NOT_APPEAR");
+    }) as typeof fetch;
+    const report = await discoverLinksPreferringV2(connection, programId, DISC, refused);
+    expect(report.method).toBe("v1-fallback");
+    // THE NAME, NEVER THE MESSAGE: a fetch error can quote the host and its key.
+    expect(report.fallbackReason).toBe("getProgramAccountsV2 could not be asked (TypeError)");
+
+    const dead = new Connection("http://127.0.0.1:1", { commitment: "confirmed", fetch: refused as never });
+    await expect(discoverLinksPreferringV2(dead, programId, DISC, refused)).rejects.toThrow();
+  });
+});
+
+describe("L3's fresh re-read of the last-known-good links", () => {
+  it("reads every cached link's CURRENT frontier, and drops one whose account is gone", async () => {
+    const { chain, connection } = chainWith(3, 0);
+    const DISC = accountDiscriminator("TradingLink");
+    const known = await discoverLinks(connection, programId, DISC);
+    expect(known.every((link) => link.frontierSlot === 400_000_000n)).toBe(true);
+    // EVERY LINK SETTLES AFTER THE LIST WAS KEPT: its frontier moves on chain.
+    chain.setFleet(buildFleet({ links: 3, hotRatio: 0, hotTxCount: 8, programId, seed: 1 }).map((link) => ({ ...link, frontierSlot: link.frontierSlot + 500 })));
+    const gone = PublicKey.unique();
+    chain.takeCalls();
+
+    const fresh = await rereadLinks(connection, [...known.map((link) => link.linkAddress), gone], programId, DISC);
+    expect(fresh.map((link) => link.linkAddress.toBase58()).sort()).toEqual(known.map((link) => link.linkAddress.toBase58()).sort());
+    // THE FRONTIER THE ATTESTER WILL SIGN IS TODAY'S, NOT THE CACHED ONE.
+    expect(fresh.every((link) => link.frontierSlot === 400_000_500n)).toBe(true);
+    // ONE getMultipleAccounts for up to 100 links, and no listing at all.
+    expect([...chain.takeCalls()]).toEqual([["getMultipleAccounts", 1]]);
+  });
+
+  it("keeps a sweep going through an overloaded listing, on the keeper's own readers", async () => {
+    const DISC = accountDiscriminator("TradingLink");
+    const chain = new BenchChain({ programId, crank });
+    chain.setFleet(buildFleet({ links: 3, hotRatio: 0, hotTxCount: 8, programId, seed: 1 }));
+    const real = stubFetch(chain);
+    let overloaded = false;
+    // THE 09-27 FAILURE: the listing answered "overloaded", everything else still served.
+    const transport = (async (input: unknown, init?: RequestInit): Promise<Response> => {
+      const call = JSON.parse(String(init?.body ?? "{}")) as { id?: unknown; method?: string };
+      if (overloaded && call.method === "getProgramAccounts") {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: call.id ?? null, error: { code: -32005, message: "overloaded" } }), { status: 200 });
+      }
+      return real(input as string, init);
+    }) as typeof fetch;
+    const connection = new Connection("http://127.0.0.1:1", { commitment: "confirmed", fetch: transport as never });
+    const list = () => discoverLinks(connection, programId, DISC).then((links) => ({ links, method: "v1" as const, requests: 1 }));
+    const reread = (addresses: readonly PublicKey[]) => rereadLinks(connection, addresses, programId, DISC);
+
+    // OFF (today): the overloaded listing fails the sweep.
+    const off = new LastKnownGoodDiscovery(0);
+    await off.discover(list, reread, 0);
+    overloaded = true;
+    await expect(off.discover(list, reread, 60_000)).rejects.toThrow(/overloaded/);
+
+    // ON: the same failure turns the three links it knew, read fresh.
+    overloaded = false;
+    const on = new LastKnownGoodDiscovery(600_000);
+    await on.discover(list, reread, 0);
+    overloaded = true;
+    const outcome = await on.discover(list, reread, 60_000);
+    expect(outcome.source).toBe("lkg");
+    expect(outcome.links).toHaveLength(3);
+    expect(outcome.links.every((link) => link.frontierSlot === 400_000_000n)).toBe(true);
   });
 });
 

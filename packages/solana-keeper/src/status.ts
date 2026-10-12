@@ -17,11 +17,15 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Redactor, Secret } from "@sip/solana-log";
+import type { BoardRefreshStatus } from "./board-refresh.js";
 import type { HeliusApiKeySource } from "./config.js";
+import type { CutToken } from "./cuts.js";
+import type { DiscoveryStatus } from "./discovery-lkg.js";
 import type { DoorbellCoreStatus } from "./doorbell.js";
 import type { WebhookStatus } from "./helius-webhooks.js";
 import { SERVICE } from "./keeper-log.js";
 import type { AuthorizationKeyCheck } from "./privy-authorization-key.js";
+import type { PrivyAddressBookStatus } from "./privy-address-book.js";
 import type { KeeperRole } from "./role-registry.js";
 import type { SeatCheck } from "./seat-check.js";
 
@@ -193,6 +197,19 @@ export interface DoorbellStatus extends DoorbellCoreStatus {
   readonly apiKeySource: HeliusApiKeySource;
 }
 
+/**
+ * The SIP_SOLANA_CUTS block: which cuts this process runs, and what the two
+ * with counters of their own have done since boot. Each counter block is null
+ * while its cut is off, so "off" and "on but idle" never read alike.
+ */
+export interface CutsStatus {
+  readonly on: readonly CutToken[];
+  /** privy-address: listings, lookups and hits. `listPages` staying put after warm-up is the cut working. */
+  readonly privyAddressBook: PrivyAddressBookStatus | null;
+  /** board-timer: recomputes started and requests they absorbed. */
+  readonly board: BoardRefreshStatus | null;
+}
+
 export interface KeeperStatus {
   service: string;
   startedAt: string;
@@ -302,6 +319,15 @@ export interface KeeperStatus {
   pendingCarries: readonly PendingCarry[];
   /** Folded in at render from the doorbell and its webhook sync, like pendingCarries. */
   doorbell: DoorbellStatus;
+  /**
+   * Where the last sweep's links came from (L3, src/discovery-lkg.ts) and which
+   * call listed them (the gpa-v2 cut). Folded in at render. `source: "lkg"` or
+   * `lkgUses` above 0 means a listing failed and the sweep ran on a remembered
+   * list, every link re-read fresh.
+   */
+  discovery?: DiscoveryStatus;
+  /** The cost cuts this process runs (src/cuts.ts). Folded in at render. */
+  cuts?: CutsStatus;
 }
 
 const bigintSafe = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);

@@ -275,6 +275,100 @@ export async function buildPrivySolanaIndex(
 }
 
 /**
+ * The `privy-address` cut's two reads (src/privy-address-book.ts): one Solana
+ * wallet by its address, and the whole app's Solana wallets page by page for
+ * the book's warm-up.
+ *
+ * WHY BY ADDRESS. The index above lists EVERY Solana wallet in the app, linked
+ * or not, every sweep, on both keepers: ⌈W/100⌉ requests a sweep that grow with
+ * the app's users, not with the keeper's links. And when that listing fails,
+ * each wallet used to fall back to a full listing of its own — N × ⌈W/100⌉
+ * requests in one sweep, which is the cliff the cost model found at about 145
+ * users (one 0.2 s page × N × ⌈N/100⌉ > the 60 s sweep). POST /v1/wallets/address
+ * (docs.privy.io, api-reference/wallets/get-by-address; SDK 0.28
+ * `wallets().getWalletByAddress`) answers one wallet with the same object,
+ * `additional_signers` and their `override_policy_ids` included, so the seat's
+ * bound is read exactly as the listing reads it.
+ *
+ * 404 IS "NOT A PRIVY WALLET IN THIS APP", and only 404. Privy documents it for
+ * an archived wallet ("hidden from reads", archive-a-wallet) and lists no other
+ * non-200 answer; an address the app never created is answered the same way
+ * (INFERRED: the page names no other code for it). Every other error PROPAGATES:
+ * a 401, a 429 or a dropped connection is "could not ask", which the keeper
+ * reports as a failed lookup, never as a wallet that is not ours.
+ *
+ * NOT A SOLANA WALLET IS NOT A WALLET: the listing asks for chain_type solana,
+ * and an answer for another chain under the same string — impossible for a
+ * base-58 key, checked anyway — is read as absent rather than trusted.
+ *
+ * THE LISTING SENDS limit 100. Privy's default page is 100 today (MEASURED,
+ * disp-measure privy/results.json); a default that shrank to 25 would quadruple
+ * the warm-up without a line changing here.
+ */
+export interface PrivyAddressSource {
+  /** One wallet's record, or null when Privy answers 404. Any other failure throws. */
+  byAddress(address: string): Promise<PrivyWalletEntry | null>;
+  /** Every Solana wallet in the app, by address; `onPage` is told of each page read. */
+  listAll(onPage: () => void): Promise<ReadonlyMap<string, PrivyWalletEntry>>;
+}
+
+/** The wallet fields both reads use, narrowed from the SDK's object without trusting it. */
+const entryOf = (wallet: unknown): { readonly address: string; readonly entry: PrivyWalletEntry } | null => {
+  const w = wallet as {
+    id?: unknown;
+    address?: unknown;
+    chain_type?: unknown;
+    additional_signers?: { signer_id?: string; override_policy_ids?: string[] }[];
+  };
+  if (typeof w !== "object" || w === null || typeof w.address !== "string" || typeof w.id !== "string") return null;
+  if (w.chain_type !== undefined && w.chain_type !== "solana") return null;
+  return { address: w.address, entry: { walletId: w.id, seats: readSeats(w.additional_signers) } };
+};
+
+const isNotFound = (error: unknown): boolean =>
+  typeof error === "object" && error !== null && (error as { readonly status?: unknown }).status === 404;
+
+export function privyAddressSource(config: PrivySolanaConfig): PrivyAddressSource {
+  return {
+    async byAddress(address) {
+      try {
+        const found = entryOf(await clientFor(config).wallets().getWalletByAddress({ address }));
+        return found !== null && found.address === address ? found.entry : null;
+      } catch (error) {
+        if (isNotFound(error)) return null;
+        throw error;
+      }
+    },
+    async listAll(onPage) {
+      const index = new Map<string, PrivyWalletEntry>();
+      const first = await clientFor(config).wallets().list({ chain_type: "solana", limit: 100 });
+      for await (const page of first.iterPages()) {
+        onPage();
+        for (const wallet of page.getPaginatedItems()) {
+          const found = entryOf(wallet);
+          if (found !== null) index.set(found.address, found.entry);
+        }
+      }
+      return index;
+    },
+  };
+}
+
+/**
+ * Whether createPrivySolanaSigner would answer SIGNER for a wallet with these
+ * seats: THE SAME RULES, in the same order — the signer's seat if one is
+ * expected, then its bound if a policy is. The address book recalls a signable
+ * record rarely and an unsignable one every minute, so this decides how soon
+ * the owner's fix from the web is seen, never whether anything is signed.
+ */
+export function seatsSignable(seats: readonly SignerSeat[], expectedSignerId?: string, expectedPolicyId?: string): boolean {
+  if (expectedSignerId === undefined) return true;
+  if (!seats.some((seat) => seat.signerId === expectedSignerId)) return false;
+  if (expectedPolicyId === undefined) return true;
+  return seatVerdict(seats, expectedSignerId, expectedPolicyId) !== "NOT_BOUNDED";
+}
+
+/**
  * A key quorum's registered PUBLIC keys, by id.
  *
  * APP CREDENTIALS ONLY. GET /v1/key_quorums takes no authorization signature —

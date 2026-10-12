@@ -43,7 +43,9 @@ import {
   type LiveVerification,
 } from "../src/chain-state.js";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, type KeeperConfig } from "../src/config.js";
-import { discoverLinks, type ManagedLink } from "../src/discovery.js";
+import { discoverLinks, discoverLinksPreferringV2, rereadLinks, type DiscoveryReport, type ManagedLink } from "../src/discovery.js";
+import { DISCOVERY_STALE_ALERT_KEY, LastKnownGoodDiscovery, discoveryStaleAlert } from "../src/discovery-lkg.js";
+import { CoalescedRefresh } from "../src/board-refresh.js";
 import {
   DOORBELL_DEAF_ALERT_KEY,
   Doorbell,
@@ -77,10 +79,13 @@ import {
   unreadableKeyVerdict,
   type AuthorizationKeyVerdict,
 } from "../src/privy-authorization-key.js";
+import { PrivyAddressBook, forgetOnFailure } from "../src/privy-address-book.js";
 import {
   buildPrivySolanaIndex,
   createPrivySolanaSigner,
+  privyAddressSource,
   readPrivyKeyQuorum,
+  seatsSignable,
   unsignableNote,
   type PrivySolanaConfig,
   type PrivyWalletEntry,
@@ -446,6 +451,13 @@ let vaultReadFailures = 0;
 const signingRoutes = new SigningRoutes();
 
 /**
+ * WHO THIS KEEPER IS RESPONSIBLE FOR, AND WHERE THAT LIST CAME FROM (L3,
+ * src/discovery-lkg.ts). With SIP_SOLANA_DISCOVERY_LKG_MS at 0 — the default —
+ * it remembers nothing and a failed listing fails the sweep, as it always has.
+ */
+const linkDiscovery = new LastKnownGoodDiscovery(config.discoveryLkgMs);
+
+/**
  * THE VOLUME KEEPER'S POLICY BOUNDARIES (src/policy-boundary.ts): where each
  * volume span starts being chargeable, read from the vault owner's own history
  * and kept while nothing new reaches it. The profit keeper never asks.
@@ -492,6 +504,23 @@ const doorbellStatus = (): DoorbellStatus => ({
 });
 
 const privyConfig: PrivySolanaConfig | null = config.signing?.privy ?? null;
+
+/**
+ * THE `privy-address` CUT (src/privy-address-book.ts): each wallet's Privy
+ * record by its address, remembered, instead of a listing of the whole app every
+ * sweep. Null — today's per-sweep index — unless the token is set, and always
+ * null in a dry run, which resolves no signer at all.
+ *
+ * "SIGNABLE" IS createPrivySolanaSigner's OWN RULE (seatsSignable), with the
+ * same two ids: it decides how soon a record is asked again, never whether
+ * anything is signed.
+ */
+const privyBook: PrivyAddressBook | null =
+  privyConfig !== null && config.cuts.has("privy-address")
+    ? new PrivyAddressBook(privyAddressSource(privyConfig), {
+        signable: (entry) => seatsSignable(entry.seats, config.privySignerId ?? undefined, config.privyPolicyId ?? undefined),
+      })
+    : null;
 
 // SAYING WHAT IS NOT BEING CHECKED, once per process rather than once per sweep.
 // Which of the three states the two public ids amount to, and what each costs,
@@ -860,6 +889,34 @@ async function refreshLeaderboard(): Promise<void> {
   }
 }
 
+/**
+ * THE `board-timer` CUT (src/board-refresh.ts). Without the token, null: a
+ * settle recomputes the rankings at once and the timer recomputes them on its
+ * own, as they always have — two recomputes can overlap, and ten settles in one
+ * sweep start ten. With it, every trigger goes through one CoalescedRefresh: one
+ * recompute in flight, one queued, at most one start every 15 s.
+ */
+const boardRefresh: CoalescedRefresh | null = config.cuts.has("board-timer") ? new CoalescedRefresh(refreshLeaderboard) : null;
+
+/**
+ * /status's two blocks for the cuts, folded in at render like the doorbell's:
+ * where the last sweep's links came from, and what each cut that keeps counters
+ * has done. Additive: a keeper with no cut and no L3 serves `cuts.on: []` and a
+ * discovery block that says "v1, fresh", which is what it always did.
+ */
+function cutsStatusBlocks(): Pick<KeeperStatus, "discovery" | "cuts"> {
+  return {
+    discovery: linkDiscovery.status(Date.now()),
+    cuts: { on: [...config.cuts], privyAddressBook: privyBook?.status() ?? null, board: boardRefresh?.status() ?? null },
+  };
+}
+
+/** Asks for the rankings to be recomputed: the timer's way in and a settlement's. Never awaited. */
+function requestBoard(): void {
+  if (boardRefresh === null) void refreshLeaderboard();
+  else boardRefresh.request();
+}
+
 // The heartbeat, only when a port is provided (Railway injects PORT; the image
 // bakes 8080). Started BEFORE the first chain read, so a slow endpoint delays
 // the first sweep and never the probe — and, because the probe answers 503 for
@@ -884,7 +941,11 @@ if (config.port !== null) {
   const port = config.port;
   const server = createHeartbeatServer(
     httpHandler(
-      () => renderStatus({ ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus() }, sharedRedactor),
+      () =>
+        renderStatus(
+          { ...health, pendingCarries: pendingCarries(), rpcEndpointInUse, failovers, doorbell: doorbellStatus(), ...cutsStatusBlocks() },
+          sharedRedactor,
+        ),
       () => decideHealth({ now: Date.now(), startedAt: startedAtMs, lastProgressAt, sweepMs: config.sweepMs }),
       () => leaderboard,
       hooks,
@@ -1167,13 +1228,57 @@ async function sweep(): Promise<void> {
     // fails loudly with sweep-failed, as Nuvem's did. It no longer counts a
     // healthy sweep of zero links.
     let links: ManagedLink[] = [];
+    // WHETHER THIS SWEEP'S LIST IS A LISTING (L3). A last-known-good sweep turns
+    // everybody it remembers, re-read fresh, but it has not SEEN the program's
+    // accounts, so the webhook's address list does not follow it (below).
+    let listedFresh = true;
     if (snapshot.programDeployed === false) {
       changes.change("program", "the program is not deployed on this cluster — nothing to sweep", { program: programId.toBase58() }, "warn");
     } else {
       if (snapshot.programDeployed === true) changes.change("program", "the program is deployed", { program: programId.toBase58() });
       const discoveryAt = Date.now();
-      links = await discoverLinks(connection, programId, TRADING_LINK_DISC);
+      // THE LISTING: today's getProgramAccounts, or — under the gpa-v2 cut —
+      // Helius's paginated V2 with today's call as the fallback in this same
+      // sweep (src/discovery.ts). V2 goes over trackedFetch, the Connection's own
+      // transport, so it inherits the failover and moves /health's clock.
+      const list = (): Promise<DiscoveryReport> =>
+        config.cuts.has("gpa-v2")
+          ? discoverLinksPreferringV2(connection, programId, TRADING_LINK_DISC, trackedFetch)
+          : discoverLinks(connection, programId, TRADING_LINK_DISC).then((found) => ({ links: found, method: "v1" as const, requests: 1 }));
+      // AND L3 AROUND IT: with SIP_SOLANA_DISCOVERY_LKG_MS at 0 this is the
+      // listing and nothing else, its error propagating unchanged.
+      const found = await linkDiscovery.discover(
+        list,
+        (addresses) => rereadLinks(connection, addresses, programId, TRADING_LINK_DISC),
+        Date.now(),
+      );
+      links = found.links;
       discoveryMs = Date.now() - discoveryAt;
+      if (found.source === "lkg") {
+        listedFresh = false;
+        const detail = summarizeUpstreamError(found.failure, { take: 3, maxChars: 500 });
+        log.warn("the link listing failed; this sweep turns the last-known-good list, every link re-read fresh", {
+          links: links.length,
+          lkgAgeMs: found.lkgAgeMs,
+          consecutiveFailures: found.consecutiveFailures,
+          detail,
+        });
+        // WARN, THEN CRITICAL FROM THE THIRD IN A ROW: an escalation breaks
+        // through the alerter's dedupe on its own (src/alerts.ts).
+        alerter.fire(discoveryStaleAlert(found.consecutiveFailures, found.lkgAgeMs ?? 0, detail));
+      } else {
+        alerter.clear(DISCOVERY_STALE_ALERT_KEY);
+        // WHICH CALL LISTED THEM, said once per change: a keeper that fell back
+        // to V1 is paying ten credits a sweep again, and that should be visible.
+        if (config.cuts.has("gpa-v2")) {
+          changes.change(
+            "discovery-method",
+            found.method === "v2" ? "discovery through getProgramAccountsV2" : "discovery fell back to getProgramAccounts",
+            found.fallbackReason === undefined ? {} : { reason: found.fallbackReason },
+            found.method === "v2" ? "info" : "warn",
+          );
+        }
+      }
     }
     // FOUND, WHICH IS NOT THE SAME AS SERVED. `linksTriaged` below counts the
     // ones that actually got a turn; when the two differ somebody was not
@@ -1216,7 +1321,12 @@ async function sweep(): Promise<void> {
     // Helius API delays the webhook, never a settle. Only the acting keeper
     // manages it; with no links there is nothing to watch, and an empty list is
     // never sent over a full one.
-    if (knownAddresses.size > 0) void webhookSync.tick({ acting: liveAtStart, addresses: [...knownAddresses], now: Date.now() });
+    // AND ONLY A LISTED ONE (L3). A remembered list is the last listing minus
+    // whatever closed since — the webhook already watches the last listing — and
+    // it is blind to anything created since. An edit made from it buys nothing
+    // the next fresh listing will not, costs 100 credits, and lands while the
+    // provider is already refusing reads.
+    if (knownAddresses.size > 0 && listedFresh) void webhookSync.tick({ acting: liveAtStart, addresses: [...knownAddresses], now: Date.now() });
     // EVERY VAULT THE LINKS NAME, IN ONE REQUEST. Each settle turn read its own
     // vault, and the history mirror read it again after every SETTLED.
     //
@@ -1290,11 +1400,29 @@ async function sweep(): Promise<void> {
     // paginated scans for N linked wallets. A failure here is not fatal: each
     // wallet falls back to its own lookup, and a local keypair still works.
     let privyIndex: ReadonlyMap<string, PrivyWalletEntry> | undefined;
+    /**
+     * UNDER THE privy-address CUT: the wallets whose record could not be read
+     * this sweep. Their turns get "none (privy lookup failed)", exactly what a
+     * failed per-wallet fallback gives them today — and never a listing of their own.
+     */
+    let privyLookupFailed: ReadonlyMap<string, string> = new Map();
     if (privyConfig !== null && turns.length > 0) {
-      try {
-        privyIndex = await buildPrivySolanaIndex(privyConfig);
-      } catch (error) {
-        log.warn("privy wallet index failed; falling back to per-wallet lookups", { detail: summarizeUpstreamError(error) });
+      if (privyBook !== null) {
+        // ONLY THE WALLETS A TURN WILL RESOLVE: the turn loop's own condition
+        // (settlesThisVault), so the book asks Privy about nobody the sweep
+        // would not have asked about. Never throws: a failure is the wallet's.
+        const resolving = turns
+          .filter(({ link }) => vaults === null || resolvesSignerFor(profile, vaults.get(link.vault)?.skimMode))
+          .map(({ link }) => link.wallet);
+        const view = await privyBook.prepare(resolving, Date.now());
+        privyIndex = view.index;
+        privyLookupFailed = view.failed;
+      } else {
+        try {
+          privyIndex = await buildPrivySolanaIndex(privyConfig);
+        } catch (error) {
+          log.warn("privy wallet index failed; falling back to per-wallet lookups", { detail: summarizeUpstreamError(error) });
+        }
       }
     }
 
@@ -1332,6 +1460,8 @@ async function sweep(): Promise<void> {
     // longer discovered stops being counted.
     const discoveredWallets = new Set(doorLinks.map((link) => link.wallet));
     signingRoutes.prune(discoveredWallets);
+    // And the Privy records the book holds for wallets nobody links any more.
+    privyBook?.prune(discoveredWallets);
     // So does what the walks kept for it.
     walkCache.prune(discoveredWallets);
     /** Each vault's invest turns for THIS sweep, folded; the streaks are applied once from it below. */
@@ -1398,7 +1528,13 @@ async function sweep(): Promise<void> {
         if (config.signing !== null && settlesThisVault) {
           walletSigner = localSigners?.signers.get(wallet) ?? null;
           route = walletSigner !== null ? "local-keypair" : "none";
-          if (privyConfig !== null) {
+          const lookupFailed = privyLookupFailed.get(wallet);
+          if (privyConfig !== null && lookupFailed !== undefined) {
+            // THE BOOK COULD NOT ASK (privy-address): the same route and the same
+            // warning a failed per-wallet lookup gives today, and no listing.
+            if (walletSigner === null) route = "none (privy lookup failed)";
+            log.warn("privy signer resolution failed", { wallet, detail: lookupFailed });
+          } else if (privyConfig !== null) {
             try {
               const resolution = await createPrivySolanaSigner(
                 privyConfig,
@@ -1430,7 +1566,9 @@ async function sweep(): Promise<void> {
                 alerter.clear(`seat-unbounded:${wallet}`);
               }
               if (resolution.outcome === "SIGNER") {
-                walletSigner = resolution.signer;
+                // A SEND PRIVY REFUSES MAKES THE BOOK ASK AGAIN next turn
+                // (privy-address); without the cut, the signer as it always was.
+                walletSigner = privyBook === null ? resolution.signer : forgetOnFailure(resolution.signer, privyBook);
                 route = "privy";
               } else if (walletSigner === null) {
                 // EVERY REASON STARTS WITH "none": the signing summary below
@@ -1621,12 +1759,13 @@ async function sweep(): Promise<void> {
               // rebuild from the chain would give it.
               ...(settle.blockTimeMs === undefined ? {} : { at: new Date(settle.blockTimeMs) }),
             })
-              // THE BOARD CHANGES EXACTLY HERE, so it is recomputed here and
-              // not two minutes later: somebody who just saved and went to look
-              // must not find a ranking that has never heard of them. AFTER the
+              // THE BOARD CHANGES EXACTLY HERE, so it is recomputed here — or,
+              // under the board-timer cut, within 15 s with the settles beside
+              // it — and not two minutes later: somebody who just saved and went
+              // to look must not find a ranking that has never heard of them. AFTER the
               // write resolves, because the write is fire-and-forget and a
               // refresh racing it would read the row that is not there yet.
-              .then(() => refreshLeaderboard());
+              .then(() => requestBoard());
           }
         } else {
           changes.change(`settle:${wallet}`, `settle ${settle.outcome.toLowerCase()}`, { wallet, vault: vaultAddr, detail: settle.detail });
@@ -2063,8 +2202,8 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
 
 // DETACHED, BOTH OF THEM. The first sweep is what this process exists for and
 // it does not wait for a page's query; the rankings catch up a moment later.
-void refreshLeaderboard();
-setInterval(() => void refreshLeaderboard(), LEADERBOARD_REFRESH_MS);
+requestBoard();
+setInterval(requestBoard, LEADERBOARD_REFRESH_MS);
 // NO IMMEDIATE CALL: the boot preflight above just answered this, and asking
 // twice in one second would only cost a connection to say the same thing.
 setInterval(() => void refreshHistoryVerdict(), HISTORY_RECHECK_MS);

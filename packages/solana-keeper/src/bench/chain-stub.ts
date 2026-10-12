@@ -90,6 +90,14 @@ export interface BenchChainOptions {
    * settling turn costs.
    */
   readonly skimMode?: number;
+  /**
+   * Whether this endpoint speaks Helius's getProgramAccountsV2 (the `gpa-v2`
+   * cut, src/discovery.ts). OFF BY DEFAULT, because a stub that answered it
+   * would hide the fallback: the public endpoint and every non-Helius provider
+   * answer it as an unknown method, and that answer is what the bench
+   * reproduces unless a test asks for Helius.
+   */
+  readonly speaksGpaV2?: boolean;
 }
 
 /**
@@ -109,6 +117,8 @@ export class BenchChain {
   private histories = new Map<string, readonly BenchTx[]>();
   private transactions = new Map<string, { readonly link: BenchLink; readonly tx: BenchTx }>();
   private links: readonly BenchLink[] = [];
+  /** getProgramAccountsV2 cursors this stub has issued, and the index each resumes at. */
+  private readonly v2Cursors = new Map<string, number>();
   private readonly options: BenchChainOptions;
 
   constructor(options: BenchChainOptions) {
@@ -306,6 +316,10 @@ export class BenchChain {
           result: this.links.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
         };
       }
+      case "getProgramAccountsV2": {
+        if (this.options.speaksGpaV2 !== true) break;
+        return this.programAccountsV2Page(params);
+      }
       case "getSignaturesForAddress": {
         const link = this.walletByKey.get(String(params[0]));
         if (link === undefined) return { result: [] };
@@ -342,13 +356,49 @@ export class BenchChain {
       case "getSignatureStatuses":
         return { error: { code: -32003, message: WRITE_PATH_REFUSAL } };
       default:
-        this.unmodelled.add(method);
-        return {
-          error: {
-            code: -32601,
-            message: `the ceiling bench's stubbed chain has no answer for ${method}; it is recorded and reported, never guessed at`,
-          },
-        };
+        break;
     }
+    this.unmodelled.add(method);
+    return {
+      error: {
+        code: -32601,
+        message: `the ceiling bench's stubbed chain has no answer for ${method}; it is recorded and reported, never guessed at`,
+      },
+    };
+  }
+
+  /**
+   * One getProgramAccountsV2 page, as Helius's page documents it (re-read
+   * 2026-10-12): `{ accounts, paginationKey }`, at most `limit` accounts, and
+   * the key NULL ONLY ON A PAGE THAT RETURNED NO ACCOUNTS — the strict reading
+   * of "end of pagination is only indicated when no accounts are returned". So
+   * a listing here always ends with one empty page, which is the costlier of
+   * the two readings and the one a client must survive anyway.
+   *
+   * The cursor is a base-58 string this stub issued and remembers: opaque to
+   * the client, which is all the page promises. One it never issued is an
+   * invalid-params error, as a real endpoint would answer a forged one.
+   */
+  private programAccountsV2Page(params: readonly unknown[]): RpcAnswer {
+    const options = (typeof params[1] === "object" && params[1] !== null ? params[1] : {}) as { limit?: number; paginationKey?: string };
+    const limit = typeof options.limit === "number" && options.limit >= 1 ? Math.min(options.limit, 10_000) : 10_000;
+    let start = 0;
+    if (typeof options.paginationKey === "string") {
+      const issued = this.v2Cursors.get(options.paginationKey);
+      if (issued === undefined) return { error: { code: -32602, message: "Invalid params: unknown paginationKey" } };
+      start = issued;
+    }
+    const page = this.links.slice(start, start + limit);
+    let paginationKey: string | null = null;
+    if (page.length > 0) {
+      paginationKey = base58(Buffer.from(`cursor:${start + page.length}`));
+      this.v2Cursors.set(paginationKey, start + page.length);
+    }
+    return {
+      result: {
+        accounts: page.map((link) => ({ pubkey: link.linkAddress.toBase58(), account: this.accountJson(link.linkAddress.toBase58()) })),
+        paginationKey,
+      },
+    };
   }
 }

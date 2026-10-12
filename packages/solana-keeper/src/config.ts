@@ -43,6 +43,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { Redactor, Secret, sharedRedactor } from "@sip/solana-log";
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID } from "./idl.js";
 import { PRIVY_KEY_PREFIXES, canonicalPrivyAuthorizationKey } from "./privy-authorization-key.js";
+import { readCuts, readDiscoveryLkgMs, type CutToken } from "./cuts.js";
 import { DEFAULT_KEEPER_ROLE, ROLE_PROFILES, isKeeperRole, type KeeperRole } from "./role-registry.js";
 
 /**
@@ -89,6 +90,10 @@ const KNOWN_SIP_SOLANA_VARS = new Set<string>([
   // WHICH KEEPER THIS SERVICE IS (readRole): unset for the profit keeper, "volume"
   // for the volume keeper, a separate Railway service with its own lock.
   "SIP_SOLANA_ROLE",
+  // THE COST CUTS (src/cuts.ts): which ones run, and how old a link list a
+  // failed listing may fall back to. Both strict, both off when unset.
+  "SIP_SOLANA_CUTS",
+  "SIP_SOLANA_DISCOVERY_LKG_MS",
   ...SIGNING_SECRET_VARS,
 ]);
 
@@ -226,6 +231,18 @@ export interface KeeperConfig {
   readonly rpcUrls: readonly Secret[];
   readonly programId: string;
   readonly sweepMs: number;
+  /**
+   * The SIP_SOLANA_CUTS tokens this process runs (src/cuts.ts). EMPTY IS TODAY'S
+   * KEEPER, request for request; each token switches one cut on, and removing it
+   * is that cut's rollback.
+   */
+  readonly cuts: ReadonlySet<CutToken>;
+  /**
+   * SIP_SOLANA_DISCOVERY_LKG_MS: the oldest last-known-good link list a sweep may
+   * fall back to when the listing fails. 0 is off, which is today: a failed
+   * listing fails the sweep.
+   */
+  readonly discoveryLkgMs: number;
   /** mint (base58) → Raydium CLMM pool. */
   readonly pools: ReadonlyMap<string, PublicKey>;
   readonly alertWebhook: Secret | null;
@@ -549,6 +566,9 @@ export function describeConfig(config: KeeperConfig): Record<string, unknown> {
     rpcEndpoints: config.rpcUrls.length,
     programId: config.programId,
     sweepMs: config.sweepMs,
+    // NAMES ONLY, in the order the ADR rolls them out, so two keepers' lines compare.
+    cuts: [...config.cuts],
+    discoveryLkgMs: config.discoveryLkgMs,
     pools: config.pools.size,
     alertWebhook: config.alertWebhook !== null,
     alertMinSeverity: config.alertMinSeverity,
@@ -698,6 +718,13 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
       sweepMs = parsed;
     }
   }
+  // --- the cost cuts: strict, and nothing on unless named -----------------------
+  const cutsRead = readCuts(env["SIP_SOLANA_CUTS"]);
+  const cuts: ReadonlySet<CutToken> = "cuts" in cutsRead ? cutsRead.cuts : new Set();
+  if ("problems" in cutsRead) problems.push(...cutsRead.problems);
+  const lkgRead = readDiscoveryLkgMs(env["SIP_SOLANA_DISCOVERY_LKG_MS"]);
+  const discoveryLkgMs = "ms" in lkgRead ? lkgRead.ms : 0;
+  if ("problem" in lkgRead) problems.push(lkgRead.problem);
   const pools = parsePools(env["SIP_SOLANA_POOLS"], problems);
 
   // --- operational credentials: readable in dry run, never logged or served ----
@@ -853,6 +880,8 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     rpcUrls: Object.freeze(rpcUrls),
     programId: SIP_PROGRAM_ID,
     sweepMs,
+    cuts,
+    discoveryLkgMs,
     pools,
     alertWebhook,
     alertMinSeverity,
