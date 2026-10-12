@@ -194,6 +194,53 @@ describe.skipIf(!usable)("the loss-carry store on Postgres 16 (needs KEEPER_TEST
     });
   });
 
+  describe("the gate asks the chain with no transaction open (review, 2026-10-12)", () => {
+    it("holds no lock and no idle transaction while the nonce is awaited, and the store's one connection answers a read meanwhile", async () => {
+      // THE CARRY POOL AS createCarryPool MAKES IT: one connection, and a connect that gives up.
+      const pool = tracked(new pg.Pool({ connectionString: urlFor(database), max: 1, connectionTimeoutMillis: 1_000 }));
+      const store = new PgCarryStore(pool, "the new container");
+      const link: CarryLink = { linkAddress: new PublicKey(Buffer.alloc(32, 13)), epoch: 7n, settlementNonce: 4n, frontierSlot: 100n };
+      // THE OLD CONTAINER'S SETTLE FROM THE SAME STATE, ANOTHER WINDOW, STILL LANDABLE: the gate must ask the chain.
+      await db.query(
+        `INSERT INTO sip_solana.loss_carry (link_addr, epoch, settlement_nonce, frontier_slot, loss_lamports, wallet_signed_tx_count, valid_until_slot, written_by)
+         VALUES ($1, 7, 5, 300, 9, 1, 1100, 'the old container')`,
+        [link.linkAddress.toBase58()],
+      );
+      let asked = false;
+      let answer: (nonce: bigint) => void = () => undefined;
+      const nonce = new Promise<bigint>((resolve) => {
+        answer = resolve;
+      });
+      const pending = store.recordCarry(link, 200n, LOSS, {
+        validUntilSlot: 1_150n,
+        gate: {
+          currentSlot: 1_000n,
+          nonceNow: () => {
+            asked = true;
+            return nonce;
+          },
+        },
+      });
+      for (let waited = 0; !asked && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(asked, "the gate reached the chain").toBe(true);
+      // WHILE THE CHAIN HAS NOT ANSWERED: no carry lock held, no transaction left open.
+      const locks = await db.query(
+        `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 2 AND classid = $1::oid`,
+        [CARRY_LOCK_CLASS],
+      );
+      expect(locks.rows[0].n).toBe(0);
+      const idle = await db.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1 AND state LIKE 'idle in transaction%'`, [database]);
+      expect(idle.rows[0].n).toBe(0);
+      // AND THE NEXT TURN'S READ, ON THE SAME ONE CONNECTION, IS ANSWERED.
+      expect(await store.carryFor({ ...link, settlementNonce: 5n, frontierSlot: 300n })).toEqual({ lossLamports: 9n, walletSignedTxCount: 1 });
+      // THE CHAIN ANSWERS: unmoved, and the old settle may still land — this turn waits, and its row is untouched.
+      answer(4n);
+      const write = await pending;
+      expect(write.kind === "refused" && write.detail).toMatch(/may still land until slot 1100 \(the chain is at 1000\)/);
+      expect(await store.carryFor({ ...link, settlementNonce: 5n, frontierSlot: 300n })).toEqual({ lossLamports: 9n, walletSignedTxCount: 1 });
+    });
+  });
+
   describe("PgCarryStore and MemoryCarryStore agree on random carryFor/recordCarry sequences", () => {
     it("by memory's rule (dual's writes): every answer equal, over link states that only move forward", async () => {
       let reads = 0;

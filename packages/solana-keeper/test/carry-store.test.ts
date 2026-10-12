@@ -23,9 +23,12 @@ import {
   CARRY_STORE_CRITICAL_AFTER_MS,
   DurableCarries,
   MemoryCarryStore,
+  PgCarryStore,
   gateRefusal,
+  type CarryClient,
   type CarryGate,
   type CarryLink,
+  type CarryPool,
   type CarryStoreHooks,
   type CarryWriteOptions,
   type DurableCarryStore,
@@ -657,5 +660,133 @@ describe("the settle turns a store that is down makes wait: one page, not one pe
     expect(new Set(results)).toEqual(new Set(["RETRY/carry-store"]));
     expect(sent.map(({ key, severity }) => ({ key, severity }))).toEqual([{ key: CARRY_STORE_ALERT_KEY, severity: "critical" }]);
     expect(watch.status(clock).database.down).toBe(false);
+  });
+});
+
+/**
+ * A pool of ONE connection, as createCarryPool makes it: connect() waits for the
+ * one client and gives up after `waitMs`, as pg's connectionTimeoutMillis does.
+ * Its client answers the gate's row read with `linkRows` and everything else with
+ * nothing, and logs each statement's first word.
+ */
+class OneConnectionPool implements CarryPool {
+  readonly statements: string[] = [];
+  #busy = false;
+  readonly #waiting: (() => void)[] = [];
+
+  constructor(
+    readonly linkRows: readonly Record<string, unknown>[],
+    readonly waitMs = 60,
+  ) {}
+
+  async connect(): Promise<CarryClient> {
+    if (this.#busy) {
+      await new Promise<void>((resolve, reject) => {
+        const wake = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          this.#waiting.splice(this.#waiting.indexOf(wake), 1);
+          reject(new Error("timeout exceeded when trying to connect"));
+        }, this.waitMs);
+        this.#waiting.push(wake);
+      });
+    }
+    this.#busy = true;
+    let released = false;
+    return {
+      query: async (text: string) => {
+        this.statements.push(text.trim().split(/\s+/)[0]!);
+        return { rows: text.includes("valid_until_slot, written_by") ? this.linkRows : [] };
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        this.#busy = false;
+        this.#waiting.shift()?.();
+      },
+    };
+  }
+}
+
+describe("on's gate asks the chain with no transaction open (review, 2026-10-12)", () => {
+  // THE INCIDENT IT PREVENTS: the nonce — an RPC read, up to 30 s an endpoint —
+  // was awaited inside the write's transaction, so the carry pool's ONE connection
+  // and the link's advisory lock stayed held while the chain did not answer. Every
+  // later PROFIT turn of the sweep then failed to connect.
+  const link = linkAt(4n, 700n);
+  /** Another keeper's row for the state this settle would leave, still landable: the gate must ask the chain about it. */
+  const theOldContainers = {
+    epoch: String(EPOCH),
+    settlement_nonce: "5",
+    frontier_slot: "950",
+    loss_lamports: "9",
+    wallet_signed_tx_count: 1,
+    valid_until_slot: "1150",
+    written_by: "the old container",
+  };
+  const never = (): Promise<bigint | null> => new Promise(() => undefined);
+
+  it("has returned the store's one connection, its transaction rolled back, before it waits on the chain", async () => {
+    const pool = new OneConnectionPool([theOldContainers]);
+    const store = new PgCarryStore(pool, "me");
+    let asked = false;
+    void store.recordCarry(link, 900n, LOSS, {
+      validUntilSlot: 1_150n,
+      gate: {
+        currentSlot: 1_000n,
+        nonceNow: () => {
+          asked = true;
+          return never();
+        },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(asked).toBe(true);
+    expect(pool.statements).toEqual(["BEGIN", "SELECT", "SELECT", "ROLLBACK"]);
+    // THE NEXT TURN'S READ GETS THE CONNECTION while the chain still has not answered.
+    expect(await store.carryFor(linkAt(5n, 900n))).toBeNull();
+  });
+
+  it("through DurableCarries: a nonce that never comes is the gate's refusal within the budget, nothing is written then or later, and the pool stays usable", async () => {
+    const pool = new OneConnectionPool([theOldContainers]);
+    const carries = new DurableCarries("on", new PgCarryStore(pool, "me"), hooks(), 40);
+    const book: CarryBook = new Map();
+    const startedAt = Date.now();
+    const write = await carries.recordCarry(book, link, 900n, LOSS, MODE_PROFIT, { currentSlot: 1_000n, validUntilSlot: 1_150n, nonceNow: never });
+    expect(Date.now() - startedAt).toBeLessThan(40);
+    // THE LINK'S OWN BUSINESS, not the store being down: its wallet's ladder counts it.
+    expect(write.kind === "refused" && write.detail).toMatch(/the link's nonce could not be read to tell whether it landed or may still land/);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(pool.statements).toEqual(["BEGIN", "SELECT", "SELECT", "ROLLBACK", "BEGIN", "SELECT", "SELECT", "ROLLBACK"]);
+    expect(await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT)).toEqual({ carry: null });
+    expect(carries.status()).toMatchObject({ refusedAtGate: 1, writeFailures: 0, readFailures: 0 });
+  });
+
+  it("decides on the rows the second transaction reads, with the nonce the chain gave: unmoved and past every deadline is written", async () => {
+    const pool = new OneConnectionPool([{ ...theOldContainers, valid_until_slot: "999" }]);
+    const store = new PgCarryStore(pool, "me");
+    const write = await store.recordCarry(link, 900n, LOSS, { validUntilSlot: 1_150n, gate: { currentSlot: 1_000n, nonceNow: async () => 4n } });
+    expect(write).toEqual({ kind: "written" });
+    expect(pool.statements).toEqual(["BEGIN", "SELECT", "SELECT", "ROLLBACK", "BEGIN", "SELECT", "SELECT", "DELETE", "INSERT", "COMMIT"]);
+  });
+
+  it("asks nothing, in one transaction, when no row stands in the way", async () => {
+    const pool = new OneConnectionPool([]);
+    let asked = 0;
+    const write = await new PgCarryStore(pool, "me").recordCarry(link, 900n, LOSS, {
+      validUntilSlot: 1_150n,
+      gate: {
+        currentSlot: 1_000n,
+        nonceNow: async () => {
+          asked += 1;
+          return 4n;
+        },
+      },
+    });
+    expect(write).toEqual({ kind: "written" });
+    expect(asked).toBe(0);
+    expect(pool.statements).toEqual(["BEGIN", "SELECT", "SELECT", "DELETE", "INSERT", "COMMIT"]);
   });
 });

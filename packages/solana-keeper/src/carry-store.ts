@@ -82,6 +82,18 @@
 // or another epoch above this one, means this turn read an old link: refused
 // without asking. L5's send intents replace this with the gate transaction; the
 // rule it enforces is the same.
+//
+// THE CHAIN IS NEVER ASKED WITH A TRANSACTION OPEN (review, 2026-10-12). The
+// nonce is an RPC read through the pool — up to 30 s an endpoint before it fails
+// over — and it was awaited inside the write's transaction, holding the link's
+// advisory lock and the carry pool's ONE connection: the turn gave up at the 2 s
+// budget, but every later PROFIT turn of that sweep then failed to connect, and
+// the late transaction could still commit for a settle that was never sent. Now
+// the rows are read under the lock, and when one stands in the way the
+// transaction is rolled back and its client returned BEFORE the nonce is asked
+// (bounded too: DurableCarries gives it half the budget, and an unanswered nonce
+// is "could not be read"); a second transaction then re-reads the rows under the
+// lock and decides on them with that nonce (gateWithNonce says why that is sound).
 
 import pg from "pg";
 import { summarizeUpstreamError, type Secret } from "@sip/solana-log";
@@ -281,7 +293,10 @@ const TABLE = `${READ_MODEL_SCHEMA}.${LOSS_CARRY_TABLE}`;
  * rows, apply `on`'s gate when one is given, delete every row but the current
  * state's, and upsert the post-state row. ON CONFLICT DO UPDATE is safe because a
  * window measured from one state is deterministic: two attempts from one state
- * write one carry (settle-decision.test.ts pins the determinism).
+ * write one carry (settle-decision.test.ts pins the determinism). When the gate
+ * must ask the chain, it is TWO: the first ends at the question, rolled back and
+ * its client returned, and the second reads the rows again with the answer (the
+ * file header says why the chain is never awaited inside one).
  */
 export class PgCarryStore implements DurableCarryStore {
   constructor(
@@ -313,6 +328,32 @@ export class PgCarryStore implements DurableCarryStore {
     // THE CODE REFUSES IT FIRST, as memory's recordCarry does; the table's CHECK
     // refuses it again, for any other writer.
     if (carry !== null && carry.lossLamports <= 0n) throw new Error(refusedLossDetail(carry));
+    const row = { link, endSlot, carry, validUntilSlot };
+    if (gate === null) return this.#settled(await this.#writeUnderLock(row, null));
+    const write: GateWrite = { link, endSlot, carry, gate, writer: this.writer };
+    // FIRST, FROM THE ROWS ALONE: most writes are decided here, in one transaction.
+    const first = await this.#writeUnderLock(row, (rows) => gateFromRows(rows, write));
+    if (first !== ASK_THE_CHAIN) return first;
+    // THE CHAIN, ASKED WITH NO TRANSACTION OPEN AND THE CLIENT BACK IN THE POOL.
+    const nonce = await gate.nonceNow().catch(() => null);
+    // THEN THE ROWS AGAIN, UNDER THE LOCK, AS THEY ARE NOW, with that answer.
+    return this.#settled(await this.#writeUnderLock(row, (rows) => gateWithNonce(rows, write, nonce)));
+  }
+
+  /** A write that can no longer ask the chain: were it ever to, nothing is written, and so nothing is sent. */
+  #settled(answer: CarryWrite | typeof ASK_THE_CHAIN): CarryWrite {
+    return answer === ASK_THE_CHAIN ? { kind: "refused", detail: "the carry gate asked the chain a second time; nothing was sent" } : answer;
+  }
+
+  /**
+   * One transaction under the link's advisory lock: the link's rows, `decide`'s
+   * verdict on them when there is a gate, and — when it lets the write go — the
+   * delete and the upsert. A refusal, or a question for the chain, rolls back.
+   */
+  async #writeUnderLock(
+    { link, endSlot, carry, validUntilSlot }: { readonly link: CarryLink; readonly endSlot: bigint; readonly carry: LossCarry | null; readonly validUntilSlot: bigint },
+    decide: ((rows: readonly GateRow[]) => string | null | typeof ASK_THE_CHAIN) | null,
+  ): Promise<CarryWrite | typeof ASK_THE_CHAIN> {
     const address = link.linkAddress.toBase58();
     const client = await this.pool.connect();
     let broken = false;
@@ -325,8 +366,8 @@ export class PgCarryStore implements DurableCarryStore {
            FROM ${TABLE} WHERE link_addr = $1`,
         [address],
       );
-      if (gate !== null) {
-        const refusal = await gateRefusal(
+      if (decide !== null) {
+        const verdict = decide(
           rows.map((row) => ({
             epoch: BigInt(String(row["epoch"])),
             settlementNonce: BigInt(String(row["settlement_nonce"])),
@@ -336,11 +377,10 @@ export class PgCarryStore implements DurableCarryStore {
             validUntilSlot: BigInt(String(row["valid_until_slot"])),
             writtenBy: String(row["written_by"]),
           })),
-          { link, endSlot, carry, gate, writer: this.writer },
         );
-        if (refusal !== null) {
+        if (verdict !== null) {
           await client.query("ROLLBACK");
-          return { kind: "refused", detail: refusal };
+          return verdict === ASK_THE_CHAIN ? ASK_THE_CHAIN : { kind: "refused", detail: verdict };
         }
       }
       await client.query(
@@ -440,30 +480,96 @@ export class PgCarryStore implements DurableCarryStore {
   }
 }
 
+/** What `on`'s gate needs to know of one write: the link, what it leaves, the gate, and who writes. */
+type GateWrite = { readonly link: CarryLink; readonly endSlot: bigint; readonly carry: LossCarry | null; readonly gate: CarryGate; readonly writer: string };
+
+/** gateFromRows' answer when the rows alone cannot decide: the link's nonce on chain is needed. */
+export const ASK_THE_CHAIN: unique symbol = Symbol("ask the chain for the link's nonce");
+
 /**
- * `on`'s gate over the link's rows, read under its lock: null to go ahead, or why
- * this turn must not write, and so must not send. The header explains the rule.
+ * `on`'s gate over the link's rows, read under its lock, WITHOUT the chain: null
+ * to go ahead, why this turn must not write (and so must not send), or
+ * ASK_THE_CHAIN when a row stands in the way that only the link's nonce can judge.
+ * The file header explains the rule; PgCarryStore asks the chain only after this
+ * transaction has ended.
  */
-export async function gateRefusal(
-  rows: readonly GateRow[],
-  write: { readonly link: CarryLink; readonly endSlot: bigint; readonly carry: LossCarry | null; readonly gate: CarryGate; readonly writer: string },
-): Promise<string | null> {
-  const { link, endSlot, carry, gate, writer } = write;
-  const next = link.settlementNonce + 1n;
-  // A LATER STATE THAN THE ONE THIS TURN WILL LEAVE, OR A LATER EPOCH: someone saw
-  // this link past the state this sweep read. Nonces only grow within an epoch, and
-  // epochs only grow, so this turn's link is old, and its settle would be refused.
-  const later = rows.find((row) => row.epoch > link.epoch || (row.epoch === link.epoch && row.settlementNonce > next));
-  if (later !== undefined) {
+export function gateFromRows(rows: readonly GateRow[], write: GateWrite): string | null | typeof ASK_THE_CHAIN {
+  const later = laterRow(rows, write.link);
+  if (later !== null) return later;
+  return inTheWay(rows, write).length === 0 ? null : ASK_THE_CHAIN;
+}
+
+/**
+ * The same gate, with the link's nonce as the chain gave it (null: it could not
+ * be read). Run on the rows of a SECOND transaction, read after the nonce was.
+ *
+ * WHY A NONCE OLDER THAN THE ROWS IS ENOUGH. A moved nonce stays moved, so a
+ * refusal for it holds. An unmoved one lets a row go only when that row's
+ * deadline is below `currentSlot` — a slot the turn read before the nonce was
+ * asked — and a settle past its deadline can land at no later slot, so none of
+ * those can have landed between the nonce's read and this lock. A row that
+ * appeared in between is judged on its own deadline, by the same rule.
+ */
+export function gateWithNonce(rows: readonly GateRow[], write: GateWrite, nonce: bigint | null): string | null {
+  const { link, gate } = write;
+  const later = laterRow(rows, link);
+  if (later !== null) return later;
+  const standing = inTheWay(rows, write);
+  if (standing.length === 0) return null;
+  if (nonce === null || nonce < link.settlementNonce) {
     return (
-      `the carry store already holds a carry for state ${stateKey(later.epoch, later.settlementNonce, later.frontierSlot)} of this link, ` +
-      `past the state this sweep read (${stateKey(link.epoch, link.settlementNonce, link.frontierSlot)}): the link has moved since, so nothing was sent`
+      "a settle from this link's state was recorded by another attempt, and the link's nonce could not be read to tell whether it " +
+      "landed or may still land; nothing was sent, and the next sweep asks again"
     );
   }
-  // A ROW FOR THE STATE THIS SETTLE WOULD LEAVE that this attempt would not write
-  // identically: another keeper's, or another window's. Its settle may have landed,
-  // or may still land, and the delete below would forget its loss.
-  const inTheWay = rows.filter(
+  if (nonce > link.settlementNonce) {
+    return `the link's nonce is ${nonce} on chain, past the ${link.settlementNonce} this sweep read: another settle landed first, so nothing was sent`;
+  }
+  const deadline = standing.reduce((latest, row) => (row.validUntilSlot > latest ? row.validUntilSlot : latest), 0n);
+  if (deadline >= gate.currentSlot) {
+    return (
+      `a settle another attempt sent from this state may still land until slot ${deadline} (the chain is at ${gate.currentSlot}), ` +
+      "and its carry must not be deleted under it: this turn waits for it, and nothing was sent"
+    );
+  }
+  // DEAD: the link has not moved and that settle's deadline has passed, so it can
+  // never land; its row is deleted, as memory deletes an earlier attempt's.
+  return null;
+}
+
+/**
+ * Both halves in one call, the chain asked between them: the gate as one rule,
+ * for a caller that holds no transaction (the unit tests).
+ */
+export async function gateRefusal(rows: readonly GateRow[], write: GateWrite): Promise<string | null> {
+  const verdict = gateFromRows(rows, write);
+  if (verdict !== ASK_THE_CHAIN) return verdict;
+  return gateWithNonce(rows, write, await write.gate.nonceNow().catch(() => null));
+}
+
+/**
+ * A row of a later state or epoch than this turn read: someone saw this link past
+ * the state this sweep read. Nonces only grow within an epoch, and epochs only
+ * grow, so this turn's link is old, and its settle would be refused. Its refusal, or null.
+ */
+function laterRow(rows: readonly GateRow[], link: CarryLink): string | null {
+  const next = link.settlementNonce + 1n;
+  const later = rows.find((row) => row.epoch > link.epoch || (row.epoch === link.epoch && row.settlementNonce > next));
+  if (later === undefined) return null;
+  return (
+    `the carry store already holds a carry for state ${stateKey(later.epoch, later.settlementNonce, later.frontierSlot)} of this link, ` +
+    `past the state this sweep read (${stateKey(link.epoch, link.settlementNonce, link.frontierSlot)}): the link has moved since, so nothing was sent`
+  );
+}
+
+/**
+ * The rows for the state this settle would leave that this attempt would not
+ * write identically: another keeper's, or another window's. Their settle may have
+ * landed, or may still land, and the delete would forget its loss.
+ */
+function inTheWay(rows: readonly GateRow[], { link, endSlot, carry, writer }: GateWrite): readonly GateRow[] {
+  const next = link.settlementNonce + 1n;
+  return rows.filter(
     (row) =>
       row.epoch === link.epoch &&
       row.settlementNonce === next &&
@@ -475,27 +581,6 @@ export async function gateRefusal(
         row.walletSignedTxCount === carry.walletSignedTxCount
       ),
   );
-  if (inTheWay.length === 0) return null;
-  const nonce = await gate.nonceNow().catch(() => null);
-  if (nonce === null || nonce < link.settlementNonce) {
-    return (
-      "a settle from this link's state was recorded by another attempt, and the link's nonce could not be read to tell whether it " +
-      "landed or may still land; nothing was sent, and the next sweep asks again"
-    );
-  }
-  if (nonce > link.settlementNonce) {
-    return `the link's nonce is ${nonce} on chain, past the ${link.settlementNonce} this sweep read: another settle landed first, so nothing was sent`;
-  }
-  const deadline = inTheWay.reduce((latest, row) => (row.validUntilSlot > latest ? row.validUntilSlot : latest), 0n);
-  if (deadline >= gate.currentSlot) {
-    return (
-      `a settle another attempt sent from this state may still land until slot ${deadline} (the chain is at ${gate.currentSlot}), ` +
-      "and its carry must not be deleted under it: this turn waits for it, and nothing was sent"
-    );
-  }
-  // DEAD: the link has not moved and that settle's deadline has passed, so it can
-  // never land; its row is deleted below, as memory deletes an earlier attempt's.
-  return null;
 }
 
 /** What one turn's read answers: the carry, or why the store could not say. */
@@ -775,7 +860,13 @@ export class DurableCarries implements CarryStoreTurn {
     }
     // `on`: THE DB FIRST, AND NOTHING IS SENT WITHOUT IT.
     if (carry !== null && carry.lossLamports <= 0n) throw new Error(refusedLossDetail(carry));
-    const written = await this.#within(this.store.recordCarry(link, endSlot, carry, { validUntilSlot: turn.validUntilSlot, gate: turn }));
+    // THE GATE'S NONCE GETS HALF THE BUDGET, AND NO ANSWER IS "COULD NOT BE READ".
+    // Unbounded, a slow endpoint (30 s before the pool fails over) outlived the
+    // write's budget: the turn blamed the STORE for the RPC's silence, and the late
+    // write could still commit for a settle never sent. Bounded, a slow nonce is
+    // the gate's own refusal, inside the budget, and nothing is written.
+    const gate: CarryGate = { currentSlot: turn.currentSlot, nonceNow: () => nonceWithin(turn.nonceNow(), Math.floor(this.budgetMs / 2)) };
+    const written = await this.#within(this.store.recordCarry(link, endSlot, carry, { validUntilSlot: turn.validUntilSlot, gate }));
     if (!written.ok) {
       this.#writeFailures += 1;
       const detail = summarizeUpstreamError(written.error);
@@ -877,6 +968,19 @@ export class DurableCarries implements CarryStoreTurn {
     const observe = this.hooks.observe;
     if (observe === undefined) return;
     this.#tell(() => observe(typeof outcome === "boolean" ? outcome : databaseAnswered(outcome)));
+  }
+}
+
+/** The link's nonce, or null when it does not come within `ms` or its read fails: the gate's "could not be read". */
+async function nonceWithin(read: Promise<bigint | null>, ms: number): Promise<bigint | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+  });
+  try {
+    return await Promise.race([read.catch(() => null), late]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
