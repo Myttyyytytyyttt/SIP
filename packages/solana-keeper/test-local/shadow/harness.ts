@@ -50,7 +50,18 @@
 //       scheduler-kill  SIGKILL the lock holder: the standby takes the lock at its
 //                       next tick, and that tick is a full pass;
 //       pg-pause        `docker pause` the database for 20 s: nothing commits, and
-//                       everything recovers by itself afterwards.
+//                       everything recovers by itself afterwards. 20 s is a BRIEF
+//                       outage: shorter than a lease's 35 s past the gate margin,
+//                       so no lease lapses and no gate is refused for it, and the
+//                       scheduler's lock check falls inside it only by chance;
+//       pg-outage       hold a worker mid-job, then pause the database for 75 s —
+//                       past every held lease and over a whole scheduler tick —
+//                       and let the worker's job go on into it: nothing commits;
+//                       the held vault's lease lapses inside the pause and the
+//                       vault is worked again after it (a higher fence, or its
+//                       COMPLETE); the lock holder's session check fails and it
+//                       stands by; after the pause a scheduler takes the lock
+//                       with a full pass; every process lives; overlap 0.
 //     Each replaced process is restarted, so the fleet is whole again.
 //
 // It never prints an environment value. The only URLs it writes are its own
@@ -64,7 +75,8 @@ import { createServer as createSocketServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { OVERLAP_AUDIT_SQL } from "../../src/dispatch-store.js";
+import { DEFAULT_SWEEP_MS } from "../../src/config.js";
+import { DISPATCH_STATEMENT_TIMEOUT_MS, GATE_MARGIN_SECONDS, LEASE_SECONDS, OVERLAP_AUDIT_SQL } from "../../src/dispatch-store.js";
 import { SIGTERM_DRAIN_MS } from "../../src/explicit-send.js";
 import { SIP_PROGRAM_ID } from "../../src/idl.js";
 import {
@@ -91,8 +103,26 @@ const DEFAULT_PRODUCTION = [
   "https://sip-solana-keeper-production.up.railway.app/status",
   "https://sip-solana-volume-keeper-production.up.railway.app/status",
 ];
-const DEFAULT_DRILLS = "worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31";
+const DEFAULT_DRILLS = "worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31,pg-outage@38";
+/**
+ * pg-pause's 20 s: SHORTER than a held lease's life past the gate's margin
+ * (LEASE_SECONDS − GATE_MARGIN_SECONDS = 35 s), so it shows what a brief outage
+ * does — statements fail, nothing commits, everything recovers — and NOT the
+ * fail-closed paths: no lease lapses, and the scheduler's lock check falls inside
+ * it only when a tick happens to (review, 2026-10-13). pg-outage is the long one.
+ */
 const PG_PAUSE_MS = 20_000;
+/**
+ * pg-outage's pause: past a held lease's gate margin, and past one whole
+ * scheduler tick plus its statement timeout, so the holder's lock check
+ * (SELECT 1, DISPATCH_STATEMENT_TIMEOUT_MS) certainly fails inside it.
+ */
+const PG_OUTAGE_MS = 75_000;
+/** When, inside the outage, the worker held mid-job is let go on: its job then meets a database that cannot answer. */
+const PG_OUTAGE_THAW_AFTER_MS = 5_000;
+if (PG_OUTAGE_MS <= (LEASE_SECONDS - GATE_MARGIN_SECONDS) * 1_000 || PG_OUTAGE_MS <= DEFAULT_SWEEP_MS + DISPATCH_STATEMENT_TIMEOUT_MS) {
+  throw new Error("pg-outage's pause must outlast a lease's gate margin and a whole scheduler tick");
+}
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 // ── arguments ─────────────────────────────────────────────────────────────────
@@ -932,11 +962,130 @@ async function drillPgPause(): Promise<Record<string, unknown>> {
   };
 }
 
+async function drillPgOutage(): Promise<Record<string, unknown>> {
+  const pgName = meta.pgName!;
+  const workers = alive("worker");
+  if (workers.length < 1) return { ok: false, detail: "no live worker" };
+  const victim = workers[0]!;
+  // A WORKER MID-JOB FIRST (its path frozen, as worker-kill holds one): the outage must find a job in flight.
+  const held = await holdMidJob(victim);
+  if (held === null) return { ok: false, detail: `${victim.name} held no vault mid-job within 4 minutes of its path being frozen` };
+  const [before] = await query<{ scheduler_id: string | null }>("SELECT scheduler_id FROM sip_solana.fleet");
+  const holder = procs.find((proc) => proc.id === (before?.scheduler_id ?? null)) ?? null;
+  // THE LEASES AS THE PAUSE FINDS THEM (the database's clock), and who is running.
+  const leases = await query<{ vault_addr: string; fence: string; lease_ms: string }>(
+    `SELECT vault_addr, fence::text, (extract(epoch FROM lease_until) * 1000)::bigint::text AS lease_ms FROM sip_solana.vault_work WHERE holder = $1`,
+    [victim.id],
+  );
+  const running = procs.filter((proc) => proc.child.exited === null);
+  const pauseDb = await dbNow();
+  const pauseAt = Date.now();
+  const paused = docker("pause", pgName);
+  if (paused.status !== 0) {
+    relay!.thaw(victim.tag);
+    return { ok: false, detail: `docker pause failed: ${paused.stderr.slice(0, 200)}` };
+  }
+  // THE HELD JOB GOES ON INTO THE OUTAGE: its next heartbeat, gate or COMPLETE meets a database that cannot answer.
+  await sleep(PG_OUTAGE_THAW_AFTER_MS);
+  relay!.thaw(victim.tag);
+  await sleep(PG_OUTAGE_MS - PG_OUTAGE_THAW_AFTER_MS);
+  const unpaused = docker("unpause", pgName);
+  const unpauseAt = Date.now();
+  if (unpaused.status !== 0) return { ok: false, detail: `docker unpause failed: ${unpaused.stderr.slice(0, 200)}` };
+  const unpauseDb = await dbNow();
+  // RECOVERY: a tick that TOOK the lock — a full pass — and a job done, both after the pause.
+  let takeover: { process: string; afterUnpauseMs: number; fullPass: unknown; lanes: unknown } | null = null;
+  let jobAfter: number | null = null;
+  const waitFrom = Date.now();
+  while (Date.now() - waitFrom < 180_000 && (takeover === null || jobAfter === null)) {
+    for (const proc of procs) {
+      if (proc.kind === "scheduler" && takeover === null) {
+        const tick = proc.child.since(unpauseAt).find((entry) => entry.line.event === "scheduler tick" && entry.line["tookOver"] === true);
+        if (tick !== undefined) takeover = { process: proc.name, afterUnpauseMs: tick.at - unpauseAt, fullPass: tick.line["fullPass"] ?? null, lanes: tick.line["lanes"] ?? null };
+      }
+      if (proc.kind === "worker" && jobAfter === null) {
+        const job = proc.child.find("job done", unpauseAt);
+        if (job !== undefined) jobAfter = job.at - unpauseAt;
+      }
+    }
+    await sleep(500);
+  }
+  // THE HOLDER'S LOCK CHECK FAILED INSIDE THE PAUSE (its statement timeout may fire a moment after the end).
+  const lockLost =
+    holder === null
+      ? []
+      : holder.child
+          .since(pauseAt, unpauseAt + DISPATCH_STATEMENT_TIMEOUT_MS)
+          .filter((entry) => entry.line.event === "the scheduler lost its lock's session; it stands by and asks again next tick");
+  // EACH HELD VAULT: its lease ran out inside the pause, and after it the vault was worked again.
+  const vaults = await Promise.all(
+    leases.map(async (lease) => {
+      let after: VaultState | null = null;
+      const followFrom = Date.now();
+      while (Date.now() - followFrom < 180_000) {
+        after = await vaultState(lease.vault_addr).catch(() => null);
+        if (after !== null && (BigInt(after.fence) > BigInt(lease.fence) || (after.holder === null && (after.lastDoneAt ?? 0) >= unpauseDb))) break;
+        await sleep(500);
+      }
+      const reclaimed = after !== null && BigInt(after.fence) > BigInt(lease.fence);
+      const completedSameFence = after !== null && !reclaimed && after.holder === null && (after.lastDoneAt ?? 0) >= unpauseDb;
+      return {
+        vault: lease.vault_addr,
+        fenceAtPause: lease.fence,
+        leaseRanOutInsidePause: Number(lease.lease_ms) < unpauseDb,
+        leaseLeftAtPauseMs: Number(lease.lease_ms) - pauseDb,
+        fenceAfter: after?.fence ?? null,
+        workedAgain: reclaimed ? "claimed at a higher fence" : completedSameFence ? "completed at its fence" : null,
+        by: nameOf(after?.holder ?? after?.lastHolder ?? null),
+        lastOutcome: after?.lastOutcome ?? null,
+      };
+    }),
+  );
+  const committed = await query<{ intents: number; completions: number }>(
+    `SELECT (SELECT count(*)::int FROM sip_solana.send_intent WHERE created_at > to_timestamp($1 / 1000.0) AND created_at < to_timestamp($2 / 1000.0)) AS intents,
+            (SELECT count(*)::int FROM sip_solana.vault_work WHERE last_done_at > to_timestamp($1 / 1000.0) AND last_done_at < to_timestamp($2 / 1000.0)) AS completions`,
+    [pauseAt + 1_500, unpauseAt - 1_500],
+  );
+  const parked = (await query("SELECT vault_addr FROM sip_solana.vault_work WHERE parked_reason IS NOT NULL")).length;
+  const victimLines = victim.child.since(pauseAt, unpauseAt + 60_000).filter((entry) => entry.line.level === "warn" || entry.line.level === "error");
+  const overlap = await auditRows();
+  const allAlive = running.every((proc) => proc.child.exited === null);
+  const ok =
+    committed[0]!.intents === 0 &&
+    committed[0]!.completions === 0 &&
+    vaults.length > 0 &&
+    vaults.every((vault) => vault.leaseRanOutInsidePause && vault.workedAgain !== null) &&
+    holder !== null &&
+    lockLost.length > 0 &&
+    takeover !== null &&
+    takeover.fullPass !== null &&
+    jobAfter !== null &&
+    allAlive &&
+    parked === 0 &&
+    overlap === 0;
+  return {
+    ok,
+    pausedMs: unpauseAt - pauseAt,
+    committedWhilePaused: committed[0],
+    victim: victim.name,
+    vaults,
+    victimWarnings: [...new Set(victimLines.map((entry) => String(entry.line.event)))].slice(0, 10),
+    holderBefore: holder?.name ?? "none",
+    holderLostItsLockInsidePause: lockLost.length > 0,
+    takeoverAfterPause: takeover,
+    jobDoneAfterUnpauseMs: jobAfter,
+    allAlive,
+    parkedVaults: parked,
+    overlapRows: overlap,
+  };
+}
+
 const DRILLS: Record<string, () => Promise<Record<string, unknown>>> = {
   "worker-kill": drillWorkerKill,
   "worker-sigterm": drillWorkerSigterm,
   "scheduler-kill": drillSchedulerKill,
   "pg-pause": drillPgPause,
+  "pg-outage": drillPgOutage,
 };
 
 function drillSchedule(): { readonly name: string; readonly atMs: number }[] {

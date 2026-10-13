@@ -42,7 +42,7 @@ node --import tsx test-local/shadow/harness.ts --out <dir> --minutes 55 \
 | option | default | what it does |
 |---|---|---|
 | `--minutes` | 55 | the window after the fleet is up. Setup (database, discovery, the 150-block `arm`) adds about 2 minutes before it |
-| `--drills` | `worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31` | minutes into the window, run one at a time. `none` runs none. A drill due in the window's last 3 minutes is skipped |
+| `--drills` | `worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31,pg-outage@38` | minutes into the window, run one at a time. `none` runs none. A drill due in the window's last 3 minutes is skipped |
 | `--drill-repeat-hours` | 0 | repeats the drill schedule every so many hours |
 | `--model` | none | disp-measure's `model.py`. Without it, the credits are measured but not compared with the model |
 | `--cuts` | none | the token set, the same on both kinds of process (plan design detail 4). The model's prediction follows it |
@@ -82,7 +82,9 @@ What `report.json` measures, against the gate in plan §3.3.2:
   - the listing.
 
   The gate is within +15 %. The processes' own `rpc_usage` totals are in `report.json` for a cross-check.
-- **drills**: each with its timings, each judged by the checks written in `harness.ts`.
+- **drills**: each with its timings, each judged by the checks written in `harness.ts`. The two database drills prove different things:
+  - `pg-pause` (20 s) is a **brief** outage. It is shorter than a held lease's 35 s past the gate's 10 s margin, so no lease lapses and no gate is refused because of it, and the scheduler's lock check falls inside it only when a tick happens to. It proves: nothing commits while the database is away, every process lives, and everything recovers on its own.
+  - `pg-outage` (75 s) is the **long** one. A worker is first held mid-job, then the database is paused past every held lease and over a whole scheduler tick, and the worker's job is let go into it. It passes only if nothing commits; each held vault's lease ran out inside the pause and the vault was worked again after it (claimed at a higher fence, or completed at its own); the lock holder's session check failed inside the pause; a scheduler then took the lock with a full pass; a job completed; every process lived; nothing was parked; and the overlap audit is empty.
 
 ## The 7-day version (P3b's gate; the owner chooses where it runs, decision O3)
 
@@ -94,7 +96,7 @@ caffeinate -dimsu node --import tsx test-local/shadow/harness.ts --out ~/sip-sha
   --model <path>/model.py > ~/sip-shadow-7d.out 2>&1 &
 ```
 
-- `--drill-repeat-hours 24` runs the four drills once a day, at minutes 10, 17, 24 and 31 of each day.
+- `--drill-repeat-hours 24` runs the five drills once a day, at minutes 10, 17, 24, 31 and 38 of each day.
 - At today's fleet a run writes about 1.3 MB an hour in all, so about 220 MB over 7 days. Half a megabyte an hour of that is `rpc/calls.jsonl` (measured in the 2026-10-13 smoke). Check that disk space is free.
 - To stop early, send the harness SIGINT or SIGTERM. It then analyses what it has, and stops and removes everything.
 - `--analyze <dir>` can be re-run at any time.
