@@ -26,3 +26,30 @@ test = "npx mocha --import=tsx --sort --exit -t 180000 \"tests/**/*.ts\""
 # Deploy through the upgradeable loader so ProgramData exists: init_config
 # checks the upgrade authority recorded there, and tests must exercise that.
 upgradeable = true
+
+# settle_v3's round-up tests read Pyth SOL/USD accounts, which only the Pyth
+# receiver can write, so they are preloaded. Built from mainnet's own bytes by
+# tests/fixtures/pyth/make-fixtures.py, which says what each one changes.
+[[test.validator.account]]
+address = "2WNfZtKFFi4oG8ty1h4WrKWBCMcMm7guh6CtsfhKvGMi"
+filename = "tests/fixtures/pyth/sol-usd-150.json"
+
+[[test.validator.account]]
+address = "d8D21udwjcTpgtaaW6rfz7DocpSAMmAs1EfeVJCe7sf"
+filename = "tests/fixtures/pyth/sol-usd-mainnet-fresh.json"
+
+[[test.validator.account]]
+address = "F5TitXbUxhb9inWdNN1FUCpcqQmaaaK5WYgKBiHBKzBf"
+filename = "tests/fixtures/pyth/sol-usd-mainnet-stale.json"
+
+[[test.validator.account]]
+address = "J4J5rsCuu5vWoWyNH9Srm1Mci3MVn5WK7MsS9UsRZaW6"
+filename = "tests/fixtures/pyth/sol-usd-150-partial.json"
+
+[[test.validator.account]]
+address = "54rZFWAjqpEFPRr6sf4gbFGz7FCi33zubCCEAgJMnpAj"
+filename = "tests/fixtures/pyth/usdc-usd-fresh.json"
+
+[[test.validator.account]]
+address = "8EythbT5tsxNKX3ZbJgJn2Az65p39Mx6G19vbnTBMbDj"
+filename = "tests/fixtures/pyth/sol-usd-150-wrong-owner.json"

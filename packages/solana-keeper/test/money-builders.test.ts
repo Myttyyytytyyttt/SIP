@@ -76,6 +76,8 @@ describe("the money paths' instruction builders", () => {
     }
     expect(Object.fromEntries(lookups)).toEqual({
       settleV2: ["src/settle-tick.ts"],
+      // The per-trade modes' settle (ADR §5.4): its own builder, in the same one module.
+      settleV3: ["src/settle-tick.ts"],
       wrapSol: ["src/invest-tick.ts"],
       convert: ["src/invest-tick.ts"],
       invest: ["src/invest-tick.ts"],
@@ -89,7 +91,7 @@ describe("the money paths' instruction builders", () => {
     // in a real Node process and this file runs under vitest; they are only
     // each other's second opinion while they compare the same bytes.
     expect(preflight).toContain("0c000000c1209b3341d69c81deadbeef");
-    expect(preflight).toMatch(/import \{ settleInstruction \} from "\.\/settle-tick\.js";/);
+    expect(preflight).toMatch(/import \{ settleInstruction, settleV3Instruction \} from "\.\/settle-tick\.js";/);
   });
 
   it("encode wrap_sol, convert and invest exactly as the preflight's vectors pin them", async () => {

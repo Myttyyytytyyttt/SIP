@@ -10,6 +10,7 @@
     "./jupiter-route": "./scripts/jupiter-route.ts",
     "./jupiter-sim": "./scripts/jupiter-sim.ts",
     "./link-consent": "./scripts/link-consent.ts",
+    "./per-trade": "./scripts/per-trade.ts",
     "./live-route": "./scripts/live-route.ts",
     "./raydium-swap": "./scripts/raydium-swap.ts",
     "./idl": "./idl/sip_vault.json",
@@ -17,6 +18,8 @@
   },
   "scripts": {
     "test": "anchor test",
+    "test:local": "tsx rehearsal/run-suite.ts",
+    "rehearse:upgrade": "mocha --import=tsx --bail --exit -t 1800000 rehearsal/upgrade.rehearsal.ts",
     "idl:export": "test -f target/idl/sip_vault.json || { echo 'target/idl/sip_vault.json is missing: run anchor build first' >&2; exit 1; }; mkdir -p idl && cp target/idl/sip_vault.json idl/sip_vault.json",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
   },

@@ -228,10 +228,13 @@ const SIP_PROGRAM = new PublicKey(SIP_PROGRAM_ID);
 
 /** settle_v2's discriminator, from the exported IDL: [5, 41, 238, 141, 219, 81, 39, 145]. */
 const SETTLE_V2_DISCRIMINATOR = instructionDiscriminator("settle_v2");
+/** settle_v3's, the per-trade modes' settle (ADR §5.4): [145, 62, 164, 103, 237, 99, 66, 46]. */
+const SETTLE_V3_DISCRIMINATOR = instructionDiscriminator("settle_v3");
 
 /**
  * Throws unless `transaction` is exactly what a settle sends: the attester's
- * Ed25519SigVerify, then settle_v2 on `programId`, paid by `wallet`.
+ * Ed25519SigVerify, then settle_v2 — or settle_v3, a per-trade vault's settle —
+ * on `programId`, paid by `wallet` (T-N2).
  *
  * WHY THE SHAPE IS CHECKED HERE AND NOT LEFT TO THE POLICY. The keeper's Privy
  * policy (privy-policy.ts) allows any transaction made entirely of sip-vault and
@@ -262,7 +265,7 @@ const SETTLE_V2_DISCRIMINATOR = instructionDiscriminator("settle_v2");
 export function assertSettleShape(transaction: Transaction, programId: PublicKey, wallet: PublicKey): void {
   const refuse = (what: string): never => {
     throw new Error(
-      `refusing to send a transaction that is not a settle: ${what}. Only [Ed25519SigVerify, settle_v2] paid by the ` +
+      `refusing to send a transaction that is not a settle: ${what}. Only [Ed25519SigVerify, settle_v2 | settle_v3] paid by the ` +
         "trading wallet leaves through its signer; nothing was sent",
     );
   };
@@ -275,7 +278,12 @@ export function assertSettleShape(transaction: Transaction, programId: PublicKey
   }
   if (verify.data.length < 16 || verify.data[0] !== 1) refuse("the Ed25519SigVerify instruction does not declare exactly one signature");
   if (!settle.programId.equals(programId)) refuse(`instruction 1 calls ${settle.programId.toBase58()}, not sip-vault ${programId.toBase58()}`);
-  if (settle.data.length < 8 || !settle.data.subarray(0, 8).equals(SETTLE_V2_DISCRIMINATOR)) refuse("instruction 1 is not settle_v2");
+  // settle_v3 READS THE SAME PRECEDING Ed25519 CHECK, over SIP_SETTLE_V3 bytes, and
+  // is the only other settle: link_wallet, which also reads one, stays refused.
+  const head = settle.data.subarray(0, 8);
+  if (settle.data.length < 8 || !(head.equals(SETTLE_V2_DISCRIMINATOR) || head.equals(SETTLE_V3_DISCRIMINATOR))) {
+    refuse("instruction 1 is neither settle_v2 nor settle_v3");
+  }
   if (transaction.feePayer === undefined || !transaction.feePayer.equals(wallet)) {
     refuse(`it is paid by ${transaction.feePayer?.toBase58() ?? "no fee payer"}, not the wallet ${wallet.toBase58()}`);
   }

@@ -44,18 +44,20 @@ import { CLASSIC_TOKEN_ACCOUNT_BYTES, OFFERED_LEGS } from "../client/product";
 import {
   SIP_ACCOUNT_SPACE,
   decodeInvestmentPolicy,
+  decodePerTradePolicy,
   decodeProtocolConfig,
   decodeSettledEvent,
   decodeTradingLink,
   decodeVault,
   type InvestmentPolicyState,
+  type PerTradePolicyState,
   type ProtocolConfigState,
   type SettledEvent,
   type TradingLinkState,
   type VaultState,
 } from "../client/decoders";
 import { SIP_PROGRAM_ID, idlInstruction, matchInstruction } from "../client/idl";
-import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "./pda";
+import { deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, derivePerTradePda, deriveVaultPda } from "./pda";
 import { ResponseTooLargeError, RpcAnswerError, type JsonRpcMember, type RpcPool } from "./rpc-pool";
 
 export type ChainRead<T> =
@@ -174,6 +176,14 @@ export const readLink = (pool: RpcPool, link: string): Promise<ChainRead<Account
 
 export const readPolicy = (pool: RpcPool, policy: string): Promise<ChainRead<AccountRead<InvestmentPolicyState>>> =>
   readOne(pool, policy, decodeInvestmentPolicy);
+
+/**
+ * A per-trade vault's PerTradePolicy, ["per_trade", vault]: `missing` for every
+ * PROFIT and VOLUME vault, which never had one. Read only when the vault reports
+ * skim_mode 2 or 3, so no reader of today's vaults asks for it.
+ */
+export const readPerTradePolicy = (pool: RpcPool, vault: string): Promise<ChainRead<AccountRead<PerTradePolicyState>>> =>
+  isPubkey(vault) ? readOne(pool, derivePerTradePda(vault).toBase58(), decodePerTradePolicy) : Promise.resolve({ kind: "unreadable", error: "not a base58 32-byte address" });
 
 /** The protocol config at ["config"]. `paused` there stops settle and invest for every vault. */
 export const readProtocolConfig = (pool: RpcPool): Promise<ChainRead<AccountRead<ProtocolConfigState>>> =>

@@ -38,6 +38,13 @@ describe("a program refusal, by its IDL name", () => {
       AttestationMismatch: "RETRY",
       SkimModeMismatch: "RETRY",
       InvalidSessionWindow: "RETRY",
+      // The per-trade modes': the owner moved the vault across the settle_v2 /
+      // settle_v3 line after the read, or a ROUND-UP price met Pyth's floor or
+      // its day-old feed. Each is asked again; nothing moved.
+      ModeNeedsSettleV3: "RETRY",
+      ModeNeedsSettleV2: "RETRY",
+      PriceBelowOracleFloor: "RETRY",
+      OracleStale: "RETRY",
     });
   });
 

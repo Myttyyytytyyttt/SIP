@@ -24,8 +24,9 @@ import type { VaultState } from "./accounts.js";
 import type { Alert } from "./alerts.js";
 import type { ManagedLink } from "./discovery.js";
 import { MAX_SIGNATURE_PAGES, MAX_SIGNATURES, SIGNATURE_PAGE_LIMIT, type WindowMeasurement } from "./measure-window.js";
-import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs } from "./program-scripts.js";
-import { ROLE_PROFILES, keeperModeFor, rolesSettling, type KeeperRole } from "./role-registry.js";
+import type { PerTradeCharge } from "./per-trade-base.js";
+import { MODE_PROFIT, MODE_VOLUME, type AttestationInputs, type AttestationV3Inputs } from "./program-scripts.js";
+import { ROLE_PROFILES, isPerTradeMode, keeperModeFor, rolesSettling, type KeeperRole } from "./role-registry.js";
 
 /** Which keeper this process is: SIP_SOLANA_ROLE (config.ts). Its profile is src/role-registry.ts's. */
 export type { KeeperRole } from "./role-registry.js";
@@ -181,11 +182,14 @@ export function modeDecision(
   // registry rather than inferred as "the other one": with two roles the two
   // readings agree, and with a third only this one is true.
   if (!settles.includes(vault.skimMode)) {
+    // A PER-TRADE BYTE HAS NO LEGACY ROLE (T-O1): only a dispatcher worker's module
+    // settles it, through settle_v3, and only where SIP_SOLANA_EXTRA_MODES serves it.
     const settledBy = rolesSettling(vault.skimMode)[0];
     return {
       outcome: "UNSUPPORTED_MODE",
-      detail:
-        settledBy === undefined
+      detail: isPerTradeMode(vault.skimMode)
+        ? `this vault saves in ${mode.name} mode, which only a dispatcher worker serving it settles (settle_v3, SIP_SOLANA_EXTRA_MODES); nothing is attested`
+        : settledBy === undefined
           ? `this vault saves in ${mode.name} mode, which no keeper settles yet; nothing is attested`
           : `this vault saves in ${mode.name} mode, which the ${settledBy} keeper settles; this keeper does not measure or attest it`,
     };
@@ -254,9 +258,16 @@ export function noSignerDetail(wallet: PublicKey): string {
 export type MeasurementDecision =
   | {
       readonly kind: "stop";
-      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY" | "UNSUPPORTED_MODE";
+      /** RETRY only from the per-trade seam (PerTradeBase): a price or a policy it could not read this turn. */
+      readonly outcome: "IDLE" | "INCOMPLETE" | "NO_PROFIT" | "PENDING_FINALITY" | "UNSUPPORTED_MODE" | "RETRY";
       readonly detail: string;
       readonly baseLamports?: bigint;
+      /**
+       * Set only on a per-trade span that waits for its own clock: the unix second
+       * its oldest charged trade makes it settle (PerTradeCadence). A dispatcher
+       * worker makes the vault due again then (src/worker-job.ts).
+       */
+      readonly dueAt?: number;
       /**
        * Set only by the loop guard (baseDecision): a complete window, not a cut
        * prefix, holding nothing but our own settles. The one stop the `rest-skip`
@@ -281,7 +292,32 @@ export type MeasurementDecision =
        * before the settle is sent.
        */
       readonly carry?: LossCarry;
+      /**
+       * Set only on a per-trade span (ROUND-UP, FIXED): what it owes, trade by
+       * trade, as settle_v3 is attested for it. `baseLamports` is its amount.
+       */
+      readonly perTrade?: PerTradeCharge;
     };
+
+/**
+ * What a per-trade span owes, and whether it waits (src/per-trade-base.ts, built
+ * by the per-trade module in src/settle-modules.ts), or why it could not be
+ * known this turn: a RETRY, with nothing attested.
+ */
+export type PerTradeAnswer =
+  | {
+      readonly kind: "charge";
+      readonly charge: PerTradeCharge;
+      /** Set when the span's cadence says it waits; null when it settles now. Only a span with charged trades waits. */
+      readonly wait: { readonly detail: string; readonly dueAt: number } | null;
+    }
+  | { readonly kind: "retry"; readonly detail: string };
+
+/**
+ * The per-trade seam: a complete per-trade span's charge. Called only for a span
+ * every completeness stop has passed, and never for our own settles alone.
+ */
+export type PerTradeBase = (measured: WindowMeasurement) => Promise<PerTradeAnswer>;
 
 /**
  * A VOLUME span whose notional is known and not yet worth a settlement: what it
@@ -480,12 +516,18 @@ export interface MeasurementContext {
    * loss silently, and the next win would be charged as if it had never happened.
    */
   readonly carry: LossCarry | null;
+  /**
+   * A per-trade vault's seam (PerTradeBase), from the dispatcher's per-trade
+   * module. ABSENT — as every legacy keeper leaves it — a per-trade span stops
+   * at UNSUPPORTED_MODE, exactly as it did before the seam existed.
+   */
+  readonly perTrade?: PerTradeBase;
 }
 
 /** What a measurement allows, in order — and the order is the point. */
 export async function decideFromMeasurement(
   measured: WindowMeasurement,
-  { from, finalizedSlot, mode, volumeBase, carry }: MeasurementContext,
+  { from, finalizedSlot, mode, volumeBase, carry, perTrade }: MeasurementContext,
 ): Promise<MeasurementDecision> {
   // UNFETCHABLE FIRST. This used to run after the empty check, so a span where
   // the RPC returned null for EVERY transaction — exactly what heavy throttling
@@ -563,7 +605,7 @@ export async function decideFromMeasurement(
         "a transaction was missed, so the measurement is incomplete and nothing will be attested",
     };
   }
-  return baseDecision({ mode, measured, from, volumeBase, carry });
+  return baseDecision({ mode, measured, from, volumeBase, carry, ...(perTrade === undefined ? {} : { perTrade }) });
 }
 
 /**
@@ -600,6 +642,7 @@ export async function baseDecision({
   from,
   volumeBase,
   carry,
+  perTrade,
 }: {
   readonly mode: number;
   readonly measured: WindowMeasurement;
@@ -607,6 +650,8 @@ export async function baseDecision({
   readonly volumeBase: VolumeBase;
   /** The loss carried into this span, or null. Required: see MeasurementContext.carry. */
   readonly carry: LossCarry | null;
+  /** A per-trade vault's seam; absent, a per-trade span stops at UNSUPPORTED_MODE. See MeasurementContext.perTrade. */
+  readonly perTrade?: PerTradeBase;
 }): Promise<MeasurementDecision> {
   // THE LOOP GUARD, AND IT COMES FIRST. A settle is external flow
   // (measure-window.ts), so a window holding only the previous settle measures a
@@ -636,6 +681,10 @@ export async function baseDecision({
           `up to slot ${measured.lastSlot}; the rest continues next sweep`,
       }
     : {};
+  // A PER-TRADE SPAN IS DECIDED BY ITS OWN SEAM, and only when it has one: without
+  // it the span stops below, at UNSUPPORTED_MODE, in the words it always did.
+  if (isPerTradeMode(mode) && perTrade !== undefined) return perTradeDecision(measured, perTrade, backlog);
+
   // A VOLUME PREFIX OF NOTHING BUT OUR OWN SETTLES moves the frontier with a zero
   // base, and no seam is asked about it, because it holds nothing to charge. It
   // cannot loop: each such settle adds one transaction above the frontier and takes
@@ -723,6 +772,53 @@ export async function baseDecision({
       `${what}; a zero settle advances the frontier once the wallet itself has signed ${ZERO_BASE_MIN_TXS} transactions ` +
       `other than our own settles: ${signed} so far, ${ZERO_BASE_MIN_TXS - signed} to go`,
     baseLamports: base,
+  };
+}
+
+/**
+ * A per-trade span (ROUND-UP, FIXED) that every completeness stop has passed, and
+ * that holds something besides our own settles or is a cut prefix.
+ *
+ * CHARGED TRADES SETTLE ON THEIR CADENCE (PerTradeCadence: size or clock), and a
+ * cut prefix never waits. A SPAN WITH NOTHING CHARGED — only flows, failed or
+ * forgiven trades, or trades under the minimum — follows the zero rule every
+ * mode follows: a zero settle once the wallet itself has signed ZERO_BASE_MIN_TXS
+ * transactions, or at once for a prefix, and NO_PROFIT before that. Every settle
+ * carries the charge, a zero one included: settle_v3 signs a price_min even then.
+ */
+async function perTradeDecision(
+  measured: WindowMeasurement,
+  perTrade: PerTradeBase,
+  backlog: { readonly backlog?: string },
+): Promise<MeasurementDecision> {
+  const answer = await perTrade(measured);
+  if (answer.kind === "retry") return { kind: "stop", outcome: "RETRY", detail: answer.detail };
+  const { charge } = answer;
+  if (charge.tradeCount > 0) {
+    if (answer.wait !== null && !measured.prefixCut) {
+      return { kind: "stop", outcome: "NO_PROFIT", detail: answer.wait.detail, baseLamports: charge.amountLamports, dueAt: answer.wait.dueAt };
+    }
+    return { kind: "settle", baseLamports: charge.amountLamports, endSlot: measured.lastSlot, perTrade: charge, ...backlog };
+  }
+  if (charge.amountLamports !== 0n) throw new Error(`a per-trade span with no charged trade owes ${charge.amountLamports} lamports; it owes nothing`);
+  const signed = measured.walletSignedTxCount;
+  if (signed >= ZERO_BASE_MIN_TXS || measured.prefixCut) {
+    return { kind: "settle", baseLamports: 0n, endSlot: measured.lastSlot, perTrade: charge, ...backlog };
+  }
+  const counted = charge.rows.length;
+  const forgiven = charge.rows.filter((row) => row.status === "forgiven").length;
+  const small = charge.rows.filter((row) => row.status === "below-minimum").length;
+  const what =
+    counted === 0
+      ? `no trade over ${measured.txCount} txs, so nothing is owed`
+      : `nothing charged over ${measured.txCount} txs (${forgiven} trade(s) forgiven at the boundary, ${small} under the minimum), so nothing is owed`;
+  return {
+    kind: "stop",
+    outcome: "NO_PROFIT",
+    detail:
+      `${what}; a zero settle advances the frontier once the wallet itself has signed ${ZERO_BASE_MIN_TXS} transactions ` +
+      `other than our own settles: ${signed} so far, ${ZERO_BASE_MIN_TXS - signed} to go`,
+    baseLamports: 0n,
   };
 }
 
@@ -944,6 +1040,12 @@ export function attestationInputs(args: {
   readonly baseLamports: bigint;
   readonly currentSlot: bigint;
 }): AttestationInputs {
+  // NEVER A V2 ATTESTATION FOR A PER-TRADE VAULT (T-N1): settle_v2 refuses one
+  // on the upgraded program (ModeNeedsSettleV3), and the program it replaced would
+  // pay base × skim_bps for it (ADR §5.6, Trap 1).
+  if (isPerTradeMode(args.vault.skimMode)) {
+    throw new Error(`refusing to build a settle_v2 attestation for a vault in skim_mode ${args.vault.skimMode}: a per-trade vault settles through settle_v3 only`);
+  }
   const start = measurementStart(args.link);
   if (args.from !== start) {
     throw new Error(
@@ -964,6 +1066,60 @@ export function attestationInputs(args: {
     bps: activeBps(args.vault),
     policyNonce: args.vault.policyNonce,
     validUntilSlot: args.currentSlot + ATTESTATION_VALIDITY_SLOTS,
+  };
+}
+
+/**
+ * The SIP_SETTLE_V3 attestation a per-trade settle signs (ADR §5.4).
+ *
+ * EVERY REBUILT FIELD IS THE CHAIN'S: the mode is the vault's skim_mode and its
+ * policy nonce is its own, and mode_param and min_trade are the PerTradePolicy's
+ * as the charge read them — settle_v3 rebuilds all four from its accounts, so a
+ * charge made under another unit, F, minimum or policy is a different message
+ * and is refused. The window starts where the measurement did, as for V2.
+ *
+ * NEVER FOR PROFIT OR VOLUME (T-N1), and never for a charge of another mode.
+ */
+export function attestationV3Inputs(args: {
+  readonly programId: PublicKey;
+  readonly link: Pick<ManagedLink, "wallet" | "vault" | "epoch" | "settlementNonce" | "frontierSlot">;
+  readonly vault: Pick<VaultState, "skimMode" | "policyNonce">;
+  readonly from: bigint;
+  readonly endSlot: bigint;
+  readonly charge: PerTradeCharge;
+  readonly currentSlot: bigint;
+}): AttestationV3Inputs {
+  const { vault, charge } = args;
+  if (!isPerTradeMode(vault.skimMode)) {
+    throw new Error(`refusing to build a settle_v3 attestation for a vault in skim_mode ${vault.skimMode}: only ROUND-UP and FIXED settle through settle_v3`);
+  }
+  if (charge.mode !== vault.skimMode) {
+    throw new Error(`refusing to attest a skim_mode ${charge.mode} charge for a vault in skim_mode ${vault.skimMode}`);
+  }
+  const start = measurementStart(args.link);
+  if (args.from !== start) {
+    throw new Error(
+      `refusing to build an attestation from slot ${args.from}: this link's unsettled span starts at slot ${start}, ` +
+        "and a window that starts anywhere else would charge or forgive slots it should not",
+    );
+  }
+  return {
+    programId: args.programId,
+    wallet: args.link.wallet,
+    vault: args.link.vault,
+    linkEpoch: args.link.epoch,
+    settlementNonce: args.link.settlementNonce,
+    sessionStartSlot: args.from,
+    sessionEndSlot: args.endSlot,
+    amountLamports: charge.amountLamports,
+    mode: vault.skimMode,
+    policyNonce: vault.policyNonce,
+    validUntilSlot: args.currentSlot + ATTESTATION_VALIDITY_SLOTS,
+    tradeCount: charge.tradeCount,
+    priceMinUsdE6: charge.priceMinUsdE6,
+    modeParam: charge.modeParam,
+    minTrade: charge.minTrade,
+    pricesHash: charge.pricesHash,
   };
 }
 

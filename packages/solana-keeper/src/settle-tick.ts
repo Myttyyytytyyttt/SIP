@@ -36,7 +36,7 @@ import {
   type TransactionInstruction,
 } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { readSettlementNonce, type VaultState } from "./accounts.js";
+import { perTradePolicyAddress, readSettlementNonce, type PerTradePolicyState, type VaultState } from "./accounts.js";
 import { BN } from "./anchor-interop.js";
 import type { ManagedLink } from "./discovery.js";
 import { idl } from "./idl.js";
@@ -44,9 +44,24 @@ import { connectionReader, measureSince, readTransaction, type WalkCache } from 
 import type { VolumeProbe } from "./measure-volume.js";
 import { method } from "./methods.js";
 import { SeatWithdrawnError, assertSettleShape, type SolanaWalletSubmitter } from "./privy-signer.js";
-import { MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage, type AttestationInputs } from "./program-scripts.js";
+import { oracleRefusal, perTradePaid, type PerTradeCharge } from "./per-trade-base.js";
+import {
+  MODE_PROFIT,
+  MODE_ROUNDUP,
+  MODE_VOLUME,
+  attestationInstruction,
+  attestationMessage,
+  attestationV3Instruction,
+  attestationV3Message,
+  pricesHashWords,
+  type AttestationInputs,
+  type AttestationV3Inputs,
+} from "./program-scripts.js";
+import type { PythPriceUpdate } from "./pyth.js";
+import { isPerTradeMode, keeperModeFor } from "./role-registry.js";
 import {
   attestationInputs,
+  attestationV3Inputs,
   carryFor,
   decideFromMeasurement,
   defaultVolumeBase,
@@ -59,6 +74,7 @@ import {
   reserveDecision,
   type CarryBook,
   type LossCarry,
+  type PerTradeBase,
   type SettleOutcome,
   type SettleWaitingOn,
   type VolumeBase,
@@ -128,6 +144,35 @@ export interface SettleResult {
    * Never set without a carry store, so a keeper without one alerts as before.
    */
   readonly waitingOn?: SettleWaitingOn;
+  /**
+   * A per-trade span that waits for its own clock: the unix second it settles
+   * (MeasurementDecision.dueAt). Only a per-trade turn sets it.
+   */
+  readonly dueAt?: number;
+  /**
+   * A per-trade settle's charge, trade by trade (src/per-trade-base.ts): the
+   * rows /status and the Live page list. Only a per-trade turn sets it.
+   */
+  readonly perTrade?: PerTradeCharge;
+}
+
+/**
+ * What a per-trade vault's turn needs beyond the walk (SettleDeps.perTrade): the
+ * dispatcher's per-trade module builds it once per job (src/settle-modules.ts).
+ */
+export interface PerTradeTurn {
+  /** The span's charge and cadence (PerTradeBase). */
+  readonly base: PerTradeBase;
+  /** The vault's PerTradePolicy as the job read it: the daily counter the payment is clipped by. */
+  readonly policy: PerTradePolicyState;
+  /**
+   * ROUND-UP: the Pyth SOL/USD account settle_v3 reads its floor from, and that
+   * account as the job read it, checked here before anything is signed. Null for
+   * FIXED, which passes no oracle.
+   */
+  readonly oracle: { readonly address: PublicKey; readonly update: PythPriceUpdate } | null;
+  /** Unix seconds now: the UTC day the daily cap counts on. */
+  readonly nowSeconds: () => number;
 }
 
 export interface SettleDeps {
@@ -240,6 +285,15 @@ export interface SettleDeps {
    * and a ticket's methods are told after the fact, inside a try of their own.
    */
   readonly fence?: SettleFence;
+  /**
+   * A PER-TRADE VAULT'S TURN (ROUND-UP, FIXED), from the dispatcher's per-trade
+   * module only. ABSENT — as every legacy keeper leaves it — a per-trade vault
+   * rests at UNSUPPORTED_MODE (modeDecision first, then the measurement's own
+   * stop), and nothing here builds settle_v3. PRESENT, a span the seam charges is
+   * attested as SIP_SETTLE_V3 and sent as [Ed25519SigVerify, settle_v3] through
+   * the same fence, seat check, send and landing as a settle_v2.
+   */
+  readonly perTrade?: PerTradeTurn;
 }
 
 /** What the dispatcher's fence is told about one settle about to leave (SettleDeps.fence). */
@@ -433,26 +487,26 @@ export function settleIdempotencyKey(link: Pick<ManagedLink, "linkAddress" | "se
   return createHash("sha256").update(`${link.linkAddress.toBase58()}:${link.settlementNonce}:${validUntilSlot}`).digest("hex");
 }
 
-/** A refusal's detail: where it happened, what said no, and what happens next. */
-function refusalDetail(where: string, refusal: SettleRefusal, raw: string): string {
+/** A refusal's detail: where it happened, what said no, and what happens next. `instruction` names the settle that was refused. */
+function refusalDetail(where: string, refusal: SettleRefusal, raw: string, instruction: "settle_v2" | "settle_v3" = "settle_v2"): string {
   switch (refusal.outcome) {
     case "PAUSED":
       return (
-        `${where}: settle_v2 refused it with ${refusal.programError} — a pause switch went on after this sweep read the vault; ` +
+        `${where}: ${instruction} refused it with ${refusal.programError} — a pause switch went on after this sweep read the vault; ` +
         "nothing moved and the frontier stays put"
       );
     case "BELOW_RESERVE":
       return (
-        `${where}: settle_v2 refused it with ${refusal.programError} — the wallet dropped below its reserve after its balance was read; ` +
+        `${where}: ${instruction} refused it with ${refusal.programError} — the wallet dropped below its reserve after its balance was read; ` +
         "nothing moved and the frontier stays put until it is funded"
       );
     case "RETRY":
       return (
-        `${where}: ${refusal.programError === null ? raw : `settle_v2 refused it with ${refusal.programError}`} — ` +
+        `${where}: ${refusal.programError === null ? raw : `${instruction} refused it with ${refusal.programError}`} — ` +
         "the next sweep reads the vault and the link again and measures anew"
       );
     case "FAILED":
-      return `${where}: ${refusal.programError === null ? raw : `settle_v2 refused it with ${refusal.programError} (${raw})`}`;
+      return `${where}: ${refusal.programError === null ? raw : `${instruction} refused it with ${refusal.programError} (${raw})`}`;
   }
 }
 
@@ -538,6 +592,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
     mode: vault.skimMode,
     volumeBase: deps.volumeBase ?? defaultVolumeBase,
     carry,
+    ...(deps.perTrade === undefined ? {} : { perTrade: deps.perTrade.base }),
   });
   if (decision.kind === "stop") {
     // REMEMBERED ONLY WHEN THE WALK SAW EVERYTHING THE PROBE DID: its newest
@@ -551,7 +606,23 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
       outcome: decision.outcome,
       detail: decision.detail,
       ...(decision.baseLamports === undefined ? {} : { baseLamports: decision.baseLamports }),
+      ...(decision.dueAt === undefined ? {} : { dueAt: decision.dueAt }),
     };
+  }
+
+  // A PER-TRADE SPAN SETTLES THROUGH settle_v3, and only with its module's turn:
+  // the decision above is a settle only when the seam was there to charge it.
+  if (isPerTradeMode(vault.skimMode)) {
+    if (deps.perTrade === undefined || decision.perTrade === undefined) {
+      return { outcome: "FAILED", detail: `a skim_mode ${vault.skimMode} span reached its settle without a per-trade charge; nothing was attested or sent` };
+    }
+    return settlePerTrade(deps, vault, deps.perTrade, {
+      from,
+      endSlot: decision.endSlot,
+      charge: decision.perTrade,
+      measured,
+      backlog: decision.backlog === undefined ? "" : `; ${decision.backlog}`,
+    });
   }
 
   // A BACKLOG SAYS HOW MUCH OF IT THIS SETTLE TAKES, in every SETTLED detail
@@ -794,16 +865,7 @@ export async function runSettleTick(deps: SettleDeps): Promise<SettleResult> {
   const sentAt = Date.now();
   let signature: string;
   try {
-    if (walletSigner instanceof Keypair) {
-      // Localnet: a local keypair signs, we broadcast.
-      tx.partialSign(walletSigner);
-      signature = await connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
-    } else {
-      // The product path: Privy signs as the wallet AND broadcasts, so the
-      // policy is in force on the way out. One request,
-      // under this attempt's own key.
-      signature = await walletSigner.submit(tx, { idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot) });
-    }
+    signature = await sendSettle(connection, walletSigner, tx, settleIdempotencyKey(link, inputs.validUntilSlot));
   } catch (error) {
     tellSend(deps, { route, mode: inputs.mode, submitMs: Date.now() - sentAt, confirmMs: null, ended: "threw" });
     const threw = await unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
@@ -847,7 +909,7 @@ async function settledFromLanding(
   signature: string,
   landed: { readonly err: TransactionError | null } | null,
   context: {
-    readonly inputs: AttestationInputs;
+    readonly inputs: Pick<AttestationInputs, "baseLamports" | "sessionEndSlot">;
     readonly measured: { readonly txCount: number };
     readonly expectation: string;
     readonly paid: bigint;
@@ -857,9 +919,12 @@ async function settledFromLanding(
     readonly carried: Omit<SettleResult, "outcome" | "detail">;
     readonly refused: (err: TransactionError, where: string, signature: string) => SettleResult;
     readonly unconfirmed: (error: unknown, where: string, raw: string, signature?: string) => Promise<SettleResult>;
+    /** The instruction whose arithmetic `paid` is: settle_v2 unless a per-trade settle says otherwise. */
+    readonly instruction?: "settle_v3";
   },
 ): Promise<SettleResult> {
   const { inputs, measured, expectation, paid, backlog, applied, passing, carried, refused, unconfirmed } = context;
+  const instruction = context.instruction ?? "settle_v2";
   if (landed === null) {
     const waited = `${CONFIRM_TIMEOUT_MS / 1_000} s`;
     return unconfirmed(
@@ -936,7 +1001,7 @@ async function settledFromLanding(
         : `settled ${settled} lamports from ${inputs.baseLamports} measured over ${measured.txCount} txs (${expectation})${backlog}${applied}${passing}` +
           // settle_v2's arithmetic is expectedContribution's, so any other
           // amount means one of the two is not what the other believes.
-          (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} settle_v2 computes for this base`),
+          (settled === paid ? "" : ` — WARNING: the vault moved ${settled} lamports, not the ${paid} ${instruction} computes for this base`),
     ...carried,
     ...(settled === null ? {} : { settledLamports: settled }),
     ...(blockTimeMs === undefined ? {} : { blockTimeMs }),
@@ -944,4 +1009,271 @@ async function settledFromLanding(
     nonce: link.settlementNonce,
     endSlot: inputs.sessionEndSlot,
   };
+}
+
+/**
+ * The settle_v3 instruction for a V3 attestation's inputs (ADR §5.4): the IDL's
+ * own builder, over the accounts the link names, the vault's PerTradePolicy and,
+ * for ROUND-UP, the Pyth SOL/USD account settle_v3 reads its floor from. FIXED
+ * passes no oracle: Anchor encodes the absent optional account as the program id,
+ * and settle_v3 refuses a FIXED window that names one (PriceNotAllowed).
+ *
+ * THE PRICES HASH TRAVELS AS FOUR u64 ARGUMENTS, word i its bytes 8i..8i+8 little
+ * endian: the Privy policy's IDL subset takes primitive arguments only.
+ */
+export function settleV3Instruction(
+  program: anchor.Program,
+  link: Pick<ManagedLink, "wallet" | "vault" | "linkAddress">,
+  inputs: AttestationV3Inputs,
+  oracle: PublicKey | null,
+): Promise<TransactionInstruction> {
+  const words = pricesHashWords(inputs.pricesHash);
+  return method(program, "settleV3")(
+    inputs.mode,
+    new BN(inputs.sessionStartSlot.toString()),
+    new BN(inputs.sessionEndSlot.toString()),
+    inputs.tradeCount,
+    new BN(inputs.amountLamports.toString()),
+    new BN(inputs.priceMinUsdE6.toString()),
+    new BN(words[0].toString()),
+    new BN(words[1].toString()),
+    new BN(words[2].toString()),
+    new BN(words[3].toString()),
+    new BN(inputs.validUntilSlot.toString()),
+  )
+    .accountsPartial({
+      wallet: link.wallet,
+      vault: link.vault,
+      tradingLink: link.linkAddress,
+      perTradePolicy: perTradePolicyAddress(program.programId, link.vault),
+      // ANCHOR'S "NONE" FOR AN OPTIONAL ACCOUNT IS THE PROGRAM'S OWN ID, written out.
+      pythSolUsd: oracle ?? program.programId,
+    })
+    .instruction();
+}
+
+/**
+ * A per-trade span the seam charged, from its attestation to its landing: the
+ * same steps, in the same order, as a settle_v2 turn after its decision — the
+ * confirmed slot, the instruction, the node's fee for exactly this message, the
+ * reserve, the dry run's answer, the attester and signer, the shape, the seat,
+ * the fence's gate, the send, the landing and the receipt — with settle_v3's own
+ * numbers: what is owed is the charge's amount, and what moves is that amount
+ * clipped by max_contribution and by the day's remaining cap (perTradePaid).
+ *
+ * TWO THINGS ONLY THIS PATH DOES. A ROUND-UP window's price is held against the
+ * job's Pyth read before anything is priced or signed (oracleRefusal): a refusal
+ * there is a RETRY, with nothing sent. And a live per-trade settle leaves ONLY
+ * through the dispatcher's fence: no carry is ever written for one (neither mode
+ * carries a loss), and a live turn without a fence is a caller bug, FAILED.
+ */
+async function settlePerTrade(
+  deps: SettleDeps,
+  vault: VaultState,
+  turn: PerTradeTurn,
+  span: {
+    readonly from: bigint;
+    readonly endSlot: bigint;
+    readonly charge: PerTradeCharge;
+    readonly measured: { readonly txCount: number; readonly tradedLamports: bigint; readonly volumeTrades?: readonly { readonly lamports: bigint }[] };
+    readonly backlog: string;
+  },
+): Promise<SettleResult> {
+  const { connection, program, link } = deps;
+  const { charge, measured, backlog } = span;
+  const modeName = keeperModeFor(vault.skimMode)?.name ?? `skim_mode ${vault.skimMode}`;
+  const roundUp = charge.mode === MODE_ROUNDUP;
+
+  const currentSlot = BigInt(await connection.getSlot("confirmed"));
+  const inputs = attestationV3Inputs({ programId: program.programId, link, vault, from: span.from, endSlot: span.endSlot, charge, currentSlot });
+  const { paid, headroom, savedToday } = perTradePaid({
+    amountLamports: charge.amountLamports,
+    maxContribution: vault.maxContribution,
+    policy: turn.policy,
+    nowSeconds: turn.nowSeconds(),
+  });
+  const clipped =
+    paid >= charge.amountLamports
+      ? ""
+      : paid === headroom && headroom < vault.maxContribution
+        ? `, clipped by the daily cap (${savedToday} of ${turn.policy.dailyCapLamports} saved today)`
+        : `, clipped at max_contribution ${vault.maxContribution}`;
+  const charged =
+    `${charge.amountLamports} owed over ${charge.tradeCount} charged trade(s)` +
+    (roundUp
+      ? ` of ${charge.rows.length} counted, lowest price ${charge.priceMinUsdE6} µ$/SOL${charge.latePriced > 0 ? `, ${charge.latePriced} priced late` : ""}`
+      : ` of ${charge.rows.length} counted, at ${charge.modeParam} lamports each`);
+  const carried = {
+    baseLamports: charge.amountLamports,
+    mode: inputs.mode,
+    expectedLamports: paid,
+    tradedLamports: measured.tradedLamports,
+    ...(measured.volumeTrades === undefined ? {} : { volumeLamports: measured.volumeTrades.reduce((sum, trade) => sum + trade.lamports, 0n) }),
+    perTrade: charge,
+  };
+
+  // THE ORACLE, BEFORE ANYTHING IS PRICED OR SIGNED (ROUND-UP only).
+  let oracle: PublicKey | null = null;
+  if (roundUp) {
+    if (turn.oracle === null) {
+      return { outcome: "RETRY", detail: "a ROUND-UP settle needs the Pyth SOL/USD account settle_v3 reads its floor from, and this job read none; nothing was signed", ...carried };
+    }
+    const refusal = oracleRefusal(turn.oracle.update, charge.priceMinUsdE6, turn.nowSeconds());
+    if (refusal !== null) return { outcome: "RETRY", detail: `${refusal}; nothing was signed`, ...carried };
+    oracle = turn.oracle.address;
+  }
+
+  const settleIx = await settleV3Instruction(program, link, inputs, oracle);
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  // THE RESERVE, priced for exactly this message, as a settle_v2's is.
+  const priced = settleTransaction(
+    { blockhash, lastValidBlockHeight },
+    link.wallet,
+    Ed25519Program.createInstructionWithPublicKey({
+      publicKey: deps.attester?.publicKey.toBytes() ?? new Uint8Array(32),
+      message: attestationV3Message(inputs),
+      signature: new Uint8Array(64),
+    }),
+    settleIx,
+  );
+  const { value: fee } = await connection.getFeeForMessage(priced.compileMessage(), "confirmed");
+  if (fee === null) {
+    return { outcome: "RETRY", detail: "the node could not price this settle's fee, so the wallet's reserve could not be checked; nothing was signed", ...carried };
+  }
+  const feeLamports = BigInt(fee);
+  const walletLamports = BigInt(await connection.getBalance(link.wallet, "confirmed"));
+  const belowReserve = reserveDecision({ walletLamports, feeLamports, rentExemptZero: await rentExemptZero(connection), walletReserve: vault.walletReserve, paid });
+  const withFee = { ...carried, feeLamports };
+  if (belowReserve !== null) return { ...belowReserve, ...withFee };
+
+  const gateRequest = (live: boolean): SettleGateRequest => ({
+    link,
+    mode: inputs.mode,
+    blockhash,
+    lastValidBlockHeight,
+    idempotencyKey: settleIdempotencyKey(link, inputs.validUntilSlot),
+    amountLamports: paid,
+    endSlot: span.endSlot,
+    carry: null,
+    validUntilSlot: inputs.validUntilSlot,
+    live,
+  });
+
+  if (!deps.live) {
+    if (deps.fence !== undefined) {
+      const gated = await deps.fence.gate(gateRequest(false));
+      if (gated.kind !== "gated") return { outcome: "RETRY", detail: `DRY RUN — ${gated.detail}`, ...withFee };
+    }
+    return {
+      outcome: "SETTLED",
+      detail:
+        paid === 0n && charge.tradeCount === 0
+          ? `DRY RUN — would settle 0 lamports in ${modeName} through settle_v3 and advance the frontier ` +
+            `from ${inputs.sessionStartSlot} to ${inputs.sessionEndSlot} over ${measured.txCount} txs${backlog}`
+          : `DRY RUN — would settle ${paid} lamports in ${modeName} through settle_v3 (${charged}${clipped}) ` +
+            `over slots ${inputs.sessionStartSlot}..${inputs.sessionEndSlot}${backlog}`,
+      ...withFee,
+    };
+  }
+
+  const attester = deps.attester;
+  const walletSigner = deps.walletSigner;
+  if (attester === null || walletSigner === null) {
+    return { outcome: "FAILED", detail: "a live settle turn arrived without the settle key or a wallet signer; nothing was sent", ...withFee };
+  }
+  if (deps.fence === undefined) {
+    return { outcome: "FAILED", detail: "a live per-trade settle leaves only through the dispatcher's fence, and this turn has none; nothing was sent", ...withFee };
+  }
+
+  const expectation = `${paid} expected through settle_v3 (${charged}${clipped})`;
+  const refused = (err: TransactionError, where: string, signature: string): SettleResult => {
+    const refusal = classifySettleRefusal(err, idl);
+    return { outcome: refusal.outcome, detail: refusalDetail(where, refusal, JSON.stringify(err), "settle_v3"), ...withFee, signature };
+  };
+  // A SETTLE THAT LANDED IS NEVER FAILED: the nonce is read back, as for settle_v2.
+  const unconfirmed = async (error: unknown, where: string, raw: string, signature?: string): Promise<SettleResult> => {
+    const refusal = classifySettleRefusal(error, idl);
+    const withSignature = signature === undefined ? {} : { signature };
+    if (refusal.outcome === "RETRY" || refusal.outcome === "FAILED") {
+      const nonce = await readSettlementNonce(program, link.linkAddress).catch(() => null);
+      if (nonce === link.settlementNonce + 1n) {
+        return {
+          outcome: "SETTLED",
+          detail: `landed; receipt not read — ${where}, and this link's nonce has moved to ${nonce} (${expectation})${backlog}`,
+          ...withFee,
+          ...withSignature,
+          nonce: link.settlementNonce,
+          endSlot: inputs.sessionEndSlot,
+        };
+      }
+    }
+    return { outcome: refusal.outcome, detail: refusalDetail(where, refusal, raw, "settle_v3"), ...withFee, ...withSignature };
+  };
+
+  const tx = settleTransaction({ blockhash, lastValidBlockHeight }, link.wallet, attestationV3Instruction(attester.secretKey, inputs), settleIx);
+  try {
+    assertSettleShape(tx, program.programId, link.wallet);
+  } catch (error) {
+    return { outcome: "FAILED", detail: error instanceof Error ? error.message : String(error), ...withFee };
+  }
+  if (!(walletSigner instanceof Keypair) && walletSigner.confirmSeat !== undefined) {
+    try {
+      await walletSigner.confirmSeat();
+    } catch (error) {
+      if (!(error instanceof SeatWithdrawnError)) throw error;
+      return { outcome: "NO_SIGNER", detail: `${noSignerDetail(link.wallet)}. ${error.message}`, ...withFee };
+    }
+  }
+  const gated = await deps.fence.gate(gateRequest(true));
+  if (gated.kind !== "gated") return { outcome: "RETRY", detail: gated.detail, ...withFee };
+  const ticket = gated.ticket;
+
+  const route: SettleSend["route"] = walletSigner instanceof Keypair ? "local-keypair" : "privy";
+  const sentAt = Date.now();
+  let signature: string;
+  try {
+    signature = await sendSettle(connection, walletSigner, tx, settleIdempotencyKey(link, inputs.validUntilSlot));
+  } catch (error) {
+    tellSend(deps, { route, mode: inputs.mode, submitMs: Date.now() - sentAt, confirmMs: null, ended: "threw" });
+    const threw = await unconfirmed(error, "sending the settle threw", summarizeUpstreamError(error, { take: 3, maxChars: 500 }));
+    tellTicket(ticket, (fenced) => fenced.ended("threw", threw.outcome));
+    return threw;
+  }
+  const sent = signature;
+  tellTicket(ticket, (fenced) => fenced.signed(sent));
+  const submittedAt = Date.now();
+  const landed = await landing(connection, signature);
+  const ended: SettleSend["ended"] = landed === null ? "unconfirmed" : landed.err === null ? "landed" : "reverted";
+  tellSend(deps, { route, mode: inputs.mode, submitMs: submittedAt - sentAt, confirmMs: Date.now() - submittedAt, ended });
+  const result = await settledFromLanding(connection, link, sent, landed, {
+    inputs: { baseLamports: inputs.amountLamports, sessionEndSlot: inputs.sessionEndSlot },
+    measured,
+    expectation,
+    paid,
+    backlog,
+    applied: "",
+    passing: "",
+    carried: withFee,
+    refused,
+    unconfirmed,
+    instruction: "settle_v3",
+  });
+  tellTicket(ticket, (fenced) => fenced.ended(ended, result.outcome));
+  return result;
+}
+
+/**
+ * THE ONE PLACE A SETTLE LEAVES, settle_v2's and settle_v3's alike, on either
+ * route (test/send-sites.test.ts counts it).
+ *
+ * Localnet: a local keypair signs, we broadcast. The product path: Privy signs as
+ * the wallet AND broadcasts, so the policy is in force on the way out — one
+ * request, under this attempt's own key.
+ */
+async function sendSettle(connection: Connection, walletSigner: SolanaWalletSubmitter | Keypair, tx: Transaction, idempotencyKey: string): Promise<string> {
+  if (walletSigner instanceof Keypair) {
+    tx.partialSign(walletSigner);
+    return connection.sendRawTransaction(tx.serialize(), { preflightCommitment: "confirmed" });
+  }
+  return walletSigner.submit(tx, { idempotencyKey });
 }

@@ -80,6 +80,8 @@ import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@
 import { OLD_NUVEM_PROGRAM_ID, SIP_PROGRAM_ID, idl, type SipVaultIdl } from "./idl.js";
 
 export const KEEPER_POLICY_NAME = "SaverFi keeper — settle_v2 only";
+/** The name of the policy with the per-trade modes' rule (buildKeeperPolicy's `perTrade`). Names are not compared. */
+export const KEEPER_POLICY_NAME_PER_TRADE = "SaverFi keeper — settle_v2 and settle_v3 only";
 /** The 1-of-1 key quorum that owns the policy. Its private key never reaches Railway. */
 export const ADMIN_KEY_QUORUM_NAME = "sip-solana-policy-admin";
 export const ED25519_PROGRAM_ID = "Ed25519SigVerify111111111111111111111111111";
@@ -89,6 +91,8 @@ export const MEMO_PROGRAM_ID = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 export const PROBE_MESSAGE = "sip policy probe";
 /** The one sip-vault instruction the keeper's signer may send. */
 export const SETTLE_INSTRUCTION = "settle_v2";
+/** The per-trade modes' settle (ROUND-UP, FIXED), allowed only by a policy built with `perTrade` (ADR §5.7 U2 / M3). */
+export const SETTLE_V3_INSTRUCTION = "settle_v3";
 /** Privy's ceiling for one condition's IDL (docs.privy.io, controls/policies/example-policies/solana-idls). */
 export const PRIVY_IDL_MAX_BYTES = 32 * 1024;
 
@@ -213,11 +217,22 @@ const deepFreeze = <T>(value: T): T => {
  * or decode differently from the program.
  */
 export function settleOnlyIdl(source: SipVaultIdl = idl): PolicyIdl {
-  const settle = source.instructions.find((instruction) => instruction.name === SETTLE_INSTRUCTION);
-  if (settle === undefined) throw new Error(`the exported IDL has no ${SETTLE_INSTRUCTION} instruction`);
+  return instructionOnlyIdl(SETTLE_INSTRUCTION, source);
+}
+
+/**
+ * settleOnlyIdl for any one instruction: the same cut, the same refusals. settle_v3's
+ * (the per-trade modes') is built by it for buildKeeperPolicy's `perTrade` rule; its
+ * last account, Pyth's SOL/USD, keeps its `optional` flag, and its eleven arguments
+ * are primitives — the prices hash travels as four u64 for exactly this reason
+ * (ADR §5.4).
+ */
+export function instructionOnlyIdl(name: string, source: SipVaultIdl = idl): PolicyIdl {
+  const settle = source.instructions.find((instruction) => instruction.name === name);
+  if (settle === undefined) throw new Error(`the exported IDL has no ${name} instruction`);
   const accounts = settle.accounts.map((account): PolicyIdlAccount => {
     if ("accounts" in account) {
-      throw new Error(`${SETTLE_INSTRUCTION}'s account ${account.name} is a group; the policy's IDL keeps plain accounts only`);
+      throw new Error(`${name}'s account ${account.name} is a group; the policy's IDL keeps plain accounts only`);
     }
     return {
       name: account.name,
@@ -229,7 +244,7 @@ export function settleOnlyIdl(source: SipVaultIdl = idl): PolicyIdl {
   });
   const args = settle.args.map((arg) => {
     if (typeof arg.type !== "string") {
-      throw new Error(`${SETTLE_INSTRUCTION}'s argument ${arg.name} is not a primitive; the policy's IDL would need its types`);
+      throw new Error(`${name}'s argument ${arg.name} is not a primitive; the policy's IDL would need its types`);
     }
     return { name: arg.name, type: arg.type };
   });
@@ -253,7 +268,16 @@ export function settleOnlyIdl(source: SipVaultIdl = idl): PolicyIdl {
  * one place, and the old program is refused in its own words before any
  * comparison that would describe it as merely "different".
  */
-export function buildKeeperPolicy(programId: string): KeeperPolicy {
+export function buildKeeperPolicy(
+  programId: string,
+  /**
+   * `perTrade`: one more ALLOW rule, settle_v3 only on sip-vault — the per-trade
+   * modes' settle (ADR §5.7 U2, the owner's M3 step). ABSENT IS TODAY'S POLICY,
+   * byte for byte: settle_v2 only. Nothing in this repository passes it yet;
+   * applying it is the owner's, with the admin quorum, once the program is upgraded.
+   */
+  options: { readonly perTrade?: boolean } = {},
+): KeeperPolicy {
   if (programId === OLD_NUVEM_PROGRAM_ID) {
     throw new Error(
       "refusing to build a policy for a retired program: its upgrade authority key leaked, so whoever holds that " +
@@ -266,9 +290,29 @@ export function buildKeeperPolicy(programId: string): KeeperPolicy {
         "builds its settle instructions from that IDL, so an allowlist naming anything else is wrong.",
     );
   }
+  const perTrade: KeeperPolicyRule[] =
+    options.perTrade === true
+      ? [
+          {
+            name: "Allow sip-vault settle_v3 only",
+            method: "signAndSendTransaction",
+            action: "ALLOW",
+            conditions: [
+              { field_source: "solana_program_instruction", field: "programId", operator: "eq", value: programId },
+              {
+                field_source: "solana_instruction_data",
+                field: "instruction_name",
+                operator: "eq",
+                value: SETTLE_V3_INSTRUCTION,
+                idl: instructionOnlyIdl(SETTLE_V3_INSTRUCTION),
+              },
+            ],
+          },
+        ]
+      : [];
   return deepFreeze({
     version: "1.0",
-    name: KEEPER_POLICY_NAME,
+    name: options.perTrade === true ? KEEPER_POLICY_NAME_PER_TRADE : KEEPER_POLICY_NAME,
     chain_type: "solana",
     rules: [
       {
@@ -286,6 +330,7 @@ export function buildKeeperPolicy(programId: string): KeeperPolicy {
           },
         ],
       },
+      ...perTrade,
       {
         name: "Allow the attester's Ed25519SigVerify",
         method: "signAndSendTransaction",

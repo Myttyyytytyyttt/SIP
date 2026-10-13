@@ -69,7 +69,7 @@ COPY packages/solana-program/scripts/attestation.ts packages/solana-program/scri
      packages/solana-program/scripts/clmm-layout.ts \
      packages/solana-program/scripts/jupiter-route.ts packages/solana-program/scripts/jupiter-sim.ts \
      packages/solana-program/scripts/jupiter-fork-setup.ts packages/solana-program/scripts/jupiter-fork-test.ts \
-     packages/solana-program/scripts/link-consent.ts \
+     packages/solana-program/scripts/link-consent.ts packages/solana-program/scripts/per-trade.ts \
      packages/solana-program/scripts/
 # AND THE TWO FILES ONLY THE TEST SUITE READS, now that the suite runs here too.
 # attestation.rs is the program's own attestation encoder, which

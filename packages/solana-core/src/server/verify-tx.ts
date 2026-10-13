@@ -110,7 +110,7 @@ import { WALLET_GUARD_REFUSALS, checkWalletGuards, readLighthouseGuard } from ".
 import { linkConsentMessage } from "../client/link-consent";
 import type { KeyPrivileges } from "../client/message";
 import { ed25519SignatureValid, readEd25519Verify, type Ed25519Verify } from "./ed25519";
-import { deriveAta, deriveConfigPda, deriveLinkPda, deriveVaultPda } from "./pda";
+import { deriveAta, deriveConfigPda, deriveLinkPda, derivePerTradePda, deriveVaultPda } from "./pda";
 import { MAX_TX_BYTES } from "./relay-policy";
 
 export const VERIFY_REFUSALS = [
@@ -229,6 +229,17 @@ function bindAccounts(
       // vault must be this vault (LinkVaultMismatch). Any other account fails
       // on chain, in simulation, before it is sent. The builder's derivation is
       // checked in builders.test.ts.
+      return null;
+    }
+    case "set_policy_v3": {
+      // THE OWNER'S OWN VAULT AND ITS OWN PerTradePolicy, bound here as well as
+      // by the program's seeds: a relayed set_policy_v3 can name nothing else.
+      const owner = accounts["owner"]!;
+      if (signers.length !== 1) return refuse("signature_count", `set_policy_v3 is signed by its owner alone; the message requires ${signers.length} signers`);
+      if (feePayer !== owner) return refuse("account_binding", "set_policy_v3's owner must be the fee payer");
+      const vault = deriveVaultPda(owner);
+      if (accounts["vault"] !== vault.toBase58()) return refuse("account_binding", "set_policy_v3's vault is not ['vault', owner]");
+      if (accounts["per_trade_policy"] !== derivePerTradePda(vault).toBase58()) return refuse("account_binding", "set_policy_v3's per_trade_policy is not ['per_trade', vault]");
       return null;
     }
     default: {

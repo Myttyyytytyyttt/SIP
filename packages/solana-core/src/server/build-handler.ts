@@ -69,6 +69,7 @@ import {
   U64_MAX,
   defaultInvestPolicy,
   investPolicyProblems,
+  isPerTradeMode,
   vaultPolicyProblems,
   type InvestPolicyInput,
   type VaultPolicyInput,
@@ -135,6 +136,8 @@ export type SolanaBuildErrorCode =
   | "wallet_is_owner"
   | "vault_exists"
   | "vault_missing"
+  /** setPolicy on a vault in a per-trade mode (round-up, fixed): set_policy_v2 would take it out of that mode. `current.mode` names it. */
+  | "per_trade_vault"
   /** The protocol config does not exist yet: link_wallet cannot pass. */
   | "config_missing"
   | "protocol_paused"
@@ -603,6 +606,16 @@ async function setPolicy(fields: Readonly<Record<string, unknown>>, served: Serv
   if (vault.kind === "unreadable") return unreadable(served);
   if (vault.kind === "missing") return served.refuse(409, "vault_missing", "Create your vault first.");
   const stored = vault.value.state;
+  // A PER-TRADE VAULT (round-up, fixed) IS NOT EDITED HERE. This action builds
+  // set_policy_v2, which writes profit or volume and nothing else, so a rule edit
+  // on a vault in mode 2 or 3 would silently take it out of its mode (ADR §5.6:
+  // the web's half of M0). Leaving a per-trade mode is the owner's to choose,
+  // in a flow that says so; this answer refuses and names the mode it found.
+  if (isPerTradeMode(stored.skimMode)) {
+    return served.refuse(409, "per_trade_vault", "This vault saves per trade (round-up or fixed), and this rule edit would switch it to profit or volume. Nothing was built.", {
+      current: { mode: stored.skimMode },
+    });
+  }
   // checked_add in set_policy.rs: at u64 max the program refuses the whole call,
   // so nothing is offered and the answer never quotes a nonce that cannot exist.
   if (stored.policyNonce >= U64_MAX) {

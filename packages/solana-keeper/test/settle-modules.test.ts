@@ -1,17 +1,29 @@
 // Which code settles a vault, chosen by the vault's own on-chain skim_mode
-// (src/settle-modules.ts; ADR §3.2). The job-level proof — a worker's job hands
-// each turn exactly its vault's byte and that module's measurement — is
-// test/worker-job.test.ts's.
+// (src/settle-modules.ts; ADR §3.2, plan §3.4). The job-level proof — a
+// worker's job hands each turn exactly its vault's byte and that module's
+// measurement — is test/worker-job.test.ts's, and the per-trade job end to end
+// in the shadow world is test/per-trade-job.test.ts's.
 
-import { Keypair, PublicKey } from "@solana/web3.js";
+import * as anchor from "@coral-xyz/anchor";
+import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
+import { perTradePolicyAddress } from "../src/accounts.js";
+import { idl } from "../src/idl.js";
+import type { WindowMeasurement } from "../src/measure-window.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook } from "../src/policy-boundary.js";
-import { KEEPER_MODES, MODE_PROFIT_BYTE, MODE_VOLUME_BYTE } from "../src/role-registry.js";
-import { settleModuleFor } from "../src/settle-modules.js";
+import { MemoryPriceTape, type PriceTapeReader } from "../src/price-tape.js";
+import { KEEPER_MODES, MODE_FIXED_BYTE, MODE_PROFIT_BYTE, MODE_ROUNDUP_BYTE, MODE_VOLUME_BYTE } from "../src/role-registry.js";
+import type { PerTradeAnswer } from "../src/settle-decision.js";
+import { servesPerTrade, settleModuleFor, type ModuleJob, type PerTradeServing, type SettleModuleContext } from "../src/settle-modules.js";
+import { perTradePolicyBytes, pythAccount, trade } from "./per-trade-fixtures.js";
 import { vaultOf } from "./settle-world.js";
 
-const context = (mode: number) => ({
+const programId = new PublicKey(idl.address);
+const NOW = 1_800_000_000;
+const ORACLE = Keypair.generate().publicKey;
+
+const context = (mode: number, over: Partial<SettleModuleContext> = {}): SettleModuleContext => ({
   link: {
     linkAddress: Keypair.generate().publicKey,
     wallet: Keypair.generate().publicKey,
@@ -29,33 +41,226 @@ const context = (mode: number) => ({
     },
     transaction: async () => null,
   },
-  nowSeconds: () => 1_700_000_000,
+  nowSeconds: () => NOW,
+  ...over,
+});
+
+/** A connection that answers nothing: PROFIT and VOLUME prepare without a single call. */
+const silent = new Proxy({}, { get: (_t, prop) => (prop === "then" ? undefined : () => Promise.reject(new Error(`unexpected RPC call: ${String(prop)}`))) }) as Connection;
+const refusingProgram = new anchor.Program(idl, new anchor.AnchorProvider(silent, { publicKey: PublicKey.default, signTransaction: async () => Promise.reject(new Error("no")), signAllTransactions: async () => Promise.reject(new Error("no")) }, {}));
+
+const job = (mode: number, connection: Connection = silent, vaultAddress = Keypair.generate().publicKey): ModuleJob => ({
+  connection,
+  program: refusingProgram,
+  vaultAddress,
+  vault: vaultOf(mode),
+});
+
+const serving = (over: Partial<PerTradeServing> = {}): PerTradeServing => ({
+  modes: new Set([MODE_ROUNDUP_BYTE, MODE_FIXED_BYTE]),
+  vaults: "*",
+  live: false,
+  fromSlot: null,
+  tape: new MemoryPriceTape(),
+  oracle: ORACLE,
+  ...over,
 });
 
 describe("settleModuleFor: the vault's byte picks the module", () => {
-  it("PROFIT: the balance-chain module, which adds nothing to the turn — the walk measures it, and its losses are carried", () => {
+  it("PROFIT: the balance-chain module, which reads nothing and adds nothing to the turn — the walk measures it, and its losses are carried", async () => {
     const module = settleModuleFor(MODE_PROFIT_BYTE)!;
     expect(module.mode.byte).toBe(MODE_PROFIT_BYTE);
     expect(module.mode.base).toBe("balance-chain");
     expect(module.mode.carriesLosses).toBe(true);
-    expect(module.turn(context(MODE_PROFIT_BYTE))).toEqual({});
+    expect(module.sends).toBe(true);
+    const prepared = await module.prepare(job(MODE_PROFIT_BYTE));
+    expect(prepared.kind).toBe("ready");
+    expect(prepared.kind === "ready" && prepared.turn(context(MODE_PROFIT_BYTE))).toEqual({});
   });
 
-  it("VOLUME: the trade-notional module — the volume probe and a volume base at the vault's own rate — and no losses", () => {
+  it("VOLUME: the trade-notional module — the volume probe and a volume base at the vault's own rate — no reads, and no losses", async () => {
     const module = settleModuleFor(MODE_VOLUME_BYTE)!;
     expect(module.mode.byte).toBe(MODE_VOLUME_BYTE);
     expect(module.mode.base).toBe("trade-notional");
     expect(module.mode.carriesLosses).toBe(false);
-    const turn = module.turn(context(MODE_VOLUME_BYTE));
+    expect(module.sends).toBe(true);
+    const prepared = await module.prepare(job(MODE_VOLUME_BYTE));
+    if (prepared.kind !== "ready") throw new Error("VOLUME prepares nothing that can fail");
+    const turn = prepared.turn(context(MODE_VOLUME_BYTE));
     expect(turn.volumeProbe).toBe(tradeNotional);
     expect(typeof turn.volumeBase).toBe("function");
+    expect(turn.perTrade).toBeUndefined();
   });
 
   it("a byte no sip-vault version defines has no module: the job then settles it as UNSUPPORTED_MODE", () => {
-    for (const byte of [2, 3, 7, 255, -1, 0.5]) expect(settleModuleFor(byte)).toBeNull();
+    for (const byte of [4, 7, 255, -1, 0.5]) expect(settleModuleFor(byte, { vault: "any", serving: serving() })).toBeNull();
   });
 
-  it("every mode the registry knows has a module — a new KeeperMode row cannot ship without one", () => {
-    for (const mode of Object.values(KEEPER_MODES)) expect(settleModuleFor(mode.byte)?.mode).toBe(mode);
+  it("DARK BY DEFAULT: a per-trade byte has no module unless SIP_SOLANA_EXTRA_MODES serves it for that vault", () => {
+    const vault = Keypair.generate().publicKey.toBase58();
+    for (const byte of [MODE_ROUNDUP_BYTE, MODE_FIXED_BYTE]) {
+      expect(settleModuleFor(byte), "no serving").toBeNull();
+      expect(settleModuleFor(byte, { vault, serving: null }), "serving null").toBeNull();
+      expect(settleModuleFor(byte, { serving: serving() }), "no vault named").toBeNull();
+      expect(settleModuleFor(byte, { vault, serving: serving({ vaults: new Set(["someone-else"]) }) }), "vault not listed").toBeNull();
+      expect(settleModuleFor(byte, { vault, serving: serving({ modes: new Set([byte === MODE_ROUNDUP_BYTE ? MODE_FIXED_BYTE : MODE_ROUNDUP_BYTE]) }) }), "other mode only").toBeNull();
+      expect(settleModuleFor(byte, { vault, serving: serving({ vaults: new Set([vault]) }) })?.mode.byte, "listed").toBe(byte);
+      expect(settleModuleFor(byte, { vault, serving: serving() })?.mode.byte, "every vault").toBe(byte);
+    }
+    expect(servesPerTrade(serving(), MODE_PROFIT_BYTE, "v")).toBe(false);
+  });
+
+  it("a served per-trade module sends only under SIP_SOLANA_EXTRA_MODES_LIVE", () => {
+    expect(settleModuleFor(MODE_ROUNDUP_BYTE, { vault: "v", serving: serving({ live: false }) })?.sends).toBe(false);
+    expect(settleModuleFor(MODE_ROUNDUP_BYTE, { vault: "v", serving: serving({ live: true }) })?.sends).toBe(true);
+  });
+
+  it("every mode the registry knows has a module where it is served — a new KeeperMode row cannot ship without one", () => {
+    for (const mode of Object.values(KEEPER_MODES)) expect(settleModuleFor(mode.byte, { vault: "v", serving: serving() })?.mode).toBe(mode);
+  });
+});
+
+/** A connection that answers getMultipleAccountsInfo from `accounts` and records each request's keys. */
+function accountsConnection(accounts: ReadonlyMap<string, unknown>) {
+  const asked: string[][] = [];
+  const connection = {
+    getMultipleAccountsInfo: async (keys: readonly PublicKey[]) => {
+      asked.push(keys.map((key) => key.toBase58()));
+      return keys.map((key) => accounts.get(key.toBase58()) ?? null);
+    },
+  } as unknown as Connection;
+  return { connection, asked };
+}
+
+describe("the per-trade module's job read", () => {
+  const vaultAddress = Keypair.generate().publicKey;
+  const pda = perTradePolicyAddress(programId, vaultAddress);
+  const policyAccount = (vault = vaultAddress) => ({ data: perTradePolicyBytes({ vault, roundupUnitCents: 200 }), owner: programId, lamports: 1, executable: false, rentEpoch: 0 });
+  const realProgram = (connection: Connection) =>
+    new anchor.Program(idl, new anchor.AnchorProvider(connection, { publicKey: PublicKey.default, signTransaction: async () => Promise.reject(new Error("no")), signAllTransactions: async () => Promise.reject(new Error("no")) }, {}));
+
+  it("ROUND-UP reads its PerTradePolicy and the oracle in ONE request; FIXED its PerTradePolicy alone", async () => {
+    const { connection, asked } = accountsConnection(new Map<string, unknown>([[pda.toBase58(), policyAccount()], [ORACLE.toBase58(), pythAccount({ price: 15_000_000_000n, publishTime: BigInt(NOW) })]]));
+    const roundUp = await settleModuleFor(MODE_ROUNDUP_BYTE, { vault: vaultAddress.toBase58(), serving: serving() })!.prepare({ connection, program: realProgram(connection), vaultAddress, vault: vaultOf(MODE_ROUNDUP_BYTE) });
+    expect(asked).toEqual([[pda.toBase58(), ORACLE.toBase58()]]);
+    if (roundUp.kind !== "ready") throw new Error(roundUp.detail);
+    const turn = roundUp.turn(context(MODE_ROUNDUP_BYTE));
+    expect(turn.volumeProbe).toBe(tradeNotional);
+    expect(turn.perTrade?.policy.roundupUnitCents).toBe(200);
+    expect(turn.perTrade?.oracle?.address.equals(ORACLE)).toBe(true);
+    expect(turn.perTrade?.oracle?.update.price).toBe(15_000_000_000n);
+
+    asked.length = 0;
+    const fixed = await settleModuleFor(MODE_FIXED_BYTE, { vault: vaultAddress.toBase58(), serving: serving() })!.prepare({ connection, program: realProgram(connection), vaultAddress, vault: vaultOf(MODE_FIXED_BYTE) });
+    expect(asked).toEqual([[pda.toBase58()]]);
+    expect(fixed.kind === "ready" && fixed.turn(context(MODE_FIXED_BYTE)).perTrade?.oracle).toBeNull();
+  });
+
+  it("a vault whose PerTradePolicy the read cannot find, or that names another vault, is a RETRY for the job; an oracle it cannot use is no price, not a throw", async () => {
+    const missing = accountsConnection(new Map());
+    expect(await settleModuleFor(MODE_FIXED_BYTE, { vault: "v", serving: serving() })!.prepare({ connection: missing.connection, program: realProgram(missing.connection), vaultAddress, vault: vaultOf(MODE_FIXED_BYTE) })).toMatchObject({
+      kind: "retry",
+      detail: expect.stringContaining("no PerTradePolicy"),
+    });
+    const stranger = accountsConnection(new Map([[pda.toBase58(), policyAccount(Keypair.generate().publicKey)]]));
+    expect(await settleModuleFor(MODE_FIXED_BYTE, { vault: "v", serving: serving() })!.prepare({ connection: stranger.connection, program: realProgram(stranger.connection), vaultAddress, vault: vaultOf(MODE_FIXED_BYTE) })).toMatchObject({
+      kind: "retry",
+      detail: expect.stringContaining("does not name this vault"),
+    });
+    const spoofed = accountsConnection(new Map<string, unknown>([[pda.toBase58(), policyAccount()], [ORACLE.toBase58(), pythAccount({ price: 15_000_000_000n, publishTime: BigInt(NOW) }, Keypair.generate().publicKey)]]));
+    const prepared = await settleModuleFor(MODE_ROUNDUP_BYTE, { vault: "v", serving: serving() })!.prepare({ connection: spoofed.connection, program: realProgram(spoofed.connection), vaultAddress, vault: vaultOf(MODE_ROUNDUP_BYTE) });
+    expect(prepared.kind === "ready" && prepared.turn(context(MODE_ROUNDUP_BYTE)).perTrade?.oracle).toBeNull();
+  });
+
+  it("refuses to prepare for a vault in another mode", async () => {
+    await expect(settleModuleFor(MODE_ROUNDUP_BYTE, { vault: "v", serving: serving() })!.prepare(job(MODE_FIXED_BYTE))).rejects.toThrow(/skim_mode 3/);
+  });
+});
+
+describe("the per-trade seam", () => {
+  const vaultAddress = Keypair.generate().publicKey;
+  const pda = perTradePolicyAddress(programId, vaultAddress);
+  const measured = (trades: WindowMeasurement["volumeTrades"]): WindowMeasurement => ({
+    txCount: trades?.length ?? 0,
+    settleTxCount: 0,
+    walletSignedTxCount: trades?.length ?? 0,
+    successfulTradeCount: trades?.length ?? 0,
+    tradedLamports: 0n,
+    chainBreaks: 0,
+    unfetchable: 0,
+    cashDelta: 0n,
+    deposits: 0n,
+    withdrawals: 0n,
+    profitLamports: 0n,
+    firstSlot: 1n,
+    lastSlot: 900n,
+    signaturesAbove: 1,
+    newestSignature: null,
+    frontierReached: true,
+    pagesExhausted: false,
+    prefixCut: false,
+    fetched: 1,
+    ...(trades === undefined ? {} : { volumeTrades: trades }),
+  });
+  const boundaryAt = (slot: bigint | null) => ({ boundary: async () => ({ slot, detail: "stub" }) }) as unknown as PolicyBoundaryBook;
+  async function seamFor(mode: number, over: { readonly serving?: Partial<PerTradeServing>; readonly boundaries?: PolicyBoundaryBook; readonly oracle?: unknown | null } = {}) {
+    const accounts = new Map<string, unknown>([[pda.toBase58(), { data: perTradePolicyBytes({ vault: vaultAddress }), owner: programId, lamports: 1, executable: false, rentEpoch: 0 }]]);
+    const oracle = over.oracle === undefined ? pythAccount({ price: 15_000_000_000n, publishTime: BigInt(NOW) }) : over.oracle;
+    if (oracle !== null) accounts.set(ORACLE.toBase58(), oracle);
+    const { connection } = accountsConnection(accounts);
+    const program = new anchor.Program(idl, new anchor.AnchorProvider(connection, { publicKey: PublicKey.default, signTransaction: async () => Promise.reject(new Error("no")), signAllTransactions: async () => Promise.reject(new Error("no")) }, {}));
+    const prepared = await settleModuleFor(mode, { vault: vaultAddress.toBase58(), serving: serving(over.serving) })!.prepare({ connection, program, vaultAddress, vault: vaultOf(mode) });
+    if (prepared.kind !== "ready") throw new Error(prepared.detail);
+    return prepared.turn(context(mode, { boundaries: over.boundaries ?? boundaryAt(null) })).perTrade!.base;
+  }
+  const charged = (answer: PerTradeAnswer) => {
+    if (answer.kind !== "charge") throw new Error(answer.detail);
+    return answer.charge;
+  };
+
+  it("prices each trade at the tape's sample, late at the job's Pyth read where the tape has none", async () => {
+    const tape = new MemoryPriceTape();
+    await tape.record({ publishTime: NOW - 600, slot: 1n, priceE6: 140_000_000n, confE6: 0n });
+    const seam = await seamFor(MODE_ROUNDUP_BYTE, { serving: { tape } });
+    const charge = charged(await seam(measured([trade("t", 100, 10_000_000n, NOW - 590), trade("late", 101, 10_000_000n, NOW - 100)])));
+    expect(charge.rows.map((row) => [row.priceSource, row.priceUsdE6])).toEqual([
+      ["tape", 140_000_000n],
+      ["late", 150_000_000n],
+    ]);
+    expect(charge.latePriced).toBe(1);
+    expect(charge.priceMinUsdE6).toBe(140_000_000n);
+  });
+
+  it("per-trade-from-slot: a vault switched to mode 2 weeks before serving began is charged only for trades after SIP_SOLANA_EXTRA_MODES_FROM_SLOT", async () => {
+    // The owner's switch (the policy boundary) is at slot 50; serving widened at slot 500.
+    const seam = await seamFor(MODE_ROUNDUP_BYTE, { serving: { fromSlot: 500n }, boundaries: boundaryAt(50n) });
+    const charge = charged(await seam(measured([trade("weeks-ago", 60, 10_000_000n, NOW - 9_000), trade("at-serving", 500, 10_000_000n, NOW - 200), trade("after", 501, 10_000_000n, NOW - 100)])));
+    expect(charge.rows.map((row) => row.status)).toEqual(["forgiven", "forgiven", "charged"]);
+    expect(charge.tradeCount).toBe(1);
+    // And a later policy boundary wins over an earlier serving slot.
+    const later = await seamFor(MODE_FIXED_BYTE, { serving: { fromSlot: 10n }, boundaries: boundaryAt(500n) });
+    expect(charged(await later(measured([trade("a", 400, 20_000_000n, NOW), trade("b", 600, 20_000_000n, NOW)]))).tradeCount).toBe(1);
+  });
+
+  it("waits on the clock for a small span, and says until when", async () => {
+    const seam = await seamFor(MODE_FIXED_BYTE);
+    const answer = await seam(measured([trade("one", 100, 20_000_000n, NOW - 60)]));
+    expect(answer).toMatchObject({ kind: "charge", wait: { dueAt: NOW - 60 + 3_600 } });
+    const old = await seam(measured([trade("old", 100, 20_000_000n, NOW - 3_600)]));
+    expect(old).toMatchObject({ kind: "charge", wait: null });
+  });
+
+  it("is a RETRY, never a guess, when the tape, the owner's history or the price cannot be read", async () => {
+    const broken: PriceTapeReader = { pricesAt: async () => Promise.reject(new Error("connection refused")) };
+    expect(await (await seamFor(MODE_ROUNDUP_BYTE, { serving: { tape: broken } }))(measured([trade("x", 100, 10_000_000n, NOW)]))).toMatchObject({ kind: "retry", detail: expect.stringContaining("price tape") });
+    const unwalkable = { boundary: async () => Promise.reject(new Error("429")) } as unknown as PolicyBoundaryBook;
+    expect(await (await seamFor(MODE_FIXED_BYTE, { boundaries: unwalkable }))(measured([trade("x", 100, 20_000_000n, NOW)]))).toMatchObject({ kind: "retry", detail: expect.stringContaining("policy history") });
+    expect(await (await seamFor(MODE_ROUNDUP_BYTE, { oracle: null }))(measured([]))).toMatchObject({ kind: "retry", detail: expect.stringContaining("Pyth") });
+    // FIXED needs no price at all.
+    expect(await (await seamFor(MODE_FIXED_BYTE, { oracle: null }))(measured([]))).toMatchObject({ kind: "charge" });
+  });
+
+  it("throws when the walk carries no volume trades: the turn was built without the probe", async () => {
+    await expect((await seamFor(MODE_FIXED_BYTE))(measured(undefined))).rejects.toThrow(/volume probe/);
   });
 });

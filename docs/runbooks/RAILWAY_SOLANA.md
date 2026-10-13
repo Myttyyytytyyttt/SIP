@@ -750,6 +750,11 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   | `SIP_SOLANA_ARCHIVAL_CREDITS` | scheduler | `1` o `10`: lo que cuesta una llamada de archivo (4.1) | `1` |
   | `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` | scheduler, y el worker con `jupiter-key` | las llamadas a Jupiter por minuto de la organización, que el scheduler reparte | 30 (sin clave) |
   | `SIP_SOLANA_CUTS` | los dos | los que actúan en el scheduler: `gpa-v2`, `lamports-filter`; en el worker: `rest-skip`, `invest-batch`, `jupiter-key` | ninguno |
+  | `SIP_SOLANA_PRICE_TAPE` | scheduler | `off` u `on`: apunta el precio SOL/USD de Pyth una vez por tick en `sol_price_tape` (10.7) | `off` |
+  | `SIP_SOLANA_EXTRA_MODES` | worker | `roundup`, `fixed` o los dos: los modos por operación que cobra (10.7) | ninguno |
+  | `SIP_SOLANA_EXTRA_MODES_VAULTS` | worker, **obligatoria** con la anterior | las direcciones de vault, separadas por comas, o `*` | — |
+  | `SIP_SOLANA_EXTRA_MODES_LIVE` | worker | `0` o `1`: con `0` esos vaults se miden en seco aunque el worker esté en `on` | `0` |
+  | `SIP_SOLANA_EXTRA_MODES_FROM_SLOT` | worker, **obligatoria** con `LIVE=1` | el slot desde el que se cobra: lo anterior se perdona | ninguno |
 
   **El scheduler no arranca** si tiene `SIP_SOLANA_BROADCAST`, `SIP_SOLANA_ALLOW_BROADCAST`, cualquier secreto de firma,
   `SIP_SOLANA_JUPITER_API_KEY` o `SIP_SOLANA_ROLE`: es la réplica pública y no lleva ninguna llave. **Un worker en
@@ -876,6 +881,21 @@ Primero lo de 4.1 (el timbre sordo es la causa conocida de las pasadas completas
   **de uno en uno**;
   el precio real de la llamada de archivo cuando lo diga la Admin API (decisión O8); y el tope del autoescalado de Helius.
   En el scheduler son `SIP_SOLANA_PLAN_RPS`, `SIP_SOLANA_PLAN_CREDITS_MONTH` y `SIP_SOLANA_ARCHIVAL_CREDITS` (10.1).
+
+### 10.7 Los modos por operación (redondeo y fijo) — **NO SE PUEDEN USAR HASTA ACTUALIZAR EL PROGRAMA**
+
+Solo el programa nuevo (`set_policy_v3`, `settle_v3`) tiene vaults en modo 2 (redondeo) o 3 (fijo). Mientras no se
+actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (`UNSUPPORTED_MODE`) sin gastar una llamada.
+
+- **Primero la cinta de precios**, en el scheduler: `SIP_SOLANA_PRICE_TAPE=on`. Lee la cuenta SOL/USD de Pyth en la misma
+  petición del tick (cero llamadas de más) y guarda una fila por publicación (35 días). El `/status` del scheduler lo
+  enseña en `priceTape`. Necesita la tabla `sol_price_tape`: aplica `sql/sip_solana.sql` con `setup-read-model` antes.
+- **Luego, el worker**: `SIP_SOLANA_EXTRA_MODES=roundup,fixed` y `SIP_SOLANA_EXTRA_MODES_VAULTS=<el vault de prueba>`,
+  con `SIP_SOLANA_EXTRA_MODES_LIVE=0`: el worker mide y anota cada operación (en la línea "job done", `perTrade`) y no
+  envía nada (M4). Para cobrar de verdad (M5): `SIP_SOLANA_EXTRA_MODES_FROM_SLOT=<el slot de ahora>` y `LIVE=1`.
+- **El vault tiene que estar en la cola** (`vault_work.system = queue`, 10.4): la lista de vaults solo dice qué modos
+  puede cobrar el worker que ya lo tiene.
+- **Volver atrás**: quitar `SIP_SOLANA_EXTRA_MODES` (o poner `LIVE=0`). El vault queda en reposo y nada se pierde.
 
 ## Si algo falla
 

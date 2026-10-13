@@ -14,6 +14,11 @@
 //   SIP_SOLANA_DISPATCH=on       armed; every settle, wrap, convert and leg gated
 //                                before it leaves (F1), PROFIT carries in the gate.
 //
+// THE PER-TRADE MODES (ROUND-UP, FIXED: ADR §5, plan §3.4) are served only under
+// SIP_SOLANA_EXTRA_MODES and its vault list (src/worker-config.ts), dry in the
+// live world until SIP_SOLANA_EXTRA_MODES_LIVE=1, priced from the scheduler's
+// price tape. Unset, a per-trade vault rests at UNSUPPORTED_MODE, as before.
+//
 // WHAT IT BUILDS, ONCE (the merge notes of P3a-1): the worker's two-connection
 // pool and its store (createDispatchPool, DispatchStore), its RPC budget inside
 // the pool's transport (RpcBudget, at the static floor until the scheduler hands
@@ -46,6 +51,10 @@ import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
 import { createKeeperLogger } from "../src/keeper-log.js";
 import { WalkCache, readTransaction } from "../src/measure-window.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
+import { PgPriceTape, missingTapeColumns } from "../src/price-tape.js";
+import { PYTH_SOL_USD_FEED } from "../src/pyth.js";
+import { MODE_ROUNDUP_BYTE } from "../src/role-registry.js";
+import type { PerTradeServing } from "../src/settle-modules.js";
 import { runPreflight } from "../src/preflight.js";
 import { PrivyAddressBook, confirmedSubmitter } from "../src/privy-address-book.js";
 import { createPrivySolanaSigner, privyAddressSource, seatsSignable, type PrivySolanaConfig, type SolanaWalletSubmitter } from "../src/privy-signer.js";
@@ -128,6 +137,26 @@ const pool = createDispatchPool(config.databaseUrl!, "worker", workerId.slice(0,
 const store = new DispatchStore(pool, workerId, world);
 const history = SolanaReadModel.overPool(pool, (message, extra) => log.warn(message, fields(extra ?? {})));
 
+// ── the per-trade modes: none unless SIP_SOLANA_EXTRA_MODES names them ───────
+// A worker that prices ROUND-UP trades needs the tape's table, refused by name at
+// boot rather than met as a RETRY on every round-up turn.
+if (settings.extraModes?.modes.has(MODE_ROUNDUP_BYTE) === true) {
+  let missingTape: string[];
+  try {
+    missingTape = await missingTapeColumns(pool);
+  } catch (error) {
+    log.error("worker: the database could not be asked at boot", fields({ detail: summarizeUpstreamError(error) }));
+    await pool.end().catch(() => undefined);
+    process.exit(1);
+  }
+  if (missingTape.length > 0) {
+    log.error("worker: SIP_SOLANA_EXTRA_MODES serves roundup and the price tape's table is not in this database; apply sql/sip_solana.sql with setup-read-model", fields({ missing: missingTape }));
+    process.exit(2);
+  }
+}
+const perTrade: PerTradeServing | null =
+  settings.extraModes === null ? null : { ...settings.extraModes, tape: new PgPriceTape(pool), oracle: PYTH_SOL_USD_FEED };
+
 // ── the RPC budget: the floor until the scheduler hands out a quota ──────────
 const collector = new RpcUsageCollector({ workerId });
 const jupiterKey = config.cuts.has("jupiter-key");
@@ -209,6 +238,7 @@ const shared: JobShared = {
   jupiter,
   investBatch: config.cuts.has("invest-batch"),
   carryReads: workerCarryReads(new PgCarryStore(pool, workerId)),
+  perTrade,
 };
 /** The keeper the last job's config named: read in the same request as the next job's vault. */
 let crankHint: PublicKey | null = null;
@@ -258,6 +288,15 @@ log.info("worker starting", fields({
   cuts: [...config.cuts].sort(),
   program: programId.toBase58(),
   keys: keys === null ? "none (shadow: dry, keyless)" : "settle key and wallet signers",
+  extraModes:
+    settings.extraModes === null
+      ? "off"
+      : {
+          modes: [...settings.extraModes.modes].sort(),
+          vaults: settings.extraModes.vaults === "*" ? "*" : settings.extraModes.vaults.size,
+          live: settings.extraModes.live,
+          fromSlot: settings.extraModes.fromSlot?.toString() ?? null,
+        },
 }));
 
 let stopping = false;

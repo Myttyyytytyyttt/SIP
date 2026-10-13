@@ -28,9 +28,20 @@
 // forgives the whole span this turn: both charge less, never more. A transaction it
 // cannot READ is different: the answer would be a guess, so it throws, and nothing
 // is attested this turn.
+//
+// set_policy_v3 IS A POLICY WRITER TOO (ADR §5.5, §5.6; RT-5), decoded at its own
+// offsets, top-level and inner alike. It is the only door into the per-trade
+// modes, so without it a vault switched VOLUME → ROUND-UP → VOLUME would look,
+// to this walk, like a VOLUME vault that never changed, and the volume rate would
+// charge every trade made under round-up. For a per-trade vault the rule is its
+// mode and its four per-trade parameters — the unit, F and both minimums — so a
+// change of any of them is a boundary; the daily cap, the caps and the pause are
+// not, as for set_policy_v2. On the program mainnet runs today no set_policy_v3
+// can succeed, and a failed transaction writes nothing here.
 
 import type { Finality, PublicKey, VersionedTransactionResponse } from "@solana/web3.js";
 import { idl } from "./idl.js";
+import { isPerTradeMode } from "./role-registry.js";
 
 /** What the walk reads: the owner's signatures and one transaction at a time. */
 export interface OwnerHistoryReader {
@@ -53,11 +64,46 @@ export const OWNER_PAGE_LIMIT = 1_000;
 /** Pages of the owner's history read before giving up: 5 000 signatures. */
 export const MAX_OWNER_PAGES = 5;
 
-/** One policy the owner wrote: the mode and volume rate, or null for a change this walk could not decode. */
+/** A per-trade vault's own rule: what set_policy_v3 writes that a span is charged by. */
+export interface PerTradeRule {
+  readonly unitCents: number;
+  readonly fixedLamports: number;
+  readonly minTradeCents: number;
+  readonly minTradeLamports: number;
+}
+
+/**
+ * A policy as this walk compares it: the mode, and the volume rate a v2 write
+ * set or the per-trade parameters a set_policy_v3 write set. A v3 write leaves
+ * volume_bps alone and says nothing about it; a v2 write cannot write a
+ * per-trade mode (validate_policy refuses one).
+ */
+export interface PolicyRule {
+  readonly mode: number;
+  readonly volumeBps?: number;
+  readonly perTrade?: PerTradeRule;
+}
+
+/** One policy the owner wrote, or null for a change this walk could not decode. */
 export interface PolicyWrite {
   readonly slot: bigint;
   readonly signature: string;
-  readonly rule: { readonly mode: number; readonly volumeBps: number } | null;
+  readonly rule: PolicyRule | null;
+}
+
+/**
+ * Whether two rules charge a span alike: the same mode, and — for PROFIT and
+ * VOLUME — the same volume rate, exactly the comparison this walk always made;
+ * for a per-trade mode, the same four parameters. A per-trade rule whose
+ * parameters are unknown is never the same as anything.
+ */
+export function sameRule(a: PolicyRule, b: PolicyRule): boolean {
+  if (a.mode !== b.mode) return false;
+  if (!isPerTradeMode(a.mode)) return a.volumeBps === b.volumeBps;
+  const x = a.perTrade;
+  const y = b.perTrade;
+  if (x === undefined || y === undefined) return false;
+  return x.unitCents === y.unitCents && x.fixedLamports === y.fixedLamports && x.minTradeCents === y.minTradeCents && x.minTradeLamports === y.minTradeLamports;
 }
 
 export interface PolicyBoundary {
@@ -73,6 +119,13 @@ const discriminatorOf = (name: string): Buffer => {
 };
 /** Both write the rule at the same offsets: mode u8 at 8, skim_bps u16 at 9, volume_bps u16 at 11. */
 const POLICY_WRITERS = [discriminatorOf("set_policy_v2"), discriminatorOf("create_vault_v2")];
+/**
+ * set_policy_v3's own offsets (ADR §5.4): mode u8 at 8, roundup_unit_cents u16 at
+ * 9, fixed_lamports u32 at 11, min_trade_cents u16 at 15, min_trade_lamports u32
+ * at 17, then the caps and the pause, 46 bytes in all.
+ */
+const SET_POLICY_V3 = discriminatorOf("set_policy_v3");
+const SET_POLICY_V3_BYTES = 46;
 /** The vault is account 1 of both: [owner, vault, …]. */
 const VAULT_ACCOUNT = 1;
 
@@ -90,10 +143,31 @@ export function policyWrites(tx: VersionedTransactionResponse, programId: string
     if (keys.get(ix.programIdIndex)?.toBase58() !== programId) continue;
     const data = Buffer.from(ix.data);
     const writer = POLICY_WRITERS.some((disc) => data.length >= 13 && data.subarray(0, 8).equals(disc));
-    if (!writer) continue;
+    const v3 = data.length >= 8 && data.subarray(0, 8).equals(SET_POLICY_V3);
+    if (!writer && !v3) continue;
     const named = ix.accountKeyIndexes[VAULT_ACCOUNT];
     if (named === undefined || !keys.get(named)?.equals(vault)) continue;
-    writes.push({ slot, signature, rule: { mode: data.readUInt8(8), volumeBps: data.readUInt16LE(11) } });
+    if (writer) {
+      writes.push({ slot, signature, rule: { mode: data.readUInt8(8), volumeBps: data.readUInt16LE(11) } });
+      continue;
+    }
+    // A v3 WRITE TOO SHORT TO READ is a change of unknown content: a boundary.
+    writes.push({
+      slot,
+      signature,
+      rule:
+        data.length < SET_POLICY_V3_BYTES
+          ? null
+          : {
+              mode: data.readUInt8(8),
+              perTrade: {
+                unitCents: data.readUInt16LE(9),
+                fixedLamports: data.readUInt32LE(11),
+                minTradeCents: data.readUInt16LE(15),
+                minTradeLamports: data.readUInt32LE(17),
+              },
+            },
+    });
   }
   // THE PROGRAM REACHED THROUGH ANOTHER PROGRAM. Its data is base58 here and this
   // walk does not decode it, so an inner sip-vault instruction that names the
@@ -127,8 +201,11 @@ export async function findPolicyBoundary(args: {
   readonly vault: PublicKey;
   readonly owner: PublicKey;
   readonly from: bigint;
-  /** The vault's mode and volume rate as this turn read them. */
-  readonly current: { readonly mode: number; readonly volumeBps: number };
+  /**
+   * The vault's mode and volume rate as this turn read them, and — for a
+   * per-trade vault — its PerTradePolicy's four parameters.
+   */
+  readonly current: { readonly mode: number; readonly volumeBps: number; readonly perTrade?: PerTradeRule };
   /**
    * Writes already decoded, by signature (PolicyBoundaryBook): a landed
    * transaction's writes never change, so each is read at most once.
@@ -198,7 +275,7 @@ export async function findPolicyBoundary(args: {
   }
 
   const ends = above.length > 0 ? above[0]!.rule : (startRule ?? null);
-  if (ends === null || ends.mode !== current.mode || ends.volumeBps !== current.volumeBps) {
+  if (ends === null || !sameRule(ends, current)) {
     return {
       slot: FORGIVE_ALL_SLOT,
       verified: false,
@@ -214,7 +291,7 @@ export async function findPolicyBoundary(args: {
   let rule: PolicyWrite["rule"] = startRule ?? null;
   let boundary: PolicyWrite | null = null;
   for (const write of [...above].reverse()) {
-    const changed = rule === null || write.rule === null || write.rule.mode !== rule.mode || write.rule.volumeBps !== rule.volumeBps;
+    const changed = rule === null || write.rule === null || !sameRule(write.rule, rule);
     if (changed) boundary = write;
     rule = write.rule;
   }
@@ -224,7 +301,9 @@ export async function findPolicyBoundary(args: {
   return {
     slot: boundary.slot,
     verified: true,
-    detail: `the owner changed the mode or the volume rate at slot ${boundary.slot} (${boundary.signature}); trades at or before it are not charged`,
+    detail: isPerTradeMode(current.mode)
+      ? `the owner changed the mode or its per-trade rule at slot ${boundary.slot} (${boundary.signature}); trades at or before it are not charged`
+      : `the owner changed the mode or the volume rate at slot ${boundary.slot} (${boundary.signature}); trades at or before it are not charged`,
   };
 }
 
@@ -243,7 +322,10 @@ export class PolicyBoundaryBook {
     const [newest] = await args.reader.signatures(args.owner, { limit: 1 }, POLICY_WALK_COMMITMENT);
     // THE RULE THE VAULT HOLDS IS IN THE KEY: a policy write the history had not
     // shown yet changes the vault first, and must not be answered from before it.
-    const key = `${args.from}:${newest?.signature ?? "none"}:${args.current.mode}:${args.current.volumeBps}`;
+    const perTrade = args.current.perTrade;
+    const key =
+      `${args.from}:${newest?.signature ?? "none"}:${args.current.mode}:${args.current.volumeBps}` +
+      (perTrade === undefined ? "" : `:${perTrade.unitCents}:${perTrade.fixedLamports}:${perTrade.minTradeCents}:${perTrade.minTradeLamports}`);
     const vault = args.vault.toBase58();
     const cached = this.#byVault.get(vault);
     if (cached !== undefined && cached.key === key) return cached.boundary;

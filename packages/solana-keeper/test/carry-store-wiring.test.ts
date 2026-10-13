@@ -70,11 +70,14 @@ describe("the settle turn's two call sites", () => {
 
   it("writes the carry before the send, never after it, on every path", () => {
     const write = tick.indexOf("deps.carryStore.recordCarry(");
-    const send = tick.indexOf("signature = await connection.sendRawTransaction(");
-    const privy = tick.indexOf("signature = await walletSigner.submit(");
+    // BOTH ROUTES LEAVE THROUGH ONE HELPER (sendSettle, shared with settle_v3's
+    // path), and settle_v2's turn calls it only after the write.
+    const send = tick.indexOf("signature = await sendSettle(");
     expect(write).toBeGreaterThan(-1);
     expect(send).toBeGreaterThan(write);
-    expect(privy).toBeGreaterThan(write);
+    const helper = tick.slice(tick.indexOf("async function sendSettle("));
+    expect(helper).toContain("connection.sendRawTransaction(");
+    expect(helper).toContain("walletSigner.submit(");
   });
 });
 

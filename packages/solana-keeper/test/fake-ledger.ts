@@ -38,7 +38,18 @@ export interface LedgerEntry {
   readonly walletThroughLookup?: boolean;
   /** A legacy message instead of a v0 one. */
   readonly legacy?: boolean;
+  /** The block's unix time; absent, the node gave none (null), as every entry before the per-trade modes. */
+  readonly blockTime?: number;
+  /**
+   * A token account the wallet owns, moving opposite to its SOL: what makes the
+   * volume probe count the entry as a trade (measure-volume.ts). Absent, the
+   * transaction moves no token, as every entry before the per-trade modes.
+   */
+  readonly token?: { readonly mint: string; readonly pre: bigint; readonly post: bigint };
 }
+
+/** The token account a `token` entry moves: a fixed unsigned, writable key after the wallet. */
+const TOKEN_ACCOUNT = new PublicKey(Buffer.alloc(32, 9));
 
 export class FakeLedger implements LedgerReader {
   readonly signatureCalls: { readonly before?: string; readonly limit: number; readonly commitment: Finality }[] = [];
@@ -95,7 +106,8 @@ export class FakeLedger implements LedgerReader {
     }
     // The signers, then the wallet when it is an unsigned static key, then the
     // programs, read-only and unsigned. A looked-up key follows every static one.
-    const staticAccountKeys = [...signers, ...(walletSigns || throughLookup ? [] : [this.wallet]), ...programs];
+    const tokenKeys = entry.token === undefined ? [] : [TOKEN_ACCOUNT];
+    const staticAccountKeys = [...signers, ...(walletSigns || throughLookup ? [] : [this.wallet]), ...tokenKeys, ...programs];
     const accountKeys = throughLookup ? [...staticAccountKeys, this.wallet] : staticAccountKeys;
     const walletIndex = accountKeys.findIndex((key) => key.equals(this.wallet));
     const firstProgram = staticAccountKeys.length - programs.length;
@@ -118,10 +130,15 @@ export class FakeLedger implements LedgerReader {
           });
     // The wallet's balances at its own index; every other account holds one lamport throughout.
     const balances = (lamports: number) => accountKeys.map((key) => (key.equals(this.wallet) ? lamports : 1));
+    const tokenIndex = accountKeys.findIndex((key) => key.equals(TOKEN_ACCOUNT));
+    const tokenBalance = (amount: bigint) =>
+      entry.token === undefined
+        ? []
+        : [{ accountIndex: tokenIndex, mint: entry.token.mint, owner: this.wallet.toBase58(), uiTokenAmount: { amount: amount.toString(), decimals: 6, uiAmount: null, uiAmountString: "" } }];
     return {
       slot: entry.slot,
       version: entry.legacy === true ? "legacy" : 0,
-      blockTime: null,
+      blockTime: entry.blockTime ?? null,
       transaction: { message, signatures: signers.map((_, i) => (i === 0 ? entry.signature : `${entry.signature}:${i}`)) },
       meta: {
         err: entry.err ?? null,
@@ -131,6 +148,7 @@ export class FakeLedger implements LedgerReader {
         innerInstructions: [],
         loadedAddresses: { writable: throughLookup ? [this.wallet] : [], readonly: [] },
         logMessages: [],
+        ...(entry.token === undefined ? {} : { preTokenBalances: tokenBalance(entry.token.pre), postTokenBalances: tokenBalance(entry.token.post) }),
       },
     };
   }

@@ -53,9 +53,28 @@ import { SIP_PROGRAM_ID, idlInstruction, type OwnerInstructionName } from "../cl
 import { linkConsentMessage } from "../client/link-consent";
 import { encodeSetComputeUnitLimit, encodeSetComputeUnitPrice } from "../client/message";
 import type { ComputeBudget } from "../client/product";
-import { U64_MAX, investPolicyProblems, vaultPolicyProblems, type InvestLegInput, type VaultPolicyInput } from "../client/rules";
+import {
+  U64_MAX,
+  investPolicyProblems,
+  perTradePolicyProblems,
+  vaultPolicyProblems,
+  type InvestLegInput,
+  type PerTradePolicyInput,
+  type VaultPolicyInput,
+} from "../client/rules";
 import { ED25519_SIGNATURE_BYTES, ed25519SignatureValid, encodeEd25519Verify } from "./ed25519";
-import { InvalidKeyError, SIP_PROGRAM_KEY, deriveAta, deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda, toPublicKey, type KeyLike } from "./pda";
+import {
+  InvalidKeyError,
+  SIP_PROGRAM_KEY,
+  deriveAta,
+  deriveConfigPda,
+  deriveInvestPda,
+  deriveLinkPda,
+  derivePerTradePda,
+  deriveVaultPda,
+  toPublicKey,
+  type KeyLike,
+} from "./pda";
 import { MAX_COMPUTE_UNIT_LIMIT, MAX_COMPUTE_UNIT_PRICE_MICROLAMPORTS, MAX_VAULT_TOKEN_ACCOUNT_CREATES } from "./verify-tx";
 
 export class BuildError extends Error {
@@ -283,6 +302,42 @@ export function buildSetPolicyV2(input: SetPolicyV2Input): BuiltTransaction {
   };
   const instruction = sipInstruction("set_policy_v2", { owner, vault }, args);
   return compile("set_policy_v2", [instruction], owner, [owner], input, vault);
+}
+
+export interface SetPolicyV3Input extends PerTradePolicyInput, OwnerTxOptions {
+  readonly owner: KeyLike;
+  readonly paused: boolean;
+}
+
+/**
+ * set_policy_v3(mode, roundup_unit_cents, fixed_lamports, min_trade_cents,
+ * min_trade_lamports, daily_cap_lamports, max_contribution, wallet_reserve,
+ * paused): the owner signs and pays, and creates the vault's PerTradePolicy
+ * the first time (init_if_needed, the PDA's rent from the owner). The only way
+ * into ROUND-UP or FIXED; out again is set_policy_v2 with mode 0 or 1. A new
+ * saver signs create_vault_v2 (mode 0) and this in one transaction.
+ */
+export function buildSetPolicyV3(input: SetPolicyV3Input): BuiltTransaction {
+  const owner = key(input.owner, "owner");
+  if (typeof input.paused !== "boolean") throw new BuildError(["paused must be a boolean"]);
+  requireProblems(perTradePolicyProblems(input));
+  const vault = deriveVaultPda(owner);
+  const instruction = sipInstruction(
+    "set_policy_v3",
+    { owner, vault, per_trade_policy: derivePerTradePda(vault) },
+    {
+      mode: input.mode,
+      roundup_unit_cents: input.roundupUnitCents,
+      fixed_lamports: input.fixedLamports,
+      min_trade_cents: input.minTradeCents,
+      min_trade_lamports: input.minTradeLamports,
+      daily_cap_lamports: input.dailyCapLamports,
+      max_contribution: input.maxContribution,
+      wallet_reserve: input.walletReserve,
+      paused: input.paused,
+    },
+  );
+  return compile("set_policy_v3", [instruction], owner, [owner], input, vault);
 }
 
 export interface LinkWalletConsentInput {

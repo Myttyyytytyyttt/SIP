@@ -62,6 +62,7 @@ import { WebhookSync, createHeliusWebhookClient } from "../src/helius-webhooks.j
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { SolanaReadModel } from "../src/read-model.js";
+import { PgPriceTape, TapeSampler, missingTapeColumns } from "../src/price-tape.js";
 import { RpcBudget } from "../src/rpc-budget.js";
 import { poolFetch } from "../src/rpc-pool.js";
 import { fleetQuotas } from "../src/rpc-quota.js";
@@ -162,6 +163,8 @@ const chain = createSchedulerChain({
   discriminator: accountDiscriminator("TradingLink"),
   gpaV2: config.cuts.has("gpa-v2"),
   rpc: trackedFetch,
+  // SIP_SOLANA_PRICE_TAPE: the SOL/USD account rides in the snapshot's first request.
+  priceTape: config.priceTape,
 });
 
 // ── Postgres ─────────────────────────────────────────────────────────────────
@@ -178,7 +181,7 @@ const usageFeed = new PgRpcUsageFeed(pool);
 // with exit 1: Railway's ON_FAILURE tries again, which is right for an outage.
 let missing: string[];
 try {
-  missing = [...(await missingFleetColumns(pool)), ...(await missingSchedulerColumns(pool))];
+  missing = [...(await missingFleetColumns(pool)), ...(await missingSchedulerColumns(pool)), ...(config.priceTape ? await missingTapeColumns(pool) : [])];
   if (missing.length === 0) await store.registerProcess("scheduler", version, 0);
 } catch (error) {
   log.error("scheduler: the database could not be asked at boot", { detail: summarizeUpstreamError(error) });
@@ -283,6 +286,8 @@ const scheduler = new Scheduler({
   doorbellSecret: base.doorbellSecret !== null,
   webhook,
   progress,
+  // SIP_SOLANA_PRICE_TAPE=on: one SOL/USD sample a tick into sip_solana.sol_price_tape. Off: none.
+  tape: config.priceTape ? new TapeSampler(new PgPriceTape(pool)) : null,
 });
 
 const reader = new FleetStatusReader({
@@ -365,6 +370,7 @@ log.info("scheduler starting", {
   workersMax: config.workersMax,
   doorbell: base.doorbellSecret === null ? "off — no bell can reach this replica" : "on — the receiver writes bells to Postgres",
   webhook: webhookSync === null ? "not managed here" : "managed by the lock holder while fleet.webhook_owner is 'scheduler'",
+  priceTape: config.priceTape ? "on — the lock holder samples SOL/USD into sip_solana.sol_price_tape every tick" : "off",
 });
 
 let stopping = false;

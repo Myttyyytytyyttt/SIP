@@ -1,9 +1,9 @@
-// The four modules the keeper shares with @sip/solana-program, unwrapped once.
+// The five modules the keeper shares with @sip/solana-program, unwrapped once.
 //
 // SHARED, NOT COPIED. Nuvem's keeper imported ../../scripts relatively from
 // inside the lab; SIP's lives in its own package and takes the attestation
-// mirror, the live route reader, the Raydium swap builder and the Jupiter
-// route builder through @sip/solana-program's `exports`. The attestation bytes in particular must be
+// mirror, the live route reader, the Raydium swap builder, the Jupiter
+// route builder and the per-trade arithmetic through @sip/solana-program's `exports`. The attestation bytes in particular must be
 // the program's own mirror — the one pinned to attestation.rs by a golden
 // vector — never a second copy that can drift and sign bytes nothing verifies.
 //
@@ -38,9 +38,11 @@
 import * as attestationModule from "@sip/solana-program/attestation";
 import * as jupiterRouteModule from "@sip/solana-program/jupiter-route";
 import * as liveRouteModule from "@sip/solana-program/live-route";
+import * as perTradeModule from "@sip/solana-program/per-trade";
 import * as raydiumSwapModule from "@sip/solana-program/raydium-swap";
 
-export type { AttestationInputs } from "@sip/solana-program/attestation";
+export type { AttestationInputs, AttestationV3Inputs } from "@sip/solana-program/attestation";
+export type { PricedTrade } from "@sip/solana-program/per-trade";
 export type {
   AgeTolerance,
   BuildJupiterRouteParams,
@@ -62,6 +64,7 @@ function unwrap<T extends object>(namespace: T): T {
 const attestation = unwrap(attestationModule);
 const jupiterRoute = unwrap(jupiterRouteModule);
 const liveRoute = unwrap(liveRouteModule);
+const perTrade = unwrap(perTradeModule);
 const raydiumSwap = unwrap(raydiumSwapModule);
 
 export const ATTESTATION_MESSAGE_LEN = attestation.ATTESTATION_MESSAGE_LEN;
@@ -69,6 +72,22 @@ export const MODE_PROFIT = attestation.MODE_PROFIT;
 export const MODE_VOLUME = attestation.MODE_VOLUME;
 export const attestationInstruction = attestation.attestationInstruction;
 export const attestationMessage = attestation.attestationMessage;
+// THE PER-TRADE MODES (settle_v3, ADR §5.4), added with the modes' dispatcher
+// modules: the V3 message and its Ed25519 instruction, and the per-trade
+// arithmetic the program checks the result with (scripts/per-trade.ts, pinned to
+// per_trade.rs by one set of vectors). The same mirror the program tests use,
+// never a keeper copy.
+export const ATTESTATION_V3_MESSAGE_LEN = attestation.ATTESTATION_V3_MESSAGE_LEN;
+export const MODE_ROUNDUP = attestation.MODE_ROUNDUP;
+export const MODE_FIXED = attestation.MODE_FIXED;
+export const attestationV3Instruction = attestation.attestationV3Instruction;
+export const attestationV3Message = attestation.attestationV3Message;
+export const roundupTradeLamports = perTrade.roundupTradeLamports;
+export const roundupBoundLamports = perTrade.roundupBoundLamports;
+export const fixedAmountLamports = perTrade.fixedAmountLamports;
+export const pythFloorHolds = perTrade.pythFloorHolds;
+export const pricesHash = perTrade.pricesHash;
+export const pricesHashWords = perTrade.pricesHashWords;
 export const fetchLiveRoute = liveRoute.fetchLiveRoute;
 export const JUPITER_PROGRAM = jupiterRoute.JUPITER_PROGRAM;
 export const JupiterRouteRefusal = jupiterRoute.JupiterRouteRefusal;
@@ -111,6 +130,14 @@ export const buildSwapV2Data = raydiumSwap.buildSwapV2Data;
 for (const [name, value] of Object.entries({
   attestationInstruction,
   attestationMessage,
+  attestationV3Instruction,
+  attestationV3Message,
+  roundupTradeLamports,
+  roundupBoundLamports,
+  fixedAmountLamports,
+  pythFloorHolds,
+  pricesHash,
+  pricesHashWords,
   fetchLiveRoute,
   buildSwapV2AccountMetas,
   buildSwapV2Data,
@@ -151,6 +178,19 @@ for (const [name, value] of Object.entries({
 for (const [name, value] of Object.entries({ RAYDIUM_CLMM, JUPITER_PROGRAM })) {
   if (typeof value?.toBase58 !== "function") {
     throw new Error(`@sip/solana-program did not provide ${name} as a PublicKey: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads`);
+  }
+}
+
+// AND THE V3 NUMBERS: a mode byte that unwrapped to undefined would sign a
+// message no settle_v3 rebuilds, and a length that did would let a drifted
+// encoder through.
+for (const [name, value, expected] of [
+  ["ATTESTATION_V3_MESSAGE_LEN", ATTESTATION_V3_MESSAGE_LEN, 229],
+  ["MODE_ROUNDUP", MODE_ROUNDUP, 2],
+  ["MODE_FIXED", MODE_FIXED, 3],
+] as const) {
+  if (value !== expected) {
+    throw new Error(`@sip/solana-program did not provide ${name} as ${expected}: the CommonJS/ESM unwrap in program-scripts.ts no longer matches how it loads`);
   }
 }
 

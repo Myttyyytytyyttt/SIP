@@ -67,6 +67,10 @@ export const SIP_ACCOUNT_SPACE = {
   get ProtocolConfig(): number {
     return spaceOf("ProtocolConfig");
   },
+  /** ["per_trade", vault]: a per-trade (round-up, fixed) vault's parameters and daily counter. */
+  get PerTradePolicy(): number {
+    return spaceOf("PerTradePolicy");
+  },
 };
 
 export type SipAccountName = keyof typeof SIP_ACCOUNT_SPACE;
@@ -174,7 +178,58 @@ export interface SettledEvent {
   readonly policyNonce: bigint;
 }
 
+/**
+ * ["per_trade", vault] (state.rs PerTradePolicy, 104 bytes): a per-trade vault's
+ * parameters — both modes', always stored — and the UTC day's counter settle_v3
+ * clips each payment by.
+ */
+export interface PerTradePolicyState {
+  readonly vault: string;
+  readonly bump: number;
+  readonly version: number;
+  /** ROUND-UP's unit, cents (whole dollars, 100..=10000). */
+  readonly roundupUnitCents: number;
+  /** FIXED's F, lamports. */
+  readonly fixedLamports: number;
+  readonly minTradeCents: number;
+  readonly minTradeLamports: number;
+  readonly dailyCapLamports: bigint;
+  /** unix_timestamp / 86 400 of the last settle that wrote the counter. */
+  readonly dayIndex: number;
+  /** Saved on dayIndex; a settle on a later day starts it at zero. */
+  readonly daySavedLamports: bigint;
+}
+
+/**
+ * settle_v3's second event (events.rs PerTradeSettled), emitted right after an
+ * unchanged Settled: what the per-trade window was attested on. decodeSettledEvent
+ * refuses it by discriminator, so every reader of Settled skips it as before.
+ */
+export interface PerTradeSettledEvent {
+  readonly vault: string;
+  readonly wallet: string;
+  readonly linkEpoch: bigint;
+  /** The nonce this settle consumed (before its increment). */
+  readonly settlementNonce: bigint;
+  /** 2 round-up, 3 fixed. */
+  readonly mode: number;
+  readonly tradeCount: number;
+  /** ROUND-UP's lowest price used, micro-dollars per SOL; 0 in FIXED. */
+  readonly priceMinUsdE6: bigint;
+  /** sha256 over (signature ‖ price) of every charged trade; 32 zero bytes in FIXED. */
+  readonly pricesHash: readonly number[];
+  /** The unit in cents (ROUND-UP) or F (FIXED), as the PerTradePolicy held it. */
+  readonly modeParam: bigint;
+  readonly minTrade: bigint;
+  readonly dayIndex: number;
+  /** The day's counter after this payment. */
+  readonly daySavedLamports: bigint;
+}
+
 export const decodeVault = (data: Uint8Array): VaultState => decodeAccount("Vault", data) as unknown as VaultState;
+
+export const decodePerTradePolicy = (data: Uint8Array): PerTradePolicyState =>
+  decodeAccount("PerTradePolicy", data) as unknown as PerTradePolicyState;
 
 export const decodeTradingLink = (data: Uint8Array): TradingLinkState =>
   decodeAccount("TradingLink", data) as unknown as TradingLinkState;
@@ -184,6 +239,22 @@ export const decodeInvestmentPolicy = (data: Uint8Array): InvestmentPolicyState 
 
 export const decodeProtocolConfig = (data: Uint8Array): ProtocolConfigState =>
   decodeAccount("ProtocolConfig", data) as unknown as ProtocolConfigState;
+
+/** The bytes of one PerTradeSettled `Program data:` line (discriminator + body), or throws. */
+export function decodePerTradeSettledEvent(data: Uint8Array): PerTradeSettledEvent {
+  const head = data.subarray(0, 8);
+  if (data.length < 8 || !bytesEqual(head, eventDiscriminator("PerTradeSettled"))) {
+    throw new DecodeError(`not a PerTradeSettled event (discriminator ${toHex(head)})`);
+  }
+  let decoded: { value: Record<string, unknown>; end: number };
+  try {
+    decoded = decodeStruct("PerTradeSettled", data, 8);
+  } catch (error) {
+    throw new DecodeError(`PerTradeSettled: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (decoded.end !== data.length) throw new DecodeError(`PerTradeSettled: ${data.length - decoded.end} trailing bytes`);
+  return camelize(decoded.value) as unknown as PerTradeSettledEvent;
+}
 
 /** The bytes of one `Program data:` log line (discriminator + body), or throws. */
 export function decodeSettledEvent(data: Uint8Array): SettledEvent {

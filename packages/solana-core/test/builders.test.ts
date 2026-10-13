@@ -46,6 +46,7 @@ import {
   buildLinkWallet,
   buildSetInvestPolicy,
   buildSetPolicyV2,
+  buildSetPolicyV3,
   buildUnlinkWallet,
   buildWithdraw,
   buildWithdrawToken,
@@ -561,6 +562,86 @@ describe("owner transaction fixtures", () => {
       const signers = fixture.built.signers.length === 2 ? [FIXTURE_OWNER, FIXTURE_WALLET] : [FIXTURE_OWNER];
       const verified = verifySignedTransaction(signWire(fixture.built.txBase64, ...signers));
       expect(verified.ok, verified.ok ? "" : verified.detail).toBe(true);
+    }
+  });
+});
+
+describe("set_policy_v3 (the per-trade modes, M1b)", () => {
+  const base = {
+    mode: 2,
+    roundupUnitCents: 100,
+    fixedLamports: 1_000_000,
+    minTradeCents: 100,
+    minTradeLamports: 10_000_000,
+    dailyCapLamports: 300_000_000n,
+    maxContribution: 60_000_000n,
+    walletReserve: 50_000_000n,
+    paused: false,
+    blockhash: BLOCKHASH,
+  };
+
+  it("is 46 bytes at the offsets the program and the keeper's policy boundary read, Anchor's encoding, over the owner's vault and its PerTradePolicy", () => {
+    const owner = keypair().publicKey;
+    const built = buildSetPolicyV3({ ...base, owner, mode: 3, roundupUnitCents: 500, fixedLamports: 2_000_000, minTradeCents: 250, minTradeLamports: 20_000_000, paused: true });
+    const decoded = decodeBuilt(built);
+    expect(decoded.data).toHaveLength(46);
+    expect(toHex(decoded.data.subarray(0, 8))).toBe("85b0ae55204f3a16");
+    const view = Buffer.from(decoded.data);
+    expect([view.readUInt8(8), view.readUInt16LE(9), view.readUInt32LE(11), view.readUInt16LE(15), view.readUInt32LE(17)]).toEqual([3, 500, 2_000_000, 250, 20_000_000]);
+    expect([view.readBigUInt64LE(21), view.readBigUInt64LE(29), view.readBigUInt64LE(37), view.readUInt8(45)]).toEqual([300_000_000n, 60_000_000n, 50_000_000n, 1]);
+    const expected = anchorCoder.encode("set_policy_v3", {
+      mode: 3,
+      roundup_unit_cents: 500,
+      fixed_lamports: 2_000_000,
+      min_trade_cents: 250,
+      min_trade_lamports: 20_000_000,
+      daily_cap_lamports: new BN(300_000_000),
+      max_contribution: new BN(60_000_000),
+      wallet_reserve: new BN(50_000_000),
+      paused: true,
+    });
+    expect(toHex(decoded.data)).toBe(toHex(expected));
+    const vault = pda(text.encode("vault"), owner.toBytes());
+    expect(built.vault).toBe(vault);
+    expect(built.accounts["per_trade_policy"]).toBe(pda(text.encode("per_trade"), new PublicKey(vault).toBytes()));
+    expectIdlShape("set_policy_v3", built);
+    expect(decoded.accounts).toEqual([owner.toBase58(), vault, built.accounts["per_trade_policy"], SYSTEM_PROGRAM]);
+  });
+
+  it("is relayed: signed by its owner it passes the verifier, bound to the owner's own vault and PerTradePolicy", () => {
+    const owner = keypair();
+    const built = buildSetPolicyV3({ ...base, owner: owner.publicKey, computeBudget: ownerComputeBudget("set_policy_v3") });
+    const result = verifySignedTransaction(signWire(built.txBase64, owner), { programId: SIP_PROGRAM_ID });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.instruction.name).toBe("set_policy_v3");
+    expect(OWNER_TX_COMPUTE.set_policy_v3).toBe(40_000);
+  });
+
+  it.each([
+    ["mode 0", { mode: 0 }],
+    ["mode 1", { mode: 1 }],
+    ["mode 4", { mode: 4 }],
+    ["a unit under a dollar", { roundupUnitCents: 99 }],
+    ["a unit that is not whole dollars", { roundupUnitCents: 150 }],
+    ["a unit over 100 dollars", { roundupUnitCents: 10_100 }],
+    ["F under 0.0001 SOL", { fixedLamports: 99_999 }],
+    ["F over 0.1 SOL", { fixedLamports: 100_000_001 }],
+    ["a minimum over 100 dollars", { minTradeCents: 10_001 }],
+    ["a minimum over 1 SOL", { minTradeLamports: 1_000_000_001 }],
+    ["no daily cap", { dailyCapLamports: 0n }],
+    ["no per-settle cap", { maxContribution: 0n }],
+  ] as const)("refuses %s, as validate_per_trade_policy would", (_, overrides) => {
+    expect(() => buildSetPolicyV3({ ...base, owner: keypair().publicKey, ...overrides })).toThrow(BuildError);
+  });
+
+  it("builds both modes' edges, every parameter bounded whatever the mode", () => {
+    for (const mode of [2, 3]) {
+      for (const edges of [
+        { roundupUnitCents: 100, fixedLamports: 100_000, minTradeCents: 0, minTradeLamports: 0 },
+        { roundupUnitCents: 10_000, fixedLamports: 100_000_000, minTradeCents: 10_000, minTradeLamports: 1_000_000_000 },
+      ]) {
+        expect(() => buildSetPolicyV3({ ...base, ...edges, mode, owner: keypair().publicKey })).not.toThrow();
+      }
     }
   });
 });

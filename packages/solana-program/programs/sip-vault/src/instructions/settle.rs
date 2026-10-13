@@ -5,7 +5,7 @@ use crate::attestation::{attestation_message, AttestationInputs};
 use crate::ed25519_introspection::{verify_preceding_ed25519, Ed25519Refusals};
 use crate::errors::NuvemError;
 use crate::events::Settled;
-use crate::state::{ProtocolConfig, TradingLink, Vault};
+use crate::state::{ProtocolConfig, TradingLink, Vault, MODE_VOLUME};
 
 /// settle's name for each way the attestation check can fail. They are the
 /// names settle always gave, and clients match on them: moving the reader into
@@ -80,6 +80,11 @@ pub fn settle_handler(
 
     require!(!vault.paused, NuvemError::VaultPaused);
     require!(!ctx.accounts.config.paused, NuvemError::ProtocolPaused);
+
+    // PROFIT AND VOLUME ONLY. A round-up or fixed vault's attestation is V3 and
+    // goes through settle_v3; here it would verify a v2 number and pay
+    // base × active_bps(), which is skim_bps for any mode but VOLUME (Trap 1).
+    require!(vault.skim_mode <= MODE_VOLUME, NuvemError::ModeNeedsSettleV3);
 
     // BY NAME BEFORE BY BYTES. The byte comparison below refuses a mismatched
     // mode anyway; this makes the refusal say what is actually wrong.

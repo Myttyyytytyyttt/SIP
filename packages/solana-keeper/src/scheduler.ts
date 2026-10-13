@@ -78,6 +78,7 @@ import type { IntentOutcome, Lane, QuotaHandOut } from "./dispatch-store.js";
 import { DOORBELL_DEAF_ALERT_KEY, ECHO_DEADLINE_MS, SAFETY_PASS_MS, doorbellDeafAlert } from "./doorbell.js";
 import { BELL_DELAY_MS } from "./fleet-receiver.js";
 import { LamportsFilter, type LamportsFilterStatus, type LinkFingerprint } from "./lamports-filter.js";
+import type { TapeSampler, TapeSamplerStatus } from "./price-tape.js";
 import { DueSelector, type SelectLane, type SelectLink, type SelectTrust, type VaultBellState } from "./scheduler-select.js";
 import type { FleetRead, HookEvidence, LinkRow, LockState, ParkedVault, SchedulerLock, StaleIntent, VaultSystem, WorkRow } from "./scheduler-pg.js";
 
@@ -191,6 +192,12 @@ export interface SchedulerOptions {
   readonly progress?: () => void;
   /** This process's clock, for durations and /status only. Every scheduling time is the database's. */
   readonly now?: () => number;
+  /**
+   * SIP_SOLANA_PRICE_TAPE's sampler (src/price-tape.ts), or null when it is off.
+   * Fed the SOL/USD account the snapshot read in its first request, once per
+   * acting tick — only the lock holder acts, so the fleet samples once.
+   */
+  readonly tape?: TapeSampler | null;
 }
 
 /** What one tick did: the tests' handle and the log line. */
@@ -249,6 +256,8 @@ export interface SchedulerStatus {
   readonly reap: { readonly parked: number; readonly resolvedIntents: number; readonly prunedIntents: number; readonly prunedUsage: number };
   readonly quotas: QuotaHandOut | null;
   readonly governor: GovernorVerdict | null;
+  /** ADDITIVE, present only with SIP_SOLANA_PRICE_TAPE=on: what the tape sampler has done since boot. */
+  readonly priceTape?: TapeSamplerStatus;
 }
 
 const toRow = (link: ManagedLink): LinkRow => ({
@@ -318,6 +327,7 @@ export class Scheduler {
   #listingFailures = 0;
   #tickFailures = 0;
   #lastPruneAt: number | null = null;
+  #tapeLastReason: string | null = null;
 
   #ticks = 0;
   #standbyTicks = 0;
@@ -452,6 +462,8 @@ export class Scheduler {
     const snapshot = await o.chain.snapshot();
     this.#progress();
     this.#crankAlert(snapshot);
+    // 1b. THE PRICE TAPE, from the snapshot's own first request (SIP_SOLANA_PRICE_TAPE).
+    if (o.tape && snapshot.also !== undefined) await this.#sampleTape(o.tape, snapshot.also, fleet.now);
     const protocolPaused = snapshot.config?.paused === true;
 
     // 2. DISCOVERY.
@@ -748,6 +760,21 @@ export class Scheduler {
     this.#lastPruneAt = at;
     this.#prunedIntents += await this.#o.store.pruneIntents();
     if (this.#o.pruneUsage) this.#prunedUsage += await this.#o.pruneUsage(at - 35 * 24 * 60 * 60_000);
+    if (this.#o.tape) await this.#o.tape.prune(Math.floor(at / 1_000));
+  }
+
+  /**
+   * One tape sample a tick. It never fails the tick: a read the sampler will not
+   * keep is counted by why and logged when the reason changes, and a write
+   * Postgres refuses is held for the next tick (TapeSampler).
+   */
+  async #sampleTape(tape: TapeSampler, also: NonNullable<ChainSnapshot["also"]> | null, nowMs: number): Promise<void> {
+    const sampled = await tape.sample(also?.info ?? null, Math.floor(nowMs / 1_000), BigInt(also?.slot ?? 0));
+    const reason = sampled.kind === "rejected" ? `${sampled.reason}: ${sampled.detail}` : sampled.kind === "held" ? "held: Postgres did not take the sample" : null;
+    if (reason !== null && reason.split(":")[0] !== this.#tapeLastReason?.split(":")[0]) {
+      this.#o.log("warn", "the price tape did not record this tick's SOL/USD sample", { reason });
+    }
+    this.#tapeLastReason = reason;
   }
 
   #crankAlert(snapshot: ChainSnapshot): void {
@@ -796,6 +823,7 @@ export class Scheduler {
       reap: { parked: this.#parked, resolvedIntents: this.#resolvedIntents, prunedIntents: this.#prunedIntents, prunedUsage: this.#prunedUsage },
       quotas: this.#quotas,
       governor: this.#o.governor?.verdict ?? null,
+      ...(this.#o.tape ? { priceTape: this.#o.tape.status() } : {}),
     };
   }
 }

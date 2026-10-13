@@ -13,11 +13,31 @@ import { createPublicKey, verify } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
-import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "../src/attestation-golden.js";
+import {
+  GOLDEN_V2_HEX,
+  GOLDEN_V2_INPUTS,
+  GOLDEN_V3_FIXED_HEX,
+  GOLDEN_V3_FIXED_INPUTS,
+  GOLDEN_V3_ROUNDUP_HEX,
+  GOLDEN_V3_ROUNDUP_INPUTS,
+} from "../src/attestation-golden.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
+import type { PerTradeCharge } from "../src/per-trade-base.js";
 import { EXPECTED_INVARIANTS, runPreflight } from "../src/preflight.js";
-import { ATTESTATION_MESSAGE_LEN, MODE_PROFIT, MODE_VOLUME, attestationInstruction, attestationMessage } from "../src/program-scripts.js";
-import { ATTESTATION_VALIDITY_SLOTS, attestationInputs } from "../src/settle-decision.js";
+import {
+  ATTESTATION_MESSAGE_LEN,
+  ATTESTATION_V3_MESSAGE_LEN,
+  MODE_FIXED,
+  MODE_PROFIT,
+  MODE_ROUNDUP,
+  MODE_VOLUME,
+  attestationInstruction,
+  attestationMessage,
+  attestationV3Instruction,
+  attestationV3Message,
+  pricesHash,
+} from "../src/program-scripts.js";
+import { ATTESTATION_VALIDITY_SLOTS, attestationInputs, attestationV3Inputs } from "../src/settle-decision.js";
 
 const ATTESTATION_RS = new URL("../../solana-program/programs/sip-vault/src/attestation.rs", import.meta.url);
 const golden = Buffer.from(GOLDEN_V2_HEX, "hex");
@@ -82,6 +102,71 @@ describe("the attestation golden vector", () => {
   });
 });
 
+describe("the V3 golden vectors (settle_v3, the per-trade modes)", () => {
+  const rs = (): string => readFileSync(ATTESTATION_RS, "utf8");
+  /** What the keeper holds when it builds the round-up vector: the same link and window, a ROUND-UP vault, its charge. */
+  const charge = (over: Partial<PerTradeCharge> = {}): PerTradeCharge => ({
+    mode: MODE_ROUNDUP,
+    amountLamports: 2_666_666n,
+    tradeCount: 1,
+    priceMinUsdE6: 150_000_000n,
+    pricesHash: Buffer.from(GOLDEN_V3_ROUNDUP_INPUTS.pricesHash),
+    modeParam: 100n,
+    minTrade: 100n,
+    rows: [],
+    latePriced: 0,
+    oldestChargedAt: null,
+    unagedCharge: false,
+    ...over,
+  });
+  const v3Args = (skimMode: number, perTrade: PerTradeCharge) => ({
+    programId: key(1),
+    link: { wallet: key(2), vault: key(3), epoch: 0x0102_0304_0506_0708n, settlementNonce: 9n, frontierSlot: 100n },
+    vault: { skimMode, policyNonce: 3n },
+    from: 100n,
+    endSlot: 200n,
+    charge: perTrade,
+    currentSlot: 150n,
+  });
+
+  it("are attestation.rs's own, character for character", () => {
+    expect(/GOLDEN_V3_ROUNDUP_HEX: &str = "([0-9a-f]+)"/.exec(rs())?.[1]).toBe(GOLDEN_V3_ROUNDUP_HEX);
+    expect(/GOLDEN_V3_FIXED_HEX: &str = "([0-9a-f]+)"/.exec(rs())?.[1]).toBe(GOLDEN_V3_FIXED_HEX);
+    expect(Buffer.from(GOLDEN_V3_ROUNDUP_HEX, "hex").length).toBe(ATTESTATION_V3_MESSAGE_LEN);
+    expect(ATTESTATION_V3_MESSAGE_LEN).toBe(229);
+  });
+
+  it("are what the program's TypeScript mirror encodes, the round-up hash being pricesHash of its one trade", () => {
+    expect(attestationV3Message(GOLDEN_V3_ROUNDUP_INPUTS).toString("hex")).toBe(GOLDEN_V3_ROUNDUP_HEX);
+    expect(attestationV3Message(GOLDEN_V3_FIXED_INPUTS).toString("hex")).toBe(GOLDEN_V3_FIXED_HEX);
+    expect(pricesHash([{ slot: 500n, signature: Buffer.alloc(64, 0x11), priceUsdE6: 150_000_000n }]).equals(Buffer.from(GOLDEN_V3_ROUNDUP_INPUTS.pricesHash))).toBe(true);
+  });
+
+  it("are what the keeper builds for that link, a ROUND-UP or FIXED vault, and that window", () => {
+    expect(attestationV3Inputs(v3Args(MODE_ROUNDUP, charge()))).toEqual(GOLDEN_V3_ROUNDUP_INPUTS);
+    const fixed = charge({ mode: MODE_FIXED, amountLamports: 7_000_000n, tradeCount: 7, priceMinUsdE6: 0n, pricesHash: Buffer.alloc(32), modeParam: 1_000_000n, minTrade: 10_000_000n });
+    expect(attestationV3Message(attestationV3Inputs(v3Args(MODE_FIXED, fixed))).toString("hex")).toBe(GOLDEN_V3_FIXED_HEX);
+  });
+
+  it("T-N1: never a V2 attestation for a per-trade vault, nor a V3 one for PROFIT or VOLUME, nor one charge's mode for another's vault", () => {
+    for (const skimMode of [MODE_ROUNDUP, MODE_FIXED]) {
+      expect(() => attestationInputs({ ...vectorArgs(MODE_VOLUME), vault: { skimMode, skimBps: 2_000, volumeBps: 20, policyNonce: 3n } })).toThrow(/settles through settle_v3 only/);
+    }
+    for (const skimMode of [MODE_PROFIT, MODE_VOLUME, 4]) expect(() => attestationV3Inputs(v3Args(skimMode, charge()))).toThrow(/only ROUND-UP and FIXED/);
+    expect(() => attestationV3Inputs(v3Args(MODE_FIXED, charge()))).toThrow(/skim_mode 2 charge for a vault in skim_mode 3/);
+    expect(() => attestationV3Inputs({ ...v3Args(MODE_ROUNDUP, charge()), from: 101n })).toThrow(/starts at slot 100/);
+  });
+
+  it("rides the Ed25519 instruction intact, signed by the attester over exactly those 229 bytes", () => {
+    const attester = Keypair.generate();
+    const { data } = attestationV3Instruction(attester.secretKey, attestationV3Inputs(v3Args(MODE_ROUNDUP, charge())));
+    expect(data[0]).toBe(1);
+    expect(data.subarray(112).toString("hex")).toBe(GOLDEN_V3_ROUNDUP_HEX);
+    const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), attester.publicKey.toBuffer()]);
+    expect(verify(null, Buffer.from(GOLDEN_V3_ROUNDUP_HEX, "hex"), createPublicKey({ key: spki, format: "der", type: "spki" }), data.subarray(48, 112))).toBe(true);
+  });
+});
+
 describe("--preflight", () => {
   // Seventeen, not ten: the last seven BUILD settle_v2, wrap_sol, convert and
   // invest — settle_v2 and convert three times each, so the vectors cover a
@@ -94,8 +179,10 @@ describe("--preflight", () => {
   // owner's real mainnet transactions in the image that will charge on it.
   // TWENTY-TWO SINCE 2026-10-08: a deposit carrying a memo is flow, and a trade
   // carrying one is still trading — the Memo programs joined the flow set.
-  it("holds all twenty-two invariants: the golden vector, the seven builds, the venue account, the volume rule and the memo", async () => {
-    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 22 });
+  // TWENTY-SEVEN SINCE THE PER-TRADE MODES: settle_v3 in the IDL, the two V3
+  // golden vectors through the mirror, its two builds and the oracle account.
+  it("holds all twenty-seven invariants: the golden vectors, the nine builds, the venue and oracle accounts, the volume rule and the memo", async () => {
+    expect(await runPreflight()).toEqual({ ok: true, program: SIP_PROGRAM_ID, invariants: 27 });
   });
 
   // THE SECOND COPY OF THE NUMBER, and the reason it is written as a literal:
@@ -114,7 +201,7 @@ describe("--preflight", () => {
   // Raising this line is how that check was added on purpose rather than as a
   // side effect.
   it("pins its own size, so a gate that shrinks fails instead of quietly reporting a smaller one", async () => {
-    expect(EXPECTED_INVARIANTS).toBe(22);
+    expect(EXPECTED_INVARIANTS).toBe(27);
     expect((await runPreflight()).invariants).toBe(EXPECTED_INVARIANTS);
   });
 
@@ -139,14 +226,29 @@ describe("--preflight", () => {
     // A fresh module graph whose copy of the vector ends in ff instead of 00:
     // proof the invariant compares bytes, not something that is always true.
     vi.resetModules();
-    vi.doMock("../src/attestation-golden.js", () => ({ GOLDEN_V2_HEX: `${GOLDEN_V2_HEX.slice(0, -2)}ff`, GOLDEN_V2_INPUTS }));
+    vi.doMock("../src/attestation-golden.js", async (importOriginal) => ({ ...(await importOriginal<object>()), GOLDEN_V2_HEX: `${GOLDEN_V2_HEX.slice(0, -2)}ff` }));
     try {
       const { runPreflight: preflightOverADriftedVector } = await import("../src/preflight.js");
       expect(await preflightOverADriftedVector()).toEqual({
         ok: false,
         program: SIP_PROGRAM_ID,
-        invariants: 22,
+        invariants: 27,
         failure: 'invariant "the attestation mirror matches the program golden vector" is false, expected true',
+      });
+    } finally {
+      vi.doUnmock("../src/attestation-golden.js");
+      vi.resetModules();
+    }
+  });
+
+  it("fails, naming the invariant, when a V3 vector and the mirror disagree by one byte", async () => {
+    vi.resetModules();
+    vi.doMock("../src/attestation-golden.js", async (importOriginal) => ({ ...(await importOriginal<object>()), GOLDEN_V3_FIXED_HEX: `${GOLDEN_V3_FIXED_HEX.slice(0, -2)}ff` }));
+    try {
+      const { runPreflight: preflightOverADriftedVector } = await import("../src/preflight.js");
+      expect(await preflightOverADriftedVector()).toMatchObject({
+        ok: false,
+        failure: 'invariant "the V3 attestation mirror matches both program golden vectors" is false, expected true',
       });
     } finally {
       vi.doUnmock("../src/attestation-golden.js");

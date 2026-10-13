@@ -16,6 +16,7 @@ import { summarizeUpstreamError } from "@sip/solana-log";
 import { readChainSnapshot } from "./chain-state.js";
 import { MULTIPLE_ACCOUNTS_CHUNK, discoverLinksPreferringV2, discoverLinksWithContext, rereadLinks } from "./discovery.js";
 import { investRests } from "./doorbell.js";
+import { PYTH_SOL_USD_FEED } from "./pyth.js";
 import { readSweepState, tokenAmountOf } from "./invest-snapshot.js";
 import { runInvestTick } from "./invest-tick.js";
 import type { InvestRestVerdict, SchedulerChain } from "./scheduler.js";
@@ -28,6 +29,13 @@ export interface SchedulerChainOptions {
   readonly gpaV2: boolean;
   /** The pool's fetch, for V2's hand-built JSON-RPC (the same transport the Connection uses). */
   readonly rpc: typeof fetch;
+  /**
+   * SIP_SOLANA_PRICE_TAPE: the snapshot's first request also reads Pyth's SOL/USD
+   * account — one getMultipleAccounts where the program account was one
+   * getAccountInfo, so the tape costs no extra call. Absent or false: the snapshot
+   * is read exactly as before.
+   */
+  readonly priceTape?: boolean;
 }
 
 /** The scheduler's chain, on the process's own Connection. */
@@ -35,7 +43,7 @@ export function createSchedulerChain(options: SchedulerChainOptions): SchedulerC
   const { connection, program, discriminator } = options;
   const programId = program.programId;
   return {
-    snapshot: () => readChainSnapshot(connection, program),
+    snapshot: () => (options.priceTape === true ? readChainSnapshot(connection, program, { alsoRead: PYTH_SOL_USD_FEED }) : readChainSnapshot(connection, program)),
     list: async () => {
       if (options.gpaV2) return discoverLinksPreferringV2(connection, programId, discriminator, options.rpc, { withContext: true });
       const listed = await discoverLinksWithContext(connection, programId, discriminator);

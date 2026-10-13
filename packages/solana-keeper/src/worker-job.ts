@@ -16,6 +16,12 @@
 //   4. EACH LINK SETTLED, in link-address order, through the MODULE the vault's
 //      own skim_mode picks (src/settle-modules.ts), each settle gated by the
 //      fence (src/fenced-sender.ts) with its PROFIT carry inside the gate (S-4).
+//      A per-trade vault's module (ROUND-UP, FIXED: plan §3.4) exists only
+//      under SIP_SOLANA_EXTRA_MODES and its vault list, reads its PerTradePolicy
+//      and the oracle once for the job, and turns DRY in the live world until
+//      SIP_SOLANA_EXTRA_MODES_LIVE is 1. A waiting per-trade span is due again
+//      when its own clock says (dueAt), a resting per-trade vault within its
+//      mode's probe cadence (PMC).
 //   5. INVEST ONCE for the vault (owner decision 11), every wrap, convert and leg
 //      gated by the fence through the explicit-send order; each landed leg's
 //      history row written before its intent is resolved (the outbox, S-9).
@@ -75,7 +81,7 @@ import type { RestBook } from "./rest-book.js";
 import { SAFETY_PASS_STEPS_MS } from "./credit-governor.js";
 import { keeperModeFor } from "./role-registry.js";
 import { activeBps, settleRetryStreak, type CarryBook } from "./settle-decision.js";
-import { settleModuleFor } from "./settle-modules.js";
+import { settleModuleFor, type ModulePrepared, type PerTradeServing } from "./settle-modules.js";
 import { runSettleTick, type SettleDeps, type SettleResult } from "./settle-tick.js";
 import { legOutbox, resolvePriorIntents, waitForPlanFloor, type TakeoverStore } from "./worker-takeover.js";
 
@@ -133,6 +139,12 @@ export interface JobShared {
   readonly investBatch: boolean;
   /** PROFIT carries, read through from Postgres (workerCarryReads). */
   readonly carryReads: CarryStoreTurn;
+  /**
+   * What this worker serves of the per-trade modes (SIP_SOLANA_EXTRA_MODES*,
+   * src/worker-config.ts). ABSENT OR NULL IS TODAY: no per-trade byte has a
+   * module, and such a vault's links rest at UNSUPPORTED_MODE before any RPC.
+   */
+  readonly perTrade?: PerTradeServing | null;
 }
 
 export type JobLog = (level: "info" | "warn" | "error", message: string, fields: Record<string, unknown>) => void;
@@ -169,6 +181,25 @@ export interface LinkTurn {
   readonly wallet: string;
   readonly outcome: TurnSettle;
   readonly detail: string;
+  /** A per-trade span waiting on its own clock: the unix second it settles (SettleResult.dueAt). */
+  readonly dueAt?: number;
+  /**
+   * A per-trade turn's rows, one per trade the probe counted: what the shadow
+   * comparator and an operator read (ADR §5.7 M4: "/status lists per-trade rows").
+   */
+  readonly perTrade?: readonly PerTradeLogRow[];
+}
+
+/** One per-trade row as a job's log line carries it: strings, so a bigint survives JSON. */
+export interface PerTradeLogRow {
+  readonly signature: string;
+  readonly slot: string;
+  readonly lamports: string;
+  readonly status: "charged" | "forgiven" | "below-minimum";
+  /** µ$ per SOL, or null for FIXED and forgiven rows. */
+  readonly price: string | null;
+  readonly priced: "tape" | "late" | null;
+  readonly owed: string;
 }
 
 /** What a job did, for the log and the tests. */
@@ -243,6 +274,14 @@ export function completionFor(input: {
   /** The soft deadline stopped the job before every phase ran. */
   readonly unfinished: boolean;
   readonly detailFallback?: string;
+  /**
+   * How soon a vault that rests is due again, when its mode says sooner than the
+   * safety backstop: a per-trade vault's PMC (KeeperMode.realProbeEveryMs).
+   * Absent — every PROFIT and VOLUME vault — it is REST_DUE_SECONDS.
+   */
+  readonly restDueSeconds?: number;
+  /** Unix seconds now: what a waiting per-trade span's dueAt is measured from. */
+  readonly nowSeconds?: number;
 }): Completion {
   const { settles, invest, previous } = input;
   const settleRetries: Record<string, number> = {};
@@ -269,7 +308,16 @@ export function completionFor(input: {
     settles.length > 0 && invest !== null
       ? settles.every((turn) => turnRests({ settle: turn.outcome, invest: invest.outcome, wrapShort: input.wrapShort }))
       : settles.length === 0 && invest !== null && investRests(invest.outcome) && !input.wrapShort;
-  if (rests) return { rests: true, lane: "safety", streaks, outcome, detail, dueInSeconds: REST_DUE_SECONDS };
+  if (rests) {
+    // A PER-TRADE SPAN WAITING ON ITS CLOCK IS DUE WHEN THE CLOCK SAYS (ADR §5.5's
+    // cadence as plan §3.4 hosts it: COMPLETE writes oldest charged trade + the
+    // mode's max wait), and a resting per-trade vault within its PMC. Neither
+    // applies to PROFIT or VOLUME, whose due time is what it always was.
+    const nowSeconds = input.nowSeconds ?? 0;
+    const waits = settles.flatMap((turn) => (turn.dueAt === undefined ? [] : [Math.max(1, Math.ceil(turn.dueAt - nowSeconds))]));
+    const dueInSeconds = Math.min(input.restDueSeconds ?? REST_DUE_SECONDS, ...waits);
+    return { rests: true, lane: "safety", streaks, outcome, detail, dueInSeconds };
+  }
   const delays: number[] = [];
   let retry = false;
   for (const turn of settles) {
@@ -310,7 +358,13 @@ export function jobLogFields(end: JobEnd): Record<string, unknown> {
     live: report.live,
     module: report.module,
     settles: report.settles.map((turn) => turn.outcome),
-    wallets: report.settles.map((turn) => ({ wallet: turn.wallet, settle: turn.outcome, detail: turn.detail.slice(0, JOB_LOG_DETAIL_CHARS) })),
+    wallets: report.settles.map((turn) => ({
+      wallet: turn.wallet,
+      settle: turn.outcome,
+      detail: turn.detail.slice(0, JOB_LOG_DETAIL_CHARS),
+      // ADDITIVE: only a per-trade turn carries rows.
+      ...(turn.perTrade === undefined ? {} : { perTrade: turn.perTrade }),
+    })),
     invest: report.invest?.outcome ?? null,
     investDetail: report.invest === null ? null : report.invest.detail.slice(0, JOB_LOG_DETAIL_CHARS),
     intents: report.intents,
@@ -422,7 +476,8 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
   }
   const vault = read.vault;
   report.mode = vault.skimMode;
-  const module = settleModuleFor(vault.skimMode);
+  // A PER-TRADE BYTE HAS A MODULE ONLY WHERE THIS WORKER SERVES IT FOR THIS VAULT.
+  const module = settleModuleFor(vault.skimMode, { vault: vaultAddr, serving: shared.perTrade ?? null });
   report.module = module?.mode.name ?? null;
   if (read.links.length === 0) {
     // A VAULT WITH NO LIVE LINK IS NOT TURNED BY THE LEGACY SWEEP EITHER: its turns are per link.
@@ -460,6 +515,24 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
   });
   const protocolPaused = read.config?.paused === true;
 
+  // ── 3b. what the vault's module reads once (PROFIT, VOLUME: nothing) ────────
+  // A paused per-trade vault is not read for: its turns stop at PAUSED first.
+  let prepared: ModulePrepared | null = null;
+  if (module !== null) {
+    if (module.mode.base === "per-trade" && (vault.paused || protocolPaused)) {
+      prepared = { kind: "ready", turn: () => ({}) };
+    } else {
+      try {
+        prepared = await module.prepare({ connection: chain.connection, program: chain.program, vaultAddress: vaultKey, vault });
+      } catch (error) {
+        prepared = { kind: "retry", detail: `the ${module.mode.name} module could not read what it settles by (${summarizeUpstreamError(error)}); nothing was attested` };
+      }
+    }
+  }
+  // A MODULE THAT DOES NOT SEND (a per-trade module before SIP_SOLANA_EXTRA_MODES_LIVE=1)
+  // turns its links dry in the live world: no signer is resolved and nothing is gated.
+  const sends = live && (module?.sends ?? true);
+
   // ── 4. each link's settle ───────────────────────────────────────────────────
   const settles: LinkTurn[] = [];
   let unfinished = false;
@@ -476,17 +549,22 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       break;
     }
     const wallet = link.wallet.toBase58();
+    if (prepared?.kind === "retry") {
+      settles.push({ link: link.linkAddress.toBase58(), wallet, outcome: "RETRY", detail: prepared.detail });
+      moved = true;
+      continue;
+    }
     let result: SettleResult;
     try {
-      const walletSigner = live ? await keys!.signerFor(link.wallet) : null;
+      const walletSigner = sends ? await keys!.signerFor(link.wallet) : null;
       result = await settle({
         connection: chain.connection,
         program: chain.program,
         link,
         vault,
-        attester: live ? keys!.settleKey : null,
+        attester: sends ? keys!.settleKey : null,
         walletSigner,
-        live,
+        live: sends,
         protocolPaused,
         // THE VAULT'S OWN MODE, AND ONLY IT: no module, no byte, UNSUPPORTED_MODE before any RPC.
         settles: module === null ? [] : [module.mode.byte],
@@ -494,9 +572,9 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
         carryStore: shared.carryReads,
         walkCache: shared.walkCache,
         ...(shared.restBook === null ? {} : { restBook: shared.restBook }),
-        ...(module === null
+        ...(prepared === null || prepared.kind !== "ready"
           ? {}
-          : module.turn({ link, vault, programId: chain.program.programId, boundaries: shared.boundaries, ownerHistory: shared.ownerHistory, nowSeconds: () => now() / 1000 })),
+          : prepared.turn({ link, vault, programId: chain.program.programId, boundaries: shared.boundaries, ownerHistory: shared.ownerHistory, nowSeconds: () => now() / 1000 })),
         fence: fence.settleFence(),
       });
     } catch (error) {
@@ -506,7 +584,14 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       moved = true;
       continue;
     }
-    settles.push({ link: link.linkAddress.toBase58(), wallet, outcome: result.outcome, detail: result.detail });
+    settles.push({
+      link: link.linkAddress.toBase58(),
+      wallet,
+      outcome: result.outcome,
+      detail: result.detail,
+      ...(result.dueAt === undefined ? {} : { dueAt: result.dueAt }),
+      ...(result.perTrade === undefined ? {} : { perTrade: perTradeLogRows(result.perTrade) }),
+    });
     if (!settleLeavesSnapshotTrue(result.outcome)) moved = true;
     if (result.outcome === "SETTLED" || result.outcome === "FAILED" || result.outcome === "RETRY") {
       log(result.outcome === "FAILED" ? "error" : result.outcome === "RETRY" ? "warn" : "info", `settle ${result.outcome.toLowerCase()}`, {
@@ -518,7 +603,7 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
     }
     // THE HISTORY ROW, a live SETTLED's only — the same row bin/keeper.mts writes, awaited here: a job holds one vault, not a sweep.
     if (
-      live &&
+      sends &&
       result.outcome === "SETTLED" &&
       result.signature !== undefined &&
       result.baseLamports !== undefined &&
@@ -629,6 +714,7 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
 
   blocked = stopReason();
   if (blocked !== null) return stop(blocked);
+  const probeEveryMs = module?.mode.realProbeEveryMs ?? 0;
   return complete(
     completionFor({
       settles,
@@ -636,6 +722,20 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       wrapShort,
       previous: streaks,
       unfinished,
+      ...(probeEveryMs > 0 ? { restDueSeconds: Math.min(REST_DUE_SECONDS, Math.ceil(probeEveryMs / 1_000)), nowSeconds: now() / 1_000 } : {}),
     }),
   );
+}
+
+/** A per-trade charge's rows, as a job's log line and report carry them. */
+export function perTradeLogRows(charge: NonNullable<SettleResult["perTrade"]>): readonly PerTradeLogRow[] {
+  return charge.rows.map((row) => ({
+    signature: row.signature,
+    slot: row.slot.toString(),
+    lamports: row.lamports.toString(),
+    status: row.status,
+    price: row.priceUsdE6 === null ? null : row.priceUsdE6.toString(),
+    priced: row.priceSource,
+    owed: row.owedLamports.toString(),
+  }));
 }

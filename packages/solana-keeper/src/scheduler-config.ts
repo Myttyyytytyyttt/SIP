@@ -37,7 +37,12 @@
 //     credit governor's 90 % and 100 % (src/credit-governor.ts);
 //   * SIP_SOLANA_JUPITER_CALLS_PER_MINUTE — the organisation's Jupiter minute
 //     the hand-out divides among workers (30, keyless). Only the NUMBER: the key
-//     is a worker's.
+//     is a worker's;
+//   * SIP_SOLANA_PRICE_TAPE — off (unset) or on: whether the lock holder samples
+//     Pyth's SOL/USD price into sip_solana.sol_price_tape once a tick, from the
+//     tick's first request (src/price-tape.ts, ADR §5.2.3). The per-trade modes'
+//     round-up prices from it; switched on before any per-trade vault is served,
+//     so the tape holds history by the time one is (ADR §5.7 U1).
 //
 // SIP_SOLANA_CUTS ON A SCHEDULER names the scheduler's cuts: `gpa-v2` (C6, its
 // listing) and `lamports-filter` (C7, its batch read). Every legacy token is
@@ -69,7 +74,7 @@ export type SchedulerCutToken = (typeof SCHEDULER_CUT_TOKENS)[number];
 export const SCHEDULER_ACCEPTED_TOKENS: readonly string[] = [...CUT_TOKENS, "lamports-filter"];
 
 /** The scheduler's own variables, which the legacy keeper does not read. */
-export const SCHEDULER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_PLAN_RPS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_CREDITS_MONTH"] as const;
+export const SCHEDULER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_PLAN_RPS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_CREDITS_MONTH", "SIP_SOLANA_PRICE_TAPE"] as const;
 
 /** Present on a scheduler, these refuse to start: it holds no key and arms nothing. */
 export const SCHEDULER_REFUSED_VARS = [
@@ -104,8 +109,18 @@ export interface SchedulerConfig {
   readonly workersMax: number;
   readonly planCreditsPerMonth: number;
   readonly jupiterCallsPerMinute: number;
+  /** SIP_SOLANA_PRICE_TAPE: whether the lock holder samples the per-trade price tape. Off when unset. */
+  readonly priceTape: boolean;
   /** Already scrubbed. */
   readonly warnings: readonly string[];
+}
+
+/** SIP_SOLANA_PRICE_TAPE, strictly: unset or "off" is off, "on" is on, anything else refuses to start. */
+export function readPriceTape(raw: string | undefined): { readonly on: boolean } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "" || value === "off") return { on: false };
+  if (value === "on") return { on: true };
+  return { problem: `SIP_SOLANA_PRICE_TAPE must be off or on (unset is off); it holds ${shape(value)}.` };
 }
 
 /** SIP_SOLANA_CUTS on a scheduler: readCuts's rules (src/cuts.ts) over the scheduler's accepted list. */
@@ -189,6 +204,9 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
   const planRps = readCount(env, "SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, PLAN_RPS_LIMIT, problems, "the provider plan's requests a second");
   const workersMax = readCount(env, "SIP_SOLANA_WORKERS_MAX", 2, WORKERS_MAX_LIMIT, problems, "the most worker replicas the fleet runs");
   const planCreditsPerMonth = readCount(env, "SIP_SOLANA_PLAN_CREDITS_MONTH", HELIUS_DEVELOPER_CREDITS_MONTH, 10_000_000_000, problems, "the plan's credits a month");
+  const tapeRead = readPriceTape(env["SIP_SOLANA_PRICE_TAPE"]);
+  if ("problem" in tapeRead) problems.push(tapeRead.problem);
+  const priceTape = "on" in tapeRead && tapeRead.on;
   const jupiterCallsPerMinute = readCount(
     env,
     "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE",
@@ -231,6 +249,7 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
     workersMax,
     planCreditsPerMonth,
     jupiterCallsPerMinute,
+    priceTape,
     warnings: Object.freeze(warnings.map(scrub)),
   });
 }

@@ -33,7 +33,9 @@
 -- and flags. Losing them costs a full pass and some history, never money. So is
 -- the migration's legacy_process: each legacy keeper rewrites its own row every
 -- sweep, and a handover waits for those rows (src/handover.ts), so losing them
--- only makes the next handover wait one sweep longer.
+-- only makes the next handover wait one sweep longer. And so is the per-trade
+-- modes' sol_price_tape, at the end: market data that prices round-up trades,
+-- whose lost rows only price those trades late.
 
 CREATE SCHEMA IF NOT EXISTS sip_solana;
 
@@ -419,3 +421,26 @@ CREATE TABLE IF NOT EXISTS sip_solana.legacy_process (
 -- database whose table already exists gains it.
 ALTER TABLE sip_solana.legacy_process
   ADD COLUMN IF NOT EXISTS carry_store text CHECK (carry_store IN ('off', 'dual', 'on'));
+
+-- ─── The per-trade price tape (ADR §5.2.3; plan §3.4) ─────────────────────────
+--
+-- Pyth's SOL/USD price, one row per distinct publish, sampled by the
+-- lock-holding scheduler once a tick under SIP_SOLANA_PRICE_TAPE=on
+-- (src/price-tape.ts, TapeSampler): the Pyth receiver's account, the SOL/USD
+-- feed, published within 60 s of the sampler's clock and inside 50 bps of its
+-- own price. A ROUND-UP trade is valued at the newest sample published at or
+-- before its block time and no more than 120 s before it, else the oldest one
+-- within 120 s after it (TAPE_LOOKUP_SQL); with neither, it is priced late, at
+-- the settle-time read. Kept 35 days. NON-SECRET MARKET DATA, AND OPERATIONAL:
+-- losing rows prices the trades they would have priced late, and costs nothing
+-- else. Nothing is written while the variable is unset.
+CREATE TABLE IF NOT EXISTS sip_solana.sol_price_tape (
+  -- Pyth's publish_time, unix seconds.
+  publish_time bigint      PRIMARY KEY,
+  -- The slot the scheduler's batch read it at.
+  slot         bigint      NOT NULL CHECK (slot >= 0),
+  -- price × 10^(expo + 6), floored: micro-dollars per SOL, the unit settle_v3 signs.
+  price_e6     bigint      NOT NULL CHECK (price_e6 > 0),
+  conf_e6      bigint      NOT NULL CHECK (conf_e6 >= 0),
+  sampled_at   timestamptz NOT NULL DEFAULT clock_timestamp()
+);

@@ -27,12 +27,27 @@
 // carries a `fetch` that throws, so a builder that ever needs an account
 // resolved fails here loudly instead of reaching out of a build container.
 // Measured cost of all four: 3 ms.
+//
+// AND SINCE THE PER-TRADE MODES, settle_v3 TOO (ADR §5.4): the IDL carries it,
+// the shared mirror encodes both V3 golden vectors (round-up and fixed), and
+// the builder settle-tick.ts would send encodes both vectors' arguments and
+// names the oracle — Pyth's account in ROUND-UP, the program id for "none" in
+// FIXED. Nothing sends settle_v3 unless SIP_SOLANA_EXTRA_MODES says so; the
+// builder is checked in every image all the same, because the BN that took the
+// keeper down in 2026-09 would take this path down the same way.
 
 import { readFileSync } from "node:fs";
 import type * as anchor from "@coral-xyz/anchor";
 import { AnchorProvider, Program } from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
-import { GOLDEN_V2_HEX, GOLDEN_V2_INPUTS } from "./attestation-golden.js";
+import {
+  GOLDEN_V2_HEX,
+  GOLDEN_V2_INPUTS,
+  GOLDEN_V3_FIXED_HEX,
+  GOLDEN_V3_FIXED_INPUTS,
+  GOLDEN_V3_ROUNDUP_HEX,
+  GOLDEN_V3_ROUNDUP_INPUTS,
+} from "./attestation-golden.js";
 import { JUPITER_V6_PROGRAM } from "./invest-decision.js";
 import { convertCall, investCall, wrapSolCall } from "./invest-tick.js";
 import { tradeNotional } from "./measure-volume.js";
@@ -46,8 +61,8 @@ import {
   idl,
   instructionDiscriminator,
 } from "./idl.js";
-import { ATTESTATION_MESSAGE_LEN, attestationMessage } from "./program-scripts.js";
-import { settleInstruction } from "./settle-tick.js";
+import { ATTESTATION_MESSAGE_LEN, attestationMessage, attestationV3Message } from "./program-scripts.js";
+import { settleInstruction, settleV3Instruction } from "./settle-tick.js";
 
 export interface PreflightResult {
   readonly ok: boolean;
@@ -72,7 +87,7 @@ export interface PreflightResult {
  * on purpose — which is the point. test/attestation-golden.test.ts holds the
  * second copy, under vitest.
  */
-export const EXPECTED_INVARIANTS = 22;
+export const EXPECTED_INVARIANTS = 27;
 
 /**
  * THE VOLUME RULE, IN THE IMAGE THAT WILL CHARGE ON IT. Two of the owner's real
@@ -150,6 +165,13 @@ interface OfflineBuild {
    * stood.
    */
   readonly venueAccountsPresent: boolean;
+  /**
+   * Whether settle_v3 names Pyth's account as its last account in ROUND-UP and
+   * the program id — Anchor's "none" — in FIXED. The DATA vectors cannot see an
+   * account, and settle_v3 refuses a FIXED window that passes an oracle
+   * (PriceNotAllowed) and a ROUND-UP one that does not (OracleAccountInvalid).
+   */
+  readonly settleV3OracleAccounts: boolean;
 }
 
 async function buildOffline(): Promise<OfflineBuild> {
@@ -236,8 +258,15 @@ async function buildOffline(): Promise<OfflineBuild> {
   const carriesVenue = (instruction: { readonly keys: readonly { readonly pubkey: PublicKey }[] }): boolean =>
     instruction.keys.some((key) => key.pubkey.equals(JUPITER_V6_PROGRAM));
 
+  // settle_v3, from the V3 golden vectors' own inputs; the oracle a fixed, non-zero key.
+  const oracle = new PublicKey(Buffer.alloc(32, 0x0a));
+  const settleV3RoundUp = await settleV3Instruction(program, link, GOLDEN_V3_ROUNDUP_INPUTS, oracle);
+  const settleV3Fixed = await settleV3Instruction(program, link, GOLDEN_V3_FIXED_INPUTS, null);
+  const lastKey = (instruction: { readonly keys: readonly { readonly pubkey: PublicKey }[] }): PublicKey | undefined => instruction.keys.at(-1)?.pubkey;
+
   return {
     venueAccountsPresent: carriesVenue(convert) && carriesVenue(convertWide) && carriesVenue(invest),
+    settleV3OracleAccounts: lastKey(settleV3RoundUp)?.equals(oracle) === true && lastKey(settleV3Fixed)?.equals(program.programId) === true,
     vectors: [
     { name: "settle_v2", hex: settle.data.toString("hex") },
     { name: "settle_v2 zero base", hex: settleZero.data.toString("hex") },
@@ -248,6 +277,8 @@ async function buildOffline(): Promise<OfflineBuild> {
     { name: "convert", hex: convert.data.toString("hex") },
     { name: "convert wide u64s", hex: convertWide.data.toString("hex") },
     { name: "invest", hex: invest.data.toString("hex") },
+    { name: "settle_v3 round-up", hex: settleV3RoundUp.data.toString("hex") },
+    { name: "settle_v3 fixed", hex: settleV3Fixed.data.toString("hex") },
     ],
   };
 }
@@ -284,6 +315,18 @@ const BUILDER_VECTORS: ReadonlyMap<string, string> = new Map([
   ["convert", `${instructionDiscriminator("convert").toString("hex")}6400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`],
   ["convert wide u64s", `${instructionDiscriminator("convert").toString("hex")}0100000000002000ffffffffffffffff0c000000c1209b3341d69c81deadbeef`],
   ["invest", `${instructionDiscriminator("invest").toString("hex")}006400000000000000c8000000000000000c000000c1209b3341d69c81deadbeef`],
+  // settle_v3's arguments for the two V3 golden vectors — mode, start, end, the
+  // trade count as a u32, the amount, the price, the prices hash as four u64
+  // words (its own bytes, little-endian) and the deadline — computed with
+  // Python's struct.pack from the vectors' inputs, not by asking the builder.
+  [
+    "settle_v3 round-up",
+    `${instructionDiscriminator("settle_v3").toString("hex")}026400000000000000c80000000000000001000000aab028000000000080d1f00800000000e90d52c052eaaf5aa44d9c0126c3c197e300064f4840256b1a3e13cce81823832c01000000000000`,
+  ],
+  [
+    "settle_v3 fixed",
+    `${instructionDiscriminator("settle_v3").toString("hex")}036400000000000000c80000000000000007000000c0cf6a0000000000${"00".repeat(40)}2c01000000000000`,
+  ],
 ]);
 
 export async function runPreflight(): Promise<PreflightResult> {
@@ -309,6 +352,13 @@ export async function runPreflight(): Promise<PreflightResult> {
     [
       "the attestation mirror matches the program golden vector",
       attestationMessage(GOLDEN_V2_INPUTS).toString("hex") === GOLDEN_V2_HEX,
+      true,
+    ],
+    ["the IDL has settle_v3", hasInstruction("settle_v3"), true],
+    [
+      "the V3 attestation mirror matches both program golden vectors",
+      attestationV3Message(GOLDEN_V3_ROUNDUP_INPUTS).toString("hex") === GOLDEN_V3_ROUNDUP_HEX &&
+        attestationV3Message(GOLDEN_V3_FIXED_INPUTS).toString("hex") === GOLDEN_V3_FIXED_HEX,
       true,
     ],
   ];
@@ -343,6 +393,7 @@ export async function runPreflight(): Promise<PreflightResult> {
     invariants.push([`${name} builds the bytes it has always built`, hex === BUILDER_VECTORS.get(name), true]);
   }
   invariants.push(["convert and invest carry the venue account they were given", built.venueAccountsPresent, true]);
+  invariants.push(["settle_v3 names the oracle in ROUND-UP and none in FIXED", built.settleV3OracleAccounts, true]);
   let volume: Awaited<ReturnType<typeof volumeVector>>;
   try {
     volume = await volumeVector();
