@@ -981,6 +981,10 @@ export interface ComputeBudget {
 export const OWNER_TX_COMPUTE: Readonly<Record<OwnerInstructionName, number>> = Object.freeze({
   create_vault_v2: 60_000,
   set_policy_v2: 40_000,
+  // MEASURED 12 101 units creating the PerTradePolicy in the M1a rehearsal (a
+  // rewrite of an existing one costs less): 40 000 keeps the local proof's
+  // "at most half the limit" rule with room, and matches set_policy_v2's.
+  set_policy_v3: 40_000,
   link_wallet: 100_000,
   unlink_wallet: 40_000,
   withdraw: 40_000,

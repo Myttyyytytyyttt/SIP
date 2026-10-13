@@ -18,6 +18,20 @@ import { IDL_VEC_MAX_LEN } from "./idl";
 
 export const MODE_PROFIT = 0;
 export const MODE_VOLUME = 1;
+/** The per-trade modes (state.rs): set only by set_policy_v3, settled only by settle_v3. */
+export const MODE_ROUNDUP = 2;
+export const MODE_FIXED = 3;
+/** state.rs's per-trade bounds (validate_per_trade_policy), pinned to it by test/rules.test.ts. */
+export const ROUNDUP_UNIT_CENTS_MIN = 100;
+export const ROUNDUP_UNIT_CENTS_MAX = 10_000;
+export const ROUNDUP_UNIT_CENTS_STEP = 100;
+export const FIXED_LAMPORTS_MIN = 100_000;
+export const FIXED_LAMPORTS_MAX = 100_000_000;
+export const MIN_TRADE_CENTS_MAX = 10_000;
+export const MIN_TRADE_LAMPORTS_MAX = 1_000_000_000;
+
+/** Whether a vault's skim_mode is a per-trade mode. Any number: a vault reports whatever the chain holds. */
+export const isPerTradeMode = (mode: number): boolean => mode === MODE_ROUNDUP || mode === MODE_FIXED;
 export const PROFIT_BPS_MIN = 201;
 export const PROFIT_BPS_MAX = 10_000;
 export const VOLUME_BPS_MIN = 1;
@@ -66,6 +80,52 @@ export function vaultPolicyProblems(input: VaultPolicyInput): string[] {
   if (!isInt(input.volumeBps) || input.volumeBps < VOLUME_BPS_MIN || input.volumeBps > VOLUME_BPS_MAX) {
     problems.push(`volumeBps (the volume rate) must be an integer from ${VOLUME_BPS_MIN} to ${VOLUME_BPS_MAX}, whatever the mode`);
   }
+  if (!inU64(input.maxContribution) || input.maxContribution === 0n) problems.push("maxContribution must be a u64 greater than zero");
+  if (!inU64(input.walletReserve)) problems.push("walletReserve must be a u64 (zero or more)");
+  return problems;
+}
+
+export interface PerTradePolicyInput {
+  /** MODE_ROUNDUP (2) or MODE_FIXED (3). */
+  readonly mode: number;
+  /** Whole dollars in cents: 100..=10000, a multiple of 100. Stored whatever the mode. */
+  readonly roundupUnitCents: number;
+  /** F, lamports: 100 000..=100 000 000. Stored whatever the mode. */
+  readonly fixedLamports: number;
+  /** ROUND-UP's minimum trade, cents: 0..=10000. */
+  readonly minTradeCents: number;
+  /** FIXED's minimum SOL leg, lamports: 0..=1 000 000 000. */
+  readonly minTradeLamports: number;
+  /** Lamports a UTC day; > 0. */
+  readonly dailyCapLamports: bigint;
+  /** Lamports; > 0. */
+  readonly maxContribution: bigint;
+  /** Lamports; >= 0. */
+  readonly walletReserve: bigint;
+}
+
+/**
+ * set_policy_v3 arguments against validate_per_trade_policy (state.rs). Empty
+ * when the chain would accept them. Every parameter is bounded whatever the mode,
+ * because the program stores and checks both modes' parameters every time.
+ */
+export function perTradePolicyProblems(input: PerTradePolicyInput): string[] {
+  const problems: string[] = [];
+  if (!isInt(input.mode) || !isPerTradeMode(input.mode)) problems.push("mode must be 2 (round-up) or 3 (fixed)");
+  const unit = input.roundupUnitCents;
+  if (!isInt(unit) || unit < ROUNDUP_UNIT_CENTS_MIN || unit > ROUNDUP_UNIT_CENTS_MAX || unit % ROUNDUP_UNIT_CENTS_STEP !== 0) {
+    problems.push(`roundupUnitCents must be whole dollars from ${ROUNDUP_UNIT_CENTS_MIN} to ${ROUNDUP_UNIT_CENTS_MAX} cents, whatever the mode`);
+  }
+  if (!isInt(input.fixedLamports) || input.fixedLamports < FIXED_LAMPORTS_MIN || input.fixedLamports > FIXED_LAMPORTS_MAX) {
+    problems.push(`fixedLamports must be from ${FIXED_LAMPORTS_MIN} to ${FIXED_LAMPORTS_MAX}, whatever the mode`);
+  }
+  if (!isInt(input.minTradeCents) || input.minTradeCents < 0 || input.minTradeCents > MIN_TRADE_CENTS_MAX) {
+    problems.push(`minTradeCents must be from 0 to ${MIN_TRADE_CENTS_MAX}`);
+  }
+  if (!isInt(input.minTradeLamports) || input.minTradeLamports < 0 || input.minTradeLamports > MIN_TRADE_LAMPORTS_MAX) {
+    problems.push(`minTradeLamports must be from 0 to ${MIN_TRADE_LAMPORTS_MAX}`);
+  }
+  if (!inU64(input.dailyCapLamports) || input.dailyCapLamports === 0n) problems.push("dailyCapLamports must be a u64 greater than zero");
   if (!inU64(input.maxContribution) || input.maxContribution === 0n) problems.push("maxContribution must be a u64 greater than zero");
   if (!inU64(input.walletReserve)) problems.push("walletReserve must be a u64 (zero or more)");
   return problems;

@@ -83,10 +83,20 @@ if (SIP_PROGRAM_ID === OLD_NUVEM_PROGRAM_ID) {
   throw new Error("the sip_vault IDL names a program SaverFi does not use; refusing to load it");
 }
 
-/** What an owner (or a linked wallet) signs in the web. The only SIP instructions /api/solana-tx relays. */
+/**
+ * What an owner (or a linked wallet) signs in the web. The only SIP instructions /api/solana-tx relays.
+ *
+ * set_policy_v3 IS ONE SINCE THE PER-TRADE MODES' KEEPER (M1b): the owner's only
+ * door into ROUND-UP and FIXED, signed by the owner alone for the owner's own
+ * vault, exactly as set_policy_v2 is (the relay binds it so, verify-tx.ts). On
+ * the program mainnet runs before the upgrade it does not exist, and the chain
+ * refuses it; nothing in the web builds it yet (build-handler.ts has no action
+ * for it), so what changes today is only that a signed one is relayed.
+ */
 export const OWNER_INSTRUCTIONS = [
   "create_vault_v2",
   "set_policy_v2",
+  "set_policy_v3",
   "link_wallet",
   "unlink_wallet",
   "withdraw",
@@ -97,18 +107,11 @@ export type OwnerInstructionName = (typeof OWNER_INSTRUCTIONS)[number];
 
 /**
  * Keeper-only and authority-only instructions. The web never builds or relays them.
- *
- * set_policy_v3 IS AN OWNER'S INSTRUCTION ON CHAIN, and still forbidden here: it
- * is the only door into the per-trade modes (round-up, fixed), and until the web
- * offers them, refusing to relay it keeps /api/solana-tx exactly as it was
- * before the program learned it. It moves to OWNER_INSTRUCTIONS, with its
- * OWNER_TX_COMPUTE entry, in the change that ships those modes in the web.
  * settle_v3 is the keeper's, like settle_v2, for good.
  */
 export const FORBIDDEN_INSTRUCTIONS = [
   "settle_v2",
   "settle_v3",
-  "set_policy_v3",
   "invest",
   "convert",
   "wrap_sol",

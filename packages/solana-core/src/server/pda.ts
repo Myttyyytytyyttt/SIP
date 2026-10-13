@@ -9,7 +9,7 @@ import { PublicKey } from "@solana/web3.js";
 
 import { ATA_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from "../client/addresses";
 import { SIP_PROGRAM_ID } from "../client/idl";
-import { CONFIG_SEED, INVEST_SEED, LINK_SEED, VAULT_SEED } from "../client/pda";
+import { CONFIG_SEED, INVEST_SEED, LINK_SEED, PER_TRADE_SEED, VAULT_SEED } from "../client/pda";
 
 export type KeyLike = PublicKey | string;
 
@@ -42,6 +42,9 @@ export const deriveLinkPda = (wallet: KeyLike): PublicKey => find([text.encode(L
 
 /** ["invest", vault] */
 export const deriveInvestPda = (vault: KeyLike): PublicKey => find([text.encode(INVEST_SEED), toPublicKey(vault, "vault").toBytes()]);
+
+/** ["per_trade", vault]: created by set_policy_v3, read by settle_v3. */
+export const derivePerTradePda = (vault: KeyLike): PublicKey => find([text.encode(PER_TRADE_SEED), toPublicKey(vault, "vault").toBytes()]);
 
 /** ["config"] */
 export const deriveConfigPda = (): PublicKey => find([text.encode(CONFIG_SEED)]);

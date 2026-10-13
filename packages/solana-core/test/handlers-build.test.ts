@@ -90,7 +90,7 @@ function post(route: "build" | "vault", body: unknown, headers: Record<string, s
   });
 }
 
-type ErrorBody = { code: string; message: string; problems?: string[]; vault?: string; rule?: Record<string, unknown>; retryAfterSeconds?: number };
+type ErrorBody = { code: string; message: string; problems?: string[]; vault?: string; rule?: Record<string, unknown>; current?: Record<string, unknown>; retryAfterSeconds?: number };
 type Answer = { status: number; json: { error?: ErrorBody } & Record<string, any>; text: string; headers: Headers };
 
 async function read(response: Response): Promise<Answer> {
@@ -1793,5 +1793,20 @@ describe("state", () => {
     const answer = await state(body);
     expect([answer.status, answer.json.error?.code]).toEqual([400, "bad_request"]);
     expect(upstream.calls).toHaveLength(0);
+  });
+});
+
+describe("setPolicy on a per-trade vault (round-up, fixed)", () => {
+  it("refuses with per_trade_vault and builds nothing: set_policy_v2 would silently switch the vault out of its mode", async () => {
+    for (const skim_mode of [2, 3]) {
+      const owner = keypair().publicKey.toBase58();
+      const { build, upstream } = setup({ accounts: new Map([[deriveVaultPda(owner).toBase58(), sipOwned(vaultAccount(owner, { skim_mode }), localRent(125))]]) });
+      const answer = await build({ action: "setPolicy", owner, mode: "profit", skimBps: 2_000, volumeBps: 200, paused: false, maxContribution: "60000000", walletReserve: "50000000" });
+      expect([answer.status, answer.json.error?.code]).toEqual([409, "per_trade_vault"]);
+      expect(answer.json.error?.current).toEqual({ mode: skim_mode });
+      expect(answer.json.txBase64).toBeUndefined();
+      // Read the vault, and nothing after it: no blockhash was asked for.
+      expect(methodsOf(upstream.calls)).not.toContain("getLatestBlockhash");
+    }
   });
 });

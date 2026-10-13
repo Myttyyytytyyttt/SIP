@@ -10,6 +10,8 @@ export const VAULT_SEED = "vault";
 export const LINK_SEED = "link";
 export const INVEST_SEED = "invest";
 export const CONFIG_SEED = "config";
+/** ["per_trade", vault]: a per-trade (round-up, fixed) vault's PerTradePolicy. */
+export const PER_TRADE_SEED = "per_trade";
 
 /** A Solscan transaction link, or null when `signature` is not a base58 64-byte signature. */
 export function solscanTx(signature: string): string | null {

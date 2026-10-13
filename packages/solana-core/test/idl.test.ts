@@ -27,7 +27,7 @@ import {
   isOwnerInstruction,
   toHex,
 } from "../src/client/idl";
-import { CONFIG_SEED, INVEST_SEED, LINK_SEED, VAULT_SEED } from "../src/client/pda";
+import { CONFIG_SEED, INVEST_SEED, LINK_SEED, PER_TRADE_SEED, VAULT_SEED } from "../src/client/pda";
 import { keypair } from "./helpers";
 
 const require = createRequire(import.meta.url);
@@ -63,11 +63,23 @@ describe("the instruction classification", () => {
     for (const name of ["wrap_sol", "convert", "invest", "settle_v2"]) expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, false, true]);
   });
 
-  it("keeps the per-trade instructions out of the web: settle_v3 is the keeper's, set_policy_v3 waits for the modes", () => {
-    for (const name of ["settle_v3", "set_policy_v3"]) {
-      expect(SIP_IDL.instructions.some((instruction) => instruction.name === name), `${name} is in the IDL`).toBe(true);
-      expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, false, true]);
-    }
+  it("classifies the per-trade instructions: settle_v3 is the keeper's for good, set_policy_v3 the owner's (M1b)", () => {
+    for (const name of ["settle_v3", "set_policy_v3"]) expect(SIP_IDL.instructions.some((instruction) => instruction.name === name), `${name} is in the IDL`).toBe(true);
+    expect(["settle_v3", isOwnerInstruction("settle_v3"), isForbiddenInstruction("settle_v3")]).toEqual(["settle_v3", false, true]);
+    expect(["set_policy_v3", isOwnerInstruction("set_policy_v3"), isForbiddenInstruction("set_policy_v3")]).toEqual(["set_policy_v3", true, false]);
+  });
+
+  it("lists set_policy_v3's accounts under the names the builder and the verifier bind", () => {
+    const accounts = idlInstruction("set_policy_v3").accounts;
+    expect(accounts.map((account) => account.name)).toEqual(["owner", "vault", "per_trade_policy", "system_program"]);
+    expect(accounts.map((account) => [account.signer === true, account.writable === true])).toEqual([
+      [true, true],
+      [false, true],
+      [false, true],
+      [false, false],
+    ]);
+    const seed = (accounts.find((account) => account.name === "per_trade_policy") as { pda?: { seeds: { kind: string; value?: number[] }[] } }).pda!.seeds.find((s) => s.kind === "const")!;
+    expect(new TextDecoder().decode(new Uint8Array(seed.value!))).toBe(PER_TRADE_SEED);
   });
 
   it("lists link_wallet's and unlink_wallet's accounts under the names and addresses the verifier binds", () => {

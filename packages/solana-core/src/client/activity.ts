@@ -74,7 +74,7 @@ export type VaultEvent =
   | {
       readonly kind: "settled";
       readonly wallet: string;
-      /** 0 profit, 1 volume. */
+      /** 0 profit, 1 volume, 2 round-up, 3 fixed (settle_v3: base = owed, bps 10 000). */
       readonly mode: number;
       readonly baseLamports: bigint;
       readonly bps: number;
@@ -113,11 +113,20 @@ export type VaultEvent =
   | {
       readonly kind: "rule_changed";
       readonly mode: number | null;
+      /** Null for a set_policy_v3, which leaves both rates as they were. */
       readonly skimBps: number | null;
       readonly volumeBps: number | null;
       readonly paused: boolean | null;
       readonly maxContribution: bigint | null;
       readonly walletReserve: bigint | null;
+      /** Present only for a set_policy_v3: the per-trade rule it wrote (ADDITIVE). */
+      readonly perTrade?: {
+        readonly roundupUnitCents: number | null;
+        readonly fixedLamports: number | null;
+        readonly minTradeCents: number | null;
+        readonly minTradeLamports: number | null;
+        readonly dailyCapLamports: bigint | null;
+      };
     }
   | {
       readonly kind: "policy_signed";
@@ -225,7 +234,10 @@ const legSymbol = (mint: string | null): string | null => OFFERED_LEGS.find((leg
  */
 function eventOf(call: SipInstructionCall, entry: ClassifiableEntry, settlements: SettledEvent[]): VaultEvent | null {
   switch (call.name) {
-    case "settle_v2": {
+    // settle_v3 EMITS THE SAME Settled FIRST (its PerTradeSettled is skipped by
+    // the log reader), so a per-trade vault's settlement reads as one too.
+    case "settle_v2":
+    case "settle_v3": {
       const event = settlements.shift();
       // No event, no settlement: the amounts would have to be invented.
       if (event === undefined) return null;
@@ -300,6 +312,23 @@ function eventOf(call: SipInstructionCall, entry: ClassifiableEntry, settlements
         paused: boolOf(arg(call, "paused")),
         maxContribution: bigintOf(arg(call, "max_contribution")),
         walletReserve: bigintOf(arg(call, "wallet_reserve")),
+      };
+    case "set_policy_v3":
+      return {
+        kind: "rule_changed",
+        mode: numberOf(arg(call, "mode")),
+        skimBps: null,
+        volumeBps: null,
+        paused: boolOf(arg(call, "paused")),
+        maxContribution: bigintOf(arg(call, "max_contribution")),
+        walletReserve: bigintOf(arg(call, "wallet_reserve")),
+        perTrade: {
+          roundupUnitCents: numberOf(arg(call, "roundup_unit_cents")),
+          fixedLamports: numberOf(arg(call, "fixed_lamports")),
+          minTradeCents: numberOf(arg(call, "min_trade_cents")),
+          minTradeLamports: numberOf(arg(call, "min_trade_lamports")),
+          dailyCapLamports: bigintOf(arg(call, "daily_cap_lamports")),
+        },
       };
     case "set_invest_policy":
       return {
