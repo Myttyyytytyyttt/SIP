@@ -809,7 +809,9 @@ en el de volumen dejaría una compra doble (RT-4).
 **Reglas:** un vault cada vez; **ningún push mientras un traspaso esté abierto** (un push reinicia los servicios, y cada
 contenedor nuevo es un proceso más que el traspaso tiene que ver); para un vault de **beneficio**, el vigilante de
 beneficio tiene que llevar antes `SIP_SOLANA_CARRY_STORE=dual` u `on` (sección 9): una pérdida que solo está en su
-memoria no la vería la cola y cobraría de más el siguiente trade ganador, y el comando se niega a armar ese vault.
+memoria no la vería la cola y cobraría de más el siguiente trade ganador, y el comando se niega a armar ese vault (con
+`dual`, también mientras una escritura de esa pérdida en Postgres haya fallado: el aviso `carry-store`). Para volver
+atrás un vault de beneficio hará falta `on` (10.5).
 
 El comando, desde **Terminal.app** (es SQL de producción: lo corres tú). Pide la `DATABASE_URL` y una URL de RPC sin
 enseñarlas; la de RPC solo se usa para **leer** la altura de bloque, no envía nada:
@@ -843,9 +845,18 @@ datos que no usa ningún vigilante de siempre (el ensayo en sombra).
 2. **`H release $V`** — se niega mientras un worker lo tenga (como mucho 6 minutos desde que lo cogió) o mientras una
    transacción de un worker para ese vault pueda aún aterrizar (espera a que la altura finalizada pase la última). Repite
    hasta `moved: true` y `system: legacy`: los vigilantes de siempre lo cogen en su siguiente barrida.
+   - **Y mientras un worker haya dejado una pérdida arrastrada en un enlace del vault** (`sip_solana.loss_carry` escrita
+     dentro de su gate) y el vigilante de beneficio no la vaya a leer: con `SIP_SOLANA_CARRY_STORE=off` no lee esa tabla
+     nunca, y con `dual` solo al arrancar, así que cobraría entero el siguiente trade ganador. `release` nombra cada
+     proceso `profit` que no lleva `on` y se niega hasta que **todos** lleven `on` y uno haya leído en los últimos 15 min.
+     Qué hacer: pon `SIP_SOLANA_CARRY_STORE=on` en `sip-solana-keeper` (es un redeploy: un contenedor nuevo), espera
+     su siguiente barrida, marca el contenedor viejo con `H gone <process_id>` cuando ya no exista en Railway, y repite
+     `H release $V`. Un vault de volumen no arrastra pérdidas y no le afecta.
 
 Para apagar el despachador del todo: devuelve así **todos** los vaults (`H status` sin vault no debe listar ninguno), y
-solo después quita `SIP_SOLANA_DISPATCH` de los dos vigilantes de siempre.
+solo después quita `SIP_SOLANA_DISPATCH` de los dos vigilantes de siempre. **Deja `SIP_SOLANA_CARRY_STORE=on` en el de
+beneficio**: las pérdidas que arrastraron los workers solo están en Postgres, y un vigilante que vuelva a `off` las
+olvida.
 
 **Vaults nuevos.** `H new-vaults queue` (paso P3d) hace que un vault descubierto a partir de entonces sea de la cola: los
 vigilantes de siempre lo dejan en paz desde su siguiente lectura y el scheduler lo dará de alta en `draining`

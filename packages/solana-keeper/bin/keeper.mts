@@ -61,6 +61,7 @@ import {
   LEGACY_SELECT_ALERT_KEY,
   LEGACY_SELECT_CRITICAL_STREAK,
   LegacySelector,
+  carryOnlyInMemoryVaults,
   legacySelectAlert,
   leftAloneDetail,
   partitionLegacyTurns,
@@ -602,6 +603,7 @@ const legacySelector: LegacySelector | null =
         processId: randomUUID(),
         deployment: process.env["RAILWAY_DEPLOYMENT_ID"]?.trim() || null,
         host: hostname(),
+        carryStore: config.carryStore,
         run: (text, values) => readModel.statement(text, values),
       });
 
@@ -1586,10 +1588,10 @@ async function legacyTurns<T extends { readonly link: { readonly vault: string; 
   live: boolean,
 ): Promise<readonly T[]> {
   // THE VAULTS WHOSE LOSS CARRY LIVES ONLY IN THIS PROCESS'S MEMORY: a worker could
-  // not see it, so the receipt names them and no handover arms them. With a carry
-  // store (dual or on) the carry is in Postgres as well, and nothing is named.
-  const carryVaults =
-    carryStore !== null ? [] : links.filter((link) => (settleCarries.get(link.linkAddress.toBase58())?.size ?? 0) > 0).map((link) => link.vault.toBase58());
+  // not see it, so the receipt names them and no handover arms them. Without a
+  // carry store, every carry memory holds; under `dual`, one whose Postgres write
+  // failed — that write is best-effort; under `on`, none: the database is first.
+  const carryVaults = carryOnlyInMemoryVaults(links, settleCarries, carryStore === null ? null : carryStore.memoryOnlyLinks(settleCarries));
   const read = await selector.read({ live, carryVaults, now: Date.now() });
   if (read.ok) {
     alerter.clear(LEGACY_SELECT_ALERT_KEY);

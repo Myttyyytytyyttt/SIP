@@ -408,3 +408,14 @@ CREATE TABLE IF NOT EXISTS sip_solana.legacy_process (
   carry_vaults text[]      NOT NULL DEFAULT '{}',
   gone_at      timestamptz
 );
+
+-- carry_store: the process's SIP_SOLANA_CARRY_STORE at that read (off, dual or
+-- on). `release` reads it on the way back (src/handover.ts): a vault whose links
+-- hold a loss carry a WORKER wrote (loss_carry.written_fence IS NOT NULL) goes
+-- back to the legacy keepers only while every profit row reads the store on
+-- every turn — `on`. `off` never reads the table and `dual` reads it only at
+-- boot, so either would charge that link's next win without the loss. NULL is a
+-- row written before the column existed, and counts as not `on`. An ALTER, so a
+-- database whose table already exists gains it.
+ALTER TABLE sip_solana.legacy_process
+  ADD COLUMN IF NOT EXISTS carry_store text CHECK (carry_store IN ('off', 'dual', 'on'));

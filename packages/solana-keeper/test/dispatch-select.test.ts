@@ -23,6 +23,7 @@ import {
   LEGACY_SELECT_CRITICAL_STREAK,
   LEGACY_SELECT_SQL,
   LegacySelector,
+  carryOnlyInMemoryVaults,
   leaveReason,
   leftAloneDetail,
   legacySelectAlert,
@@ -223,9 +224,33 @@ describe("L6a: the legacy profit keeper", () => {
     expect("not resolved (left alone: queue)".startsWith("none")).toBe(false);
   });
 
-  it("names the vaults whose loss carry lives only in memory — none once a carry store is on", () => {
+  it("names the vaults whose loss carry lives only in memory: every carry without a store, and the store's own account with one", () => {
     const fn = keeper.slice(keeper.indexOf("async function legacyTurns<"), keeper.indexOf("async function sweep(): Promise<void> {"));
-    expect(fn).toMatch(/carryStore !== null \? \[\] : links\.filter\(\(link\) => \(settleCarries\.get\(link\.linkAddress\.toBase58\(\)\)\?\.size \?\? 0\) > 0\)/);
+    expect(fn).toContain(
+      "const carryVaults = carryOnlyInMemoryVaults(links, settleCarries, carryStore === null ? null : carryStore.memoryOnlyLinks(settleCarries));",
+    );
+    expect(fn).toContain("const read = await selector.read({ live, carryVaults, now: Date.now() });");
+  });
+
+  it("carryOnlyInMemoryVaults: off counts every carry memory holds; a store names only the links it says Postgres lacks", () => {
+    const key = (name: string) => ({ toBase58: () => name });
+    const links = [
+      { linkAddress: key("L1"), vault: key("V1") },
+      { linkAddress: key("L2"), vault: key("V1") },
+      { linkAddress: key("L3"), vault: key("V2") },
+      { linkAddress: key("L4"), vault: key("V3") },
+    ];
+    const book = new Map([
+      ["L1", new Map([["1:2:3", {}]])],
+      ["L2", new Map([["1:5:9", {}]])],
+      ["L3", new Map()],
+      ["L4", new Map([["1:1:1", {}]])],
+    ]);
+    // `off`: every vault with a carry in memory, each once.
+    expect(carryOnlyInMemoryVaults(links, book, null)).toEqual(["V1", "V3"]);
+    // `dual` whose write for L4 failed: only that one; `on` (nothing unwritten): none.
+    expect(carryOnlyInMemoryVaults(links, book, new Set(["L4"]))).toEqual(["V3"]);
+    expect(carryOnlyInMemoryVaults(links, book, new Set())).toEqual([]);
   });
 });
 
@@ -252,7 +277,7 @@ describe("zero change with SIP_SOLANA_DISPATCH unset", () => {
 });
 
 describe("LegacySelector: one read and receipt a sweep, over a scripted runner", () => {
-  const options = { role: "profit" as const, mode: "on" as const, processId: "p-1", deployment: "dep-9", host: "box" };
+  const options = { role: "profit" as const, mode: "on" as const, processId: "p-1", deployment: "dep-9", host: "box", carryStore: "dual" as const };
   const answer = (over: Record<string, unknown> = {}) => [
     { seen: { [VAULTS.volumeQueue]: "queue", [VAULTS.draining]: "draining" }, absent_is: "legacy", read_at: new Date("2026-10-12T20:00:00Z"), legacy_rows: null, ...over },
   ];
@@ -261,7 +286,7 @@ describe("LegacySelector: one read and receipt a sweep, over a scripted runner",
     const sent: { text: string; values: readonly unknown[] }[] = [];
     const selector = new LegacySelector({ ...options, run: async (text, values) => (sent.push({ text, values }), answer()) });
     const read = await selector.read({ live: true, carryVaults: [VAULTS.draining, VAULTS.profitLegacy, VAULTS.draining], now: 0 });
-    expect(sent).toEqual([{ text: LEGACY_SELECT_SQL, values: ["p-1", "profit", "on", "dep-9", "box", true, [VAULTS.draining, VAULTS.profitLegacy].sort()] }]);
+    expect(sent).toEqual([{ text: LEGACY_SELECT_SQL, values: ["p-1", "profit", "on", "dep-9", "box", true, [VAULTS.draining, VAULTS.profitLegacy].sort(), "dual"] }]);
     expect(read.ok).toBe(true);
     if (!read.ok) return;
     expect([...read.view.notLegacy]).toEqual([

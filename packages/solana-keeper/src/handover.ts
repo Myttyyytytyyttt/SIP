@@ -26,7 +26,9 @@
 //     that catches an old container still holding the claim without the
 //     variable, which writes no row at all (`allowDry` lifts it, for a drill
 //     where no keeper is armed);
-//   * any row holds a loss carry for the vault only in memory (carry_vaults).
+//   * any row holds a loss carry for the vault only in memory (carry_vaults):
+//     under SIP_SOLANA_CARRY_STORE=off every carry, and under `dual` one whose
+//     Postgres write failed (src/carry-store.ts, memoryOnlyLinks).
 // Then the first `arm` records the PROCESSED block height — at or above the
 // height behind any blockhash a legacy keeper could have signed with before its
 // receipt — and a later one moves the vault to the queue only once the FINALIZED
@@ -41,6 +43,16 @@
 // finalized height has passed every intent's last height
 // (max COALESCE(resolved_height, last_valid_block_height), the store's own plan
 // floor). The legacy keeper has no gate of its own, so it waits as a worker would.
+// AND THE LOSSES THE WORKERS CARRIED STAY NETTED: a worker writes each PROFIT
+// carry into sip_solana.loss_carry inside its settle's gate, and nowhere else. A
+// legacy profit keeper under SIP_SOLANA_CARRY_STORE=off never reads that table,
+// and under `dual` reads it once, at boot — a row a worker wrote after that is not
+// in its memory — so either would charge the link's next win whole, the
+// over-charge the table exists to prevent. So while a worker's carry for one of
+// the vault's links can still match (WORKER_CARRIES_SQL), `release` refuses until
+// every profit receipt not marked gone says `on` (legacy_process.carry_store),
+// which reads the store on every turn, and one of them read within
+// LEGACY_READ_FRESH_MS.
 //
 // NO PUSH WHILE A HANDOVER IS OPEN (ADR §6.1 rule 5): a push restarts every
 // keeper service, and a new container is a new row the open handover must see.
@@ -51,7 +63,7 @@
 
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 import type { NewVaultSystem, VaultSystem } from "./dispatch-select.js";
-import { KEEPER_ROLES, type KeeperRole } from "./role-registry.js";
+import { KEEPER_ROLES, roleCarriesLosses, type KeeperRole } from "./role-registry.js";
 
 const S = READ_MODEL_SCHEMA;
 
@@ -110,6 +122,27 @@ const RECEIPTS_SQL = `SELECT process_id, role, deployment, host, live, read_at,
 const INTENT_FLOOR_SQL = `SELECT max(COALESCE(resolved_height, last_valid_block_height)) AS floor
   FROM ${S}.send_intent WHERE vault_addr = $1`;
 
+/**
+ * THE LOSS CARRIES A WORKER WROTE for the vault's links that may still be netted.
+ * written_fence is set only inside a settle's gate (src/dispatch-store.ts); L2's
+ * rows leave it NULL. The links are the scheduler's listing (keeper_link), the
+ * same rows a job takes its links from. A row whose (epoch, settlement nonce) is
+ * BELOW the state that listing last saw for its link can never match again — the
+ * epoch is the link's creation slot, so a relink only raises it, and the nonce
+ * only grows within an epoch — and is skipped; every other row counts, so a
+ * listing that lags errs towards refusing.
+ */
+export const WORKER_CARRIES_SQL = `SELECT c.link_addr, c.epoch, c.settlement_nonce, c.frontier_slot, c.loss_lamports, c.written_fence
+  FROM ${S}.loss_carry c JOIN ${S}.keeper_link k ON k.link_addr = c.link_addr
+ WHERE k.vault_addr = $1 AND c.written_fence IS NOT NULL
+   AND (c.epoch, c.settlement_nonce) >= (k.epoch, k.settlement_nonce)
+ ORDER BY c.link_addr, c.epoch, c.settlement_nonce, c.frontier_slot`;
+
+/** The legacy processes of the roles that carry losses, not marked gone, with the carry store each said it runs. */
+const CARRY_READERS_SQL = `SELECT process_id, role, deployment, host, live, read_at, carry_store,
+       round(extract(epoch FROM clock_timestamp() - read_at) * 1000)::bigint AS age_ms
+  FROM ${S}.legacy_process WHERE gone_at IS NULL AND role = ANY($1::text[]) ORDER BY role, read_at DESC, process_id`;
+
 export interface HandoverClient {
   query(text: string, values?: unknown[]): Promise<{ readonly rows: readonly Record<string, unknown>[] }>;
   release(destroy?: boolean): void;
@@ -152,6 +185,8 @@ export interface LegacyProcessRow {
   readonly notLegacy: Readonly<Record<string, string>>;
   readonly absentIs: string;
   readonly carryVaults: readonly string[];
+  /** SIP_SOLANA_CARRY_STORE at its last read; null for a row written before the column existed. */
+  readonly carryStore: string | null;
 }
 
 export interface HandoverStatus {
@@ -230,7 +265,9 @@ export class Handover {
         if (receipt["carry"] === true) {
           blockers.push(
             `legacy process ${describeProcess(receipt)} holds a loss carry for a link of this vault only in its memory: a worker ` +
-              "would over-charge that link's next win. Run the profit keeper with SIP_SOLANA_CARRY_STORE=dual or on first",
+              "would over-charge that link's next win. Run the profit keeper with SIP_SOLANA_CARRY_STORE=dual or on first; under dual " +
+              "this is a carry whose Postgres write failed (its carry-store warning), named until a later write of it succeeds or the " +
+              "link settles past it",
           );
         }
       }
@@ -290,7 +327,11 @@ export class Handover {
     });
   }
 
-  /** draining → legacy, once no worker can send for the vault and every one of its intents is dead or final. */
+  /**
+   * draining → legacy, once no worker can send for the vault, every one of its
+   * intents is dead or final, and every loss a worker carried for its links will be
+   * read by the profit keeper that takes it back (the header).
+   */
   async release(vault: string, heights: ChainHeights): Promise<Step> {
     return this.#tx(async (client) => {
       const found = await client.query(VAULT_FOR_UPDATE_SQL, [vault]);
@@ -311,6 +352,7 @@ export class Handover {
       if (floor !== null && heights.finalized <= floor) {
         blockers.push(`a worker's transaction for this vault could still land until height ${floor}: wait for the finalized height to pass it (now ${heights.finalized})`);
       }
+      blockers.push(...(await this.#carryBlockers(client, vault)));
       if (blockers.length > 0) return { vault, system, moved: false, blockers, ...(floor !== null && heights.finalized <= floor ? { waitUntilFinalizedAbove: floor } : {}) };
       await client.query(
         `UPDATE ${S}.vault_work SET system = 'legacy', system_at = clock_timestamp(), handover_height = NULL, holder = NULL, lease_until = NULL
@@ -319,6 +361,43 @@ export class Handover {
       );
       return { vault, system: "legacy", moved: true, blockers: [] };
     });
+  }
+
+  /**
+   * Why the vault's worker-written loss carries would be lost on the legacy side
+   * (the header, "the losses the workers carried"): one blocker per profit
+   * process not running the store `on`, and one when none that does has read
+   * recently. Empty when no such carry can still match.
+   */
+  async #carryBlockers(client: HandoverClient, vault: string): Promise<string[]> {
+    const carries = (await client.query(WORKER_CARRIES_SQL, [vault])).rows;
+    if (carries.length === 0) return [];
+    const first = carries[0]!;
+    const named =
+      `link ${String(first["link_addr"])} carries ${String(first["loss_lamports"])} lamports into state ` +
+      `${String(first["epoch"])}:${String(first["settlement_nonce"])}:${String(first["frontier_slot"])} (written at fence ${String(first["written_fence"])})` +
+      (carries.length > 1 ? `, and ${carries.length - 1} more carr${carries.length === 2 ? "y" : "ies"} of its links` : "");
+    const roles = KEEPER_ROLES.filter(roleCarriesLosses);
+    const readers = (await client.query(CARRY_READERS_SQL, [roles])).rows;
+    const blockers: string[] = [];
+    for (const reader of readers) {
+      if (reader["carry_store"] === "on") continue;
+      const mode = reader["carry_store"] === null ? "unknown (its receipt predates the column)" : String(reader["carry_store"]);
+      blockers.push(
+        `legacy process ${describeProcess(reader)} runs SIP_SOLANA_CARRY_STORE=${mode}, which does not read on every turn the loss a worker carried for ` +
+          `this vault (${named}): it would charge that link's next win whole. Run the profit keeper with SIP_SOLANA_CARRY_STORE=on, ` +
+          `then mark this process gone once its container no longer exists (\`dispatch-handover gone ${String(reader["process_id"])}\`)`,
+      );
+    }
+    const fresh = readers.filter((reader) => reader["carry_store"] === "on" && Number(reader["age_ms"]) <= LEGACY_READ_FRESH_MS);
+    if (fresh.length === 0) {
+      blockers.push(
+        `no ${roles.join(" or ")} keeper running SIP_SOLANA_CARRY_STORE=on has read in the last ${LEGACY_READ_FRESH_MS / 60_000} min, and a worker ` +
+          `carried a loss for this vault (${named}): the keeper that takes it back must read that loss. Run the profit keeper with ` +
+          "SIP_SOLANA_CARRY_STORE=on and SIP_SOLANA_DISPATCH set, wait for its next sweep, and release again",
+      );
+    }
+    return blockers;
   }
 
   /** Every vault that is draining, armed one by one (the scheduler's way under new_vault_system = 'queue', and `arm --all`). */
@@ -377,7 +456,7 @@ export class Handover {
         [vault ?? null],
       );
       const processes = await client.query(
-        `SELECT process_id, role, dispatch, deployment, host, live, reads, read_at, started_at, gone_at, seen, absent_is, carry_vaults,
+        `SELECT process_id, role, dispatch, deployment, host, live, reads, read_at, started_at, gone_at, seen, absent_is, carry_vaults, carry_store,
                 round(extract(epoch FROM clock_timestamp() - read_at) * 1000)::bigint AS age_ms
            FROM ${S}.legacy_process ORDER BY gone_at NULLS FIRST, role, read_at DESC, process_id`,
       );
@@ -407,6 +486,7 @@ export class Handover {
           notLegacy: row["seen"] as Record<string, string>,
           absentIs: String(row["absent_is"]),
           carryVaults: row["carry_vaults"] as string[],
+          carryStore: row["carry_store"] === null || row["carry_store"] === undefined ? null : String(row["carry_store"]),
         })),
       };
     });

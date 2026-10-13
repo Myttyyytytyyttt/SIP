@@ -725,6 +725,15 @@ export class DurableCarries implements CarryStoreTurn {
    * answer — a read, a write, the seed, a ready table — ends the run.
    */
   #failingSince: number | null = null;
+  /**
+   * `dual`'S CARRIES THAT POSTGRES NEVER ACKNOWLEDGED, by link: the state keys of
+   * memory entries whose write failed (or timed out — it may have committed, and
+   * is counted as not). A worker reads the store alone, so these are the carries
+   * memoryOnlyLinks names for the handover. A later write of the link that
+   * succeeds covers its own post-state; memory's rule keeps only the current
+   * state's entry besides it, so that one stays unwritten until the link moves on.
+   */
+  readonly #unwritten = new Map<string, Set<string>>();
 
   constructor(
     readonly mode: "dual" | "on",
@@ -849,6 +858,7 @@ export class DurableCarries implements CarryStoreTurn {
       // MEMORY FIRST, EXACTLY AS `off`: the settle goes on whatever Postgres says.
       recordCarry(book, link, endSlot, carry);
       const written = await this.#within(this.store.recordCarry(link, endSlot, carry, { validUntilSlot: turn.validUntilSlot, gate: null }));
+      this.#noteDualWrite(link, endSlot, carry, written.ok);
       if (!written.ok) {
         this.#writeFailures += 1;
         this.#problem("write", summarizeUpstreamError(written.error));
@@ -885,6 +895,40 @@ export class DurableCarries implements CarryStoreTurn {
     this.#written += 1;
     recordCarry(book, link, endSlot, carry);
     return written.value;
+  }
+
+  /**
+   * THE LINKS WHOSE LOSS CARRY LIVES ONLY IN THIS PROCESS'S MEMORY: under `dual`,
+   * a carry memory still holds whose Postgres write failed. Empty under `on`,
+   * which writes the database before memory. A worker reads only the store, so
+   * the legacy receipt names these links' vaults (carry_vaults) and no handover
+   * arms them (src/handover.ts) — `dual`'s best-effort write is not proof the
+   * store holds every carry memory does.
+   */
+  memoryOnlyLinks(book: CarryBook): ReadonlySet<string> {
+    const links = new Set<string>();
+    for (const [address, keys] of this.#unwritten) {
+      // AN ENTRY MEMORY HAS PRUNED (carryFor, recordCarry) IS NO CARRY TO PROTECT.
+      const entries = book.get(address);
+      const held = [...keys].filter((key) => entries?.has(key) === true);
+      if (held.length === 0) this.#unwritten.delete(address);
+      else {
+        this.#unwritten.set(address, new Set(held));
+        links.add(address);
+      }
+    }
+    return links;
+  }
+
+  /** `dual`'s bookkeeping of one write: memory's rule applied to the unwritten keys, and this write's post-state if it failed. */
+  #noteDualWrite(link: CarryLink, endSlot: bigint, carry: LossCarry | null, ok: boolean): void {
+    const address = link.linkAddress.toBase58();
+    const current = stateKey(link.epoch, link.settlementNonce, link.frontierSlot);
+    // MEMORY KEPT ONLY THE CURRENT STATE'S ENTRY BESIDES THE POST-STATE (settle-decision.ts, recordCarry).
+    const keys = new Set([...(this.#unwritten.get(address) ?? [])].filter((key) => key === current));
+    if (!ok && carry !== null) keys.add(stateKey(link.epoch, link.settlementNonce + 1n, endSlot));
+    if (keys.size === 0) this.#unwritten.delete(address);
+    else this.#unwritten.set(address, keys);
   }
 
   status(): CarryStoreStatus {

@@ -228,9 +228,10 @@ describe.skipIf(!usable)("the real legacy keeper with a vault on the queue (need
       expect(run.status["linksDiscovered"]).toBe(6);
       expect(run.status["linksTriaged"]).toBe(5);
       // ITS RECEIPT: the map it acted on, every sweep.
-      const { rows } = await db.query("SELECT role, dispatch, live, reads, seen FROM sip_solana.legacy_process WHERE role = 'profit'");
+      const { rows } = await db.query("SELECT role, dispatch, live, reads, seen, carry_store FROM sip_solana.legacy_process WHERE role = 'profit'");
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatchObject({ role: "profit", dispatch: "on", live: false, seen: { [queued.vault.toBase58()]: "queue" } });
+      // AND THE CARRY STORE IT RUNS (unset is off): what `release` reads on the way back.
+      expect(rows[0]).toMatchObject({ role: "profit", dispatch: "on", live: false, seen: { [queued.vault.toBase58()]: "queue" }, carry_store: "off" });
       expect(Number(rows[0].reads)).toBeGreaterThanOrEqual(SWEEPS);
     },
     120_000,

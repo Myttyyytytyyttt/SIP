@@ -186,6 +186,45 @@ describe("DurableCarries: what each phase decides from, and what it does when Po
     }
   });
 
+  it("dual names a link as memory-only while memory holds a carry whose Postgres write failed or hung — a worker could not see it — and on never does", async () => {
+    for (const fault of ["fail", "hang"] as const) {
+      const store = new FaultyStore();
+      const carries = new DurableCarries("dual", store, hooks(), 30);
+      const book: CarryBook = new Map();
+      const address = linkAt(4n, 0n).linkAddress.toBase58();
+      // WRITTEN TO BOTH: nothing only in memory.
+      await carries.recordCarry(book, linkAt(3n, 0n), 500n, LOSS, MODE_PROFIT, turnWrite);
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([]);
+      // THE NEXT LOSS, FROM 4:500: memory has it, Postgres does not.
+      store[fault].add("recordCarry");
+      await carries.recordCarry(book, linkAt(4n, 500n), 900n, LOSS, MODE_PROFIT, turnWrite);
+      expect(book.get(address)?.has(`${EPOCH}:5:900`), fault).toBe(true);
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([address]);
+      expect(await store.inner.carryFor(linkAt(5n, 900n)), fault).toBeNull();
+      // THAT SETTLE LANDED; THE NEXT ONE, FROM 5:900, IS WRITTEN — but 5:900's own carry, the one it nets, is still only in memory.
+      store[fault].clear();
+      await carries.recordCarry(book, linkAt(5n, 900n), 990n, null, MODE_PROFIT, turnWrite);
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([address]);
+      // THE LINK MOVED ON (6:990): memory prunes the entry, and nothing is left to protect.
+      expect(await carries.carryFor(book, linkAt(6n, 990n), MODE_PROFIT)).toEqual({ carry: null });
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([]);
+      // A FAILED WRITE A LATER WRITE OF THE SAME STATE REPLACES: covered.
+      store[fault].add("recordCarry");
+      await carries.recordCarry(book, linkAt(6n, 990n), 1_200n, LOSS, MODE_PROFIT, turnWrite);
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([address]);
+      store[fault].clear();
+      await carries.recordCarry(book, linkAt(6n, 990n), 1_200n, LOSS, MODE_PROFIT, turnWrite);
+      expect([...carries.memoryOnlyLinks(book)], fault).toEqual([]);
+    }
+    // `on` WRITES POSTGRES FIRST: a failed write records nothing in memory, so nothing is memory-only.
+    const store = new FaultyStore();
+    store.fail.add("recordCarry");
+    const on = new DurableCarries("on", store, hooks(), 30);
+    const book: CarryBook = new Map();
+    expect((await on.recordCarry(book, linkAt(4n, 0n), 900n, LOSS, MODE_PROFIT, turnWrite)).kind).toBe("unavailable");
+    expect([...on.memoryOnlyLinks(book)]).toEqual([]);
+  });
+
   it("dual counts a disagreement as a mismatch and raises it once, still deciding from memory", async () => {
     const store = new FaultyStore();
     const h = hooks();

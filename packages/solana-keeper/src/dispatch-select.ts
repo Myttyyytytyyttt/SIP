@@ -44,13 +44,19 @@
 // ENROL_VAULTS_SQL), so a new vault reaches the queue by the same handover as any.
 //
 // THE CARRY LEFT IN MEMORY. A PROFIT link's loss carry lives in this process's
-// memory when SIP_SOLANA_CARRY_STORE is off; a worker cannot see it and would
-// over-charge that link's next win. The receipt names the vaults with such a
-// carry (carry_vaults), and the handover refuses to arm them.
+// memory when SIP_SOLANA_CARRY_STORE is off — and under `dual` when its Postgres
+// write failed (src/carry-store.ts, DurableCarries.memoryOnlyLinks); a worker
+// cannot see it and would over-charge that link's next win. The receipt names the
+// vaults with such a carry (carry_vaults), and the handover refuses to arm them.
+//
+// AND THE CARRY STORE IT READS (carry_store): the way back needs it. A worker
+// writes its PROFIT carries into Postgres only, and a legacy keeper that does not
+// read the store on every turn would charge the next win without them; the
+// handover refuses to release such a vault until every profit receipt says `on`.
 
 import { summarizeUpstreamError } from "@sip/solana-log";
 import type { Alert } from "./alerts.js";
-import type { DispatchMode } from "./cuts.js";
+import type { CarryStoreMode, DispatchMode } from "./cuts.js";
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 import type { KeeperRole } from "./role-registry.js";
 
@@ -71,7 +77,7 @@ const S = READ_MODEL_SCHEMA;
 
 /**
  * THE SWEEP'S ONE STATEMENT. $1 process_id, $2 role, $3 dispatch mode, $4
- * deployment, $5 host, $6 live, $7 carry_vaults. Returns the map it stored
+ * deployment, $5 host, $6 live, $7 carry_vaults, $8 carry_store. Returns the map it stored
  * (`seen`), `absent_is`, the database's time of the read, and — only when new
  * vaults are the queue's — the vaults vault_work names 'legacy', so a legacy row
  * is told from a vault with no row (`legacy_rows`, not stored).
@@ -87,12 +93,12 @@ v AS (
     FROM ${S}.vault_work),
 i AS (
   INSERT INTO ${S}.legacy_process AS p
-         (process_id, role, dispatch, deployment, host, live, read_at, seen, absent_is, carry_vaults)
-  SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::boolean, clock_timestamp(), v.seen, f.absent_is, $7::text[]
+         (process_id, role, dispatch, deployment, host, live, read_at, seen, absent_is, carry_vaults, carry_store)
+  SELECT $1::text, $2::text, $3::text, $4::text, $5::text, $6::boolean, clock_timestamp(), v.seen, f.absent_is, $7::text[], $8::text
     FROM v, f
   ON CONFLICT (process_id) DO UPDATE
      SET live = EXCLUDED.live, read_at = EXCLUDED.read_at, reads = p.reads + 1, seen = EXCLUDED.seen,
-         absent_is = EXCLUDED.absent_is, carry_vaults = EXCLUDED.carry_vaults, gone_at = NULL
+         absent_is = EXCLUDED.absent_is, carry_vaults = EXCLUDED.carry_vaults, carry_store = EXCLUDED.carry_store, gone_at = NULL
   RETURNING seen, absent_is, read_at)
 SELECT i.seen, i.absent_is, i.read_at, v.legacy_rows FROM i, v`;
 
@@ -143,6 +149,28 @@ export function partitionLegacyTurns<T>(
   return { act, left };
 }
 
+/**
+ * THE RECEIPT'S carry_vaults: the vaults whose loss carry lives only in this
+ * process's memory, which a worker — reading Postgres alone — could not see.
+ * `memoryOnly` is the carry store's own account of its links
+ * (DurableCarries.memoryOnlyLinks: under `dual`, a carry whose write failed;
+ * under `on`, none), or null when there is no store (`off`), where every carry
+ * memory holds counts. Each vault once, in the links' order.
+ */
+export function carryOnlyInMemoryVaults(
+  links: readonly { readonly linkAddress: { toBase58(): string }; readonly vault: { toBase58(): string } }[],
+  book: ReadonlyMap<string, { readonly size: number }>,
+  memoryOnly: ReadonlySet<string> | null,
+): readonly string[] {
+  const vaults = links
+    .filter((link) => {
+      const address = link.linkAddress.toBase58();
+      return memoryOnly === null ? (book.get(address)?.size ?? 0) > 0 : memoryOnly.has(address);
+    })
+    .map((link) => link.vault.toBase58());
+  return [...new Set(vaults)];
+}
+
 /** The /status row's detail for a turn left alone: what the keeper did not do, and why. */
 export function leftAloneDetail(reason: LeaveReason, mode: Exclude<DispatchMode, "off">): string {
   switch (reason) {
@@ -177,6 +205,12 @@ export interface LegacySelectorOptions {
   /** RAILWAY_DEPLOYMENT_ID, or null off Railway. */
   readonly deployment: string | null;
   readonly host: string | null;
+  /**
+   * SIP_SOLANA_CARRY_STORE as this process runs it, written on every receipt:
+   * `release` gives a vault with a worker's carries back only to profit keepers
+   * that read the store on every turn (src/handover.ts).
+   */
+  readonly carryStore: CarryStoreMode;
   readonly run: StatementRunner;
 }
 
@@ -275,6 +309,7 @@ export class LegacySelector {
         options.host,
         input.live,
         [...new Set(input.carryVaults)].sort(),
+        options.carryStore,
       ]);
       const view = parseView(rows);
       this.#reads += 1;
