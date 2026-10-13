@@ -30,7 +30,14 @@
 //   * CREDITS. The proxy's per-call lines priced by the keeper's own table
 //     (src/rpc-usage.ts: creditClassOf, creditPrice) at archival 1 and 10. The
 //     proxy keeps no params, so getSignatureStatuses is priced standard: a
-//     shadow sends nothing, and only a send's landing poll searches history.
+//     shadow sends nothing, and only a send's landing poll searches history;
+//   * COVERAGE. A run of 7 × 24 h may stop and resume (a reboot, a crash, a
+//     stop): the clock is the sum of the steps between the harness's minute
+//     beats that belong to one session, with the fleet up, no longer than one
+//     skipped beat. Every other step is a gap, listed with its cause;
+//   * THE LONG RUN'S DRILLS. Each drill once per covered day, at a slot that
+//     moves daily, due on the coverage clock; a ledger over drills.jsonl says
+//     which are done (never repeated across resumes) and which are still owed.
 //
 // NOTHING RUNS THIS BUT THE HARNESS AND ITS TEST. No entry point under bin/
 // imports it (test/dispatch-dark.test.ts lists it).
@@ -478,3 +485,182 @@ export function creditsOf(
 
 /** A count over a window, scaled to a day. */
 export const perDay = (count: number, windowMs: number): number => (windowMs <= 0 ? 0 : (count * 86_400_000) / windowMs);
+
+// ── THE COVERAGE CLOCK (plan §3.3.2: "≥ 7 × 24 h of ticks; gaps are listed, not hidden") ──
+
+/** One heartbeat of the harness's minute (coverage.jsonl): when, which session of the run, and whether the shadow could work. */
+export interface CoverageBeat {
+  readonly at: number;
+  readonly session: number;
+  /**
+   * The shadow could work at that instant: at least one live scheduler and one
+   * live worker, its database answering and its proxy up — a drill's
+   * deliberate outage excepted (the harness decides; this only reads it).
+   */
+  readonly fleetUp: boolean;
+}
+
+/**
+ * The longest step between two beats that still counts as covered. The minute
+ * beats every 60 s; a minute that ran long (a production fetch's 15 s, an
+ * audit waiting on a paused database) can push one beat to the next minute,
+ * so one skipped beat (≈ 120 s) is still covered. Anything longer — a sleeping
+ * Mac, a stopped process — is a gap.
+ */
+export const COVER_MAX_STEP_MS = 135_000;
+
+export interface CoverageGap {
+  readonly from: number;
+  readonly to: number;
+  readonly ms: number;
+  readonly cause: string;
+}
+
+export interface Coverage {
+  /** The sum of the covered steps: the clock the 7 × 24 h target is read on. */
+  readonly coveredMs: number;
+  /** The covered stretches, each a run of consecutive covered steps. */
+  readonly intervals: readonly { readonly from: number; readonly to: number }[];
+  /** Every step that was not covered, with its cause; adjacent gaps of one cause are merged. */
+  readonly gaps: readonly CoverageGap[];
+  readonly firstBeatAt: number | null;
+  readonly lastBeatAt: number | null;
+}
+
+/**
+ * The coverage clock over a run's beats, across every session of it. A step
+ * between two consecutive beats is COVERED when both belong to one session, the
+ * fleet was up at both, and it is no longer than `maxStepMs`. Every other step
+ * is a GAP, named:
+ *   * between two sessions: `sessionCause(next session)` — the harness was not
+ *     running (a stop, a crash, a reboot), as the harness recorded it at resume;
+ *   * a step too long inside one session: the harness's minute did not run —
+ *     the Mac slept, or the process was frozen;
+ *   * the fleet down at either end: the shadow could not work.
+ * With `now`, a last beat older than `maxStepMs` opens a gap up to `now` (the
+ * run is not beating now). Nothing is ever dropped: covered + gaps = the span.
+ */
+export function coverageOf(
+  beats: readonly CoverageBeat[],
+  options: { readonly maxStepMs?: number; readonly sessionCause?: (session: number) => string | undefined; readonly now?: number } = {},
+): Coverage {
+  const maxStepMs = options.maxStepMs ?? COVER_MAX_STEP_MS;
+  const ordered = beats.filter((beat) => Number.isFinite(beat.at)).sort((a, b) => a.at - b.at);
+  const intervals: { from: number; to: number }[] = [];
+  const gaps: CoverageGap[] = [];
+  let coveredMs = 0;
+  const gap = (from: number, to: number, cause: string): void => {
+    const last = gaps.at(-1);
+    if (last !== undefined && last.to === from && last.cause === cause) {
+      gaps[gaps.length - 1] = { from: last.from, to, ms: to - last.from, cause };
+      return;
+    }
+    gaps.push({ from, to, ms: to - from, cause });
+  };
+  for (let i = 1; i < ordered.length; i += 1) {
+    const a = ordered[i - 1]!;
+    const b = ordered[i]!;
+    const step = b.at - a.at;
+    if (a.session !== b.session) {
+      gap(a.at, b.at, options.sessionCause?.(b.session) ?? `the harness was not running (session ${b.session} resumed the run)`);
+      continue;
+    }
+    if (!a.fleetUp || !b.fleetUp) {
+      gap(a.at, b.at, "the shadow could not work (no live scheduler or worker, or its database or proxy down)");
+      continue;
+    }
+    if (step > maxStepMs) {
+      gap(a.at, b.at, "the harness's minute did not run: the Mac slept, or the process was frozen");
+      continue;
+    }
+    coveredMs += step;
+    const last = intervals.at(-1);
+    if (last !== undefined && last.to === a.at) last.to = b.at;
+    else intervals.push({ from: a.at, to: b.at });
+  }
+  const lastBeatAt = ordered.at(-1)?.at ?? null;
+  if (options.now !== undefined && lastBeatAt !== null && options.now - lastBeatAt > maxStepMs) {
+    gap(lastBeatAt, options.now, "no beat since: the harness is not running, or the Mac sleeps");
+  }
+  return { coveredMs, intervals, gaps, firstBeatAt: ordered[0]?.at ?? null, lastBeatAt };
+}
+
+// ── THE DRILLS OF A LONG RUN ─────────────────────────────────────────────────
+
+/** A drill the run owes: its id (stable across resumes), its name, and when it is due on the coverage clock. */
+export interface PlannedDrill {
+  readonly id: string;
+  readonly name: string;
+  readonly atCoveredMs: number;
+}
+
+/**
+ * Every drill once per covered day, spread over the day: the slots are
+ * `firstSlotHours`, then every `slotEveryHours`, and drill k takes slot
+ * (k + day) mod n — so over n days every drill meets every slot once, and no
+ * two drills share a slot. Due times are on the COVERAGE clock, so a night the
+ * Mac slept moves the drills with it instead of piling them up at the resume.
+ * Ids are `d<day>-<name>`, the same in every session of the run.
+ */
+export function weeklyDrillPlan(names: readonly string[], days: number, firstSlotHours = 1, slotEveryHours = 3): PlannedDrill[] {
+  if (names.length === 0) return [];
+  if (firstSlotHours + slotEveryHours * (names.length - 1) >= 24) throw new Error("the drills' slots do not fit in a day");
+  const out: PlannedDrill[] = [];
+  for (let day = 0; day < days; day += 1) {
+    names.forEach((name, k) => {
+      const slot = (k + day) % names.length;
+      out.push({ id: `d${day + 1}-${name}`, name, atCoveredMs: (day * 24 + firstSlotHours + slot * slotEveryHours) * 3_600_000 });
+    });
+  }
+  return out.sort((a, b) => a.atCoveredMs - b.atCoveredMs);
+}
+
+/** One line of drills.jsonl as the ledger reads it. */
+export interface DrillResultLine {
+  readonly id?: unknown;
+  readonly drill?: unknown;
+  readonly ok?: unknown;
+  readonly interrupted?: unknown;
+  readonly startedAt?: unknown;
+}
+
+/**
+ * Where each planned drill stands, from the results written so far: DONE when
+ * a result that is not an interruption exists (passed or failed — a failure is
+ * a result, never retried); INTERRUPTED attempts (the harness stopped mid-drill)
+ * are counted and the drill stays owed until `maxAttempts` interruptions, after
+ * which it counts as failed. A result line without an id is a run before ids
+ * (its drill name is its id).
+ */
+export function drillLedger(
+  planned: readonly PlannedDrill[],
+  results: readonly DrillResultLine[],
+  maxAttempts = 2,
+): {
+  readonly done: readonly { readonly id: string; readonly name: string; readonly ok: boolean; readonly startedAt: string | null }[];
+  readonly interrupted: Readonly<Record<string, number>>;
+  readonly owed: readonly PlannedDrill[];
+  readonly gaveUp: readonly string[];
+} {
+  const finals = new Map<string, { id: string; name: string; ok: boolean; startedAt: string | null }>();
+  const interrupted: Record<string, number> = {};
+  for (const line of results) {
+    const name = typeof line.drill === "string" ? line.drill : "";
+    const id = typeof line.id === "string" ? line.id : name;
+    if (id === "") continue;
+    if (line.interrupted === true) {
+      interrupted[id] = (interrupted[id] ?? 0) + 1;
+      continue;
+    }
+    finals.set(id, { id, name, ok: line.ok === true, startedAt: typeof line.startedAt === "string" ? line.startedAt : null });
+  }
+  const gaveUp = Object.entries(interrupted)
+    .filter(([id, n]) => n >= maxAttempts && !finals.has(id))
+    .map(([id]) => id);
+  return {
+    done: [...finals.values()],
+    interrupted,
+    owed: planned.filter((drill) => !finals.has(drill.id) && !gaveUp.includes(drill.id)),
+    gaveUp,
+  };
+}

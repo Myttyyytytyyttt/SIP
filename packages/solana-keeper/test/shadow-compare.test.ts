@@ -1,15 +1,19 @@
 // THE LOCAL SHADOW'S ARITHMETIC (src/shadow-compare.ts): production's per-wallet
 // decision from the two legacy /status bodies, the shadow's from the workers' job
-// lines, the minute's comparison and its explanations, the listings a minute and
-// the credits — each on the shapes the harness records (test-local/shadow).
+// lines, the minute's comparison and its explanations, the listings a minute,
+// the credits, the coverage clock of a run that resumes, and the long run's
+// drill plan — each on the shapes the harness records (test-local/shadow).
 
 import { describe, expect, it } from "vitest";
 import {
   COMPARE_MAX_AGE_MS,
+  COVER_MAX_STEP_MS,
   DETAIL_CHARS,
   agreementOf,
   compareAt,
+  coverageOf,
   creditsOf,
+  drillLedger,
   explainMismatches,
   foldShadowJobs,
   listingsPerMinute,
@@ -17,6 +21,7 @@ import {
   investRestsByName,
   productionDecisions,
   replayComparison,
+  weeklyDrillPlan,
   type CompareRow,
   type ShadowWallet,
 } from "../src/shadow-compare.js";
@@ -291,5 +296,95 @@ describe("credits from the proxy's lines", () => {
     expect(creditsOf(lines, 10).credits).toBe(10 + 1 + 10 + 10 + 1);
     expect(creditsOf(lines, 1, (run) => run.startsWith("sched-")).credits).toBe(10);
     expect(perDay(31, 60_000)).toBe(31 * 1_440);
+  });
+});
+
+describe("the coverage clock of a run that stops and resumes", () => {
+  const beat = (seconds: number, session = 1, fleetUp = true) => ({ at: T0 + seconds * 1_000, session, fleetUp });
+
+  it("counts the steps between beats of one session with the fleet up, and lists every other step as a gap with its cause", () => {
+    const beats = [
+      beat(0),
+      beat(60),
+      beat(120),
+      // ONE SKIPPED BEAT (a minute that ran long): still covered.
+      beat(240),
+      // THE MAC SLEPT TEN MINUTES inside session 1.
+      beat(840),
+      beat(900),
+      // THE FLEET WAS NOT WHOLE AT ONE BEAT: both steps touching it are gaps.
+      beat(960, 1, false),
+      beat(1_020),
+      // THE HARNESS WAS KILLED; session 2 resumed the run an hour later.
+      beat(4_620, 2),
+      beat(4_680, 2),
+    ];
+    const cov = coverageOf(beats, { sessionCause: (session) => (session === 2 ? "the harness was killed or crashed" : undefined) });
+    expect(cov.coveredMs).toBe((60 + 60 + 120 + 60 + 60) * 1_000);
+    expect(cov.intervals.map((i) => [(i.from - T0) / 1_000, (i.to - T0) / 1_000])).toEqual([
+      [0, 240],
+      [840, 900],
+      [4_620, 4_680],
+    ]);
+    expect(cov.gaps.map((g) => [(g.from - T0) / 1_000, (g.to - T0) / 1_000, g.cause.split(":")[0]])).toEqual([
+      [240, 840, "the harness's minute did not run"],
+      // ADJACENT GAPS OF ONE CAUSE ARE ONE GAP.
+      [900, 1_020, "the shadow could not work (no live scheduler or worker, or its database or proxy down)"],
+      [1_020, 4_620, "the harness was killed or crashed"],
+    ]);
+    // NOTHING IS DROPPED: covered + gaps = the whole span.
+    expect(cov.coveredMs + cov.gaps.reduce((sum, g) => sum + g.ms, 0)).toBe(4_680_000);
+  });
+
+  it("opens a gap up to now when the last beat is older than the bound, and none while the run beats", () => {
+    const beats = [beat(0), beat(60)];
+    expect(coverageOf(beats, { now: T0 + 60_000 + COVER_MAX_STEP_MS }).gaps).toEqual([]);
+    const open = coverageOf(beats, { now: T0 + 3_660_000 }).gaps;
+    expect(open).toHaveLength(1);
+    expect(open[0]).toMatchObject({ from: T0 + 60_000, to: T0 + 3_660_000, ms: 3_600_000 });
+    // A STEP OF TWO SKIPPED BEATS IS NOT COVERED.
+    expect(coverageOf([beat(0), beat(180)]).coveredMs).toBe(0);
+    expect(coverageOf([]).coveredMs).toBe(0);
+  });
+});
+
+describe("the long run's drill plan", () => {
+  const names = ["worker-kill", "worker-sigterm-0", "worker-sigterm-30", "scheduler-kill", "scheduler-blocked", "pg-pause", "pg-outage"];
+
+  it("runs every drill once per covered day, every drill at every slot once over the week, two never in one slot", () => {
+    const plan = weeklyDrillPlan(names, 7);
+    expect(plan).toHaveLength(49);
+    expect(new Set(plan.map((d) => d.id)).size).toBe(49);
+    expect(new Set(plan.map((d) => d.atCoveredMs)).size).toBe(49);
+    const hours = (id: string) => plan.find((d) => d.id === id)!.atCoveredMs / 3_600_000;
+    expect([hours("d1-worker-kill"), hours("d1-pg-outage"), hours("d2-worker-kill"), hours("d2-pg-outage")]).toEqual([1, 19, 28, 25]);
+    for (const name of names) {
+      const slots = plan.filter((d) => d.name === name).map((d) => (d.atCoveredMs / 3_600_000) % 24);
+      expect(new Set(slots).size).toBe(7);
+    }
+    // THE LAST DRILL IS DUE BEFORE THE 168 h TARGET.
+    expect(Math.max(...plan.map((d) => d.atCoveredMs))).toBeLessThan(168 * 3_600_000);
+    expect(() => weeklyDrillPlan([...names, "a", "b"], 1)).toThrow(/do not fit/);
+  });
+
+  it("owes a drill until it has a result, never repeats a done one, and retries an interrupted one up to the limit", () => {
+    const plan = weeklyDrillPlan(names, 1);
+    const ledger = drillLedger(plan, [
+      { id: "d1-worker-kill", drill: "worker-kill", ok: true, startedAt: iso(T0) },
+      // A FAILURE IS A RESULT: not retried.
+      { id: "d1-pg-pause", drill: "pg-pause", ok: false },
+      { id: "d1-pg-outage", drill: "pg-outage", ok: false, interrupted: true },
+      { id: "d1-scheduler-kill", drill: "scheduler-kill", ok: false, interrupted: true },
+      { id: "d1-scheduler-kill", drill: "scheduler-kill", ok: false, interrupted: true },
+    ]);
+    expect(ledger.done.map((d) => [d.id, d.ok])).toEqual([
+      ["d1-worker-kill", true],
+      ["d1-pg-pause", false],
+    ]);
+    expect(ledger.interrupted).toEqual({ "d1-pg-outage": 1, "d1-scheduler-kill": 2 });
+    expect(ledger.gaveUp).toEqual(["d1-scheduler-kill"]);
+    expect(ledger.owed.map((d) => d.id).sort()).toEqual(["d1-pg-outage", "d1-scheduler-blocked", "d1-worker-sigterm-0", "d1-worker-sigterm-30"]);
+    // A RESULT WRITTEN BEFORE IDS EXISTED IS KNOWN BY ITS DRILL NAME.
+    expect(drillLedger([{ id: "worker-kill", name: "worker-kill", atCoveredMs: 0 }], [{ drill: "worker-kill", ok: true }]).owed).toEqual([]);
   });
 });

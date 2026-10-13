@@ -3,16 +3,23 @@
 // minute. Started by hand (test-local/shadow/README.md), never by a test run and
 // never by an image: .dockerignore keeps test-local/ out of every build context.
 //
-//   node --import tsx test-local/shadow/harness.ts --out <dir> [--minutes 55]
-//        [--drills worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31 | none]
-//        [--drill-repeat-hours 0] [--proxy <census-proxy.mjs>] [--model <model.py>]
-//        [--production <profit-url>,<volume-url> | none] [--cuts <tokens>]
+//   node --import tsx test-local/shadow/harness.ts --state <dir> [--resume]
+//        [--minutes 55 | --target-hours 168] [--pg-volume <name>]
+//        [--drills worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31,pg-outage@38 | week | none]
+//        [--drill-repeat-hours 0] [--drill-warmup-minutes 5] [--drill-spacing-minutes 5]
+//        [--proxy <census-proxy.mjs>] [--model <model.py>]
+//        [--production <profit-url>,<volume-url> | none] [--cuts <tokens>] [--report-every-minutes 30]
 //   node --import tsx test-local/shadow/harness.ts --analyze <dir> [--model <model.py>]
+//   (--out <dir> is --state <dir>, the name the 55-minute run used.)
 //
 // WHAT IT STARTS, AND STOPS AGAIN (every one is in report.json's `stopped`):
-//   * Postgres 16 in Docker, its own container (sip-shadow-pg-<hex>, `--rm`,
-//     published on 127.0.0.1 only, trust auth: there is no password to hold),
-//     the keeper's own sql/sip_solana.sql applied;
+//   * Postgres 16 in Docker, its own container (published on 127.0.0.1 only,
+//     trust auth: there is no password to hold), the keeper's own
+//     sql/sip_solana.sql applied. Without --pg-volume: sip-shadow-pg-<hex>,
+//     `--rm`, its data gone with it. With --pg-volume <name>: the data lives in
+//     that NAMED volume (labelled with the state directory, and refused if it
+//     belongs to anything else), the container is still removed at every stop,
+//     and the next session finds the database where this one left it;
 //   * THE CENSUS PROXY (census-proxy.mjs, disp-measure's measuring proxy) on the
 //     loopback: the ONLY way out to the chain. It forwards to the public
 //     https://api.mainnet-beta.solana.com and nothing else, REFUSES every send*
@@ -20,7 +27,8 @@
 //     lines the listings and the credits are counted from;
 //   * a RELAY in this process, in front of the proxy, one path per child process
 //     (sched-a, worker-a, …) so the proxy's lines say who asked; the drills
-//     freeze a path to hold a worker mid-job;
+//     freeze a path to hold a worker mid-job, or to give a scheduler calls that
+//     never return;
 //   * TWO SCHEDULERS (bin/scheduler.mts; one takes sip-solana-scheduler, one
 //     stands by) and TWO WORKERS of two slots (bin/worker.mts), all with
 //     SIP_SOLANA_DISPATCH=shadow, started with `env -i` and only the variables
@@ -29,7 +37,8 @@
 //     host but the loopback is refused inside the process (a would-be Jupiter
 //     quote included);
 //   * the operator's bin/dispatch-handover.mts, as P3b's database needs it:
-//     `new-vaults queue`, then `arm --all --roles=none --allow-dry` until moved.
+//     `new-vaults queue`, then `arm --all --roles=none --allow-dry` until moved
+//     (a resumed session whose vaults are all in the queue already skips both).
 //
 // WHAT IT MEASURES (src/shadow-compare.ts holds the arithmetic, tested):
 //   * once a minute, production's public /status of both legacy keepers (a plain
@@ -40,36 +49,95 @@
 //   * credits: the proxy's method counts × the keeper's price table at archival 1
 //     and 10, beside the cost model's prediction for the same token set when
 //     --model names disp-measure's model.py;
-//   * THE DRILLS, scripted in the window (plan §3.3.2's list):
-//       worker-kill     freeze a worker's path until it holds a vault mid-job,
-//                       SIGKILL it; the successor must wait the lease out, then
-//                       take the vault with a higher fence and finish it;
-//       worker-sigterm  the same hold, then SIGTERM: the drain runs out, the job is
-//                       aborted, the vault RELEASED due now, the process exits 0,
-//                       and the other worker takes the vault without the 45 s wait;
-//       scheduler-kill  SIGKILL the lock holder: the standby takes the lock at its
-//                       next tick, and that tick is a full pass;
-//       pg-pause        `docker pause` the database for 20 s: nothing commits, and
-//                       everything recovers by itself afterwards. 20 s is a BRIEF
-//                       outage: shorter than a lease's 35 s past the gate margin,
-//                       so no lease lapses and no gate is refused for it, and the
-//                       scheduler's lock check falls inside it only by chance;
-//       pg-outage       hold a worker mid-job, then pause the database for 75 s —
-//                       past every held lease and over a whole scheduler tick —
-//                       and let the worker's job go on into it: nothing commits;
-//                       the held vault's lease lapses inside the pause and the
-//                       vault is worked again after it (a higher fence, or its
-//                       COMPLETE); the lock holder's session check fails and it
-//                       stands by; after the pause a scheduler takes the lock
-//                       with a full pass; every process lives; overlap 0.
+//   * COVERAGE: each minute writes a beat (coverage.jsonl). The covered time is
+//     the sum of the steps between beats of one session with the fleet up, no
+//     longer than one skipped beat; every other step is a GAP, listed with its
+//     cause — a sleeping Mac, a crash, a stop, a reboot. The run ends when the
+//     covered time reaches its target (--target-hours, else --minutes), never
+//     at a wall-clock instant;
+//   * THE DRILLS (plan §3.3.2's list), one at a time, each due on the coverage
+//     clock:
+//       worker-kill        freeze a worker's path until it holds a vault mid-job,
+//                          SIGKILL it; the successor must wait the lease out, then
+//                          take the vault with a higher fence and finish it;
+//       worker-sigterm-0   the same hold, then SIGTERM and SIGKILL at once —
+//                          Railway's draining at 0 s: no release can happen, so
+//                          it must look exactly like worker-kill;
+//       worker-sigterm-30  the same hold, then SIGTERM, and SIGKILL 30 s later
+//                          if it still runs (Railway's draining at 30 s): the
+//                          drain runs out, the job is aborted, the vault RELEASED
+//                          due now, the process exits 0 inside the 30 s, and the
+//                          other worker takes the vault without the 45 s wait
+//                          (`worker-sigterm`, the 55-minute run's name, is this);
+//       scheduler-kill     SIGKILL the lock holder: the standby takes the lock at
+//                          its next tick, and that tick is a full pass;
+//       scheduler-blocked  freeze the lock holder's path for 240 s: every call it
+//                          makes is held and never answered. Its bound is the RPC
+//                          pool's 30 s per call: no call may stay held past it, a
+//                          tick ends inside the freeze (failed, or on keeper_link's
+//                          last-known-good list — none hangs), the process lives
+//                          (or its watchdog exits it with code 3 and the standby
+//                          takes over), and after the thaw a fresh listing and a
+//                          job come back;
+//       pg-pause           `docker pause` the database for 20 s: nothing commits,
+//                          and everything recovers by itself afterwards. 20 s is
+//                          a BRIEF outage: shorter than a lease's 35 s past the
+//                          gate margin, so no lease lapses and no gate is refused
+//                          for it, and the scheduler's lock check falls inside it
+//                          only by chance;
+//       pg-outage          hold a worker mid-job, then pause the database for 75 s
+//                          — past every held lease and over a whole scheduler
+//                          tick — and let the worker's job go on into it: nothing
+//                          commits; the held vault's lease lapses inside the pause
+//                          and the vault is worked again after it (a higher
+//                          fence, or its COMPLETE); the lock holder's session
+//                          check fails and it stands by; after the pause a
+//                          scheduler takes the lock with a full pass; every
+//                          process lives; overlap 0.
 //     Each replaced process is restarted, so the fleet is whole again.
+//     `--drills week` owes each of the seven once per covered day, at a slot
+//     that moves daily (weeklyDrillPlan). A drill with a result is never run
+//     again, across any number of resumes; one the harness stopped in the middle
+//     of is recorded as interrupted and owed again, once.
+//
+// A RUN THAT OUTLIVES ITS PROCESS (the 7-day gate on the owner's Mac):
+//   * THE STATE DIRECTORY holds everything: the results (JSONL), the logs, the
+//     summaries, the run's settings and sessions (run.json), the beats, and the
+//     pid files (harness.pid, children.json). A second harness on the same
+//     directory refuses to start; a directory that holds a run needs --resume,
+//     which continues it WITH THE SETTINGS IT WAS STARTED WITH;
+//   * AT RESUME, first: whatever the last session left running is stopped — its
+//     children by pid, only if they still run this keeper's code or name this
+//     directory, and its container (unpaused, stopped, removed; the data stays
+//     in the volume). The gap since its last beat is named: stopped, ended
+//     without stopping (killed, crashed, the power), or the Mac restarted (by
+//     the machine's boot time);
+//   * THE FLEET IS KEPT WHOLE: a process that exits on its own (not a drill's
+//     victim) is written to exits.jsonl and replaced, as Railway's ON_FAILURE
+//     would, at most ten times an hour;
+//   * A ROLLING REPORT: every --report-every-minutes a SEPARATE process runs
+//     --analyze (report.json, summary.txt), so this process's event loop — the
+//     relay every RPC call crosses — never stalls on a week of files.
+//     status.json is rewritten every minute for a one-screen status.
 //
 // It never prints an environment value. The only URLs it writes are its own
 // loopback ones and production's public /status addresses.
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync, type WriteStream } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  type WriteStream,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createServer as createSocketServer } from "node:net";
 import { dirname, resolve } from "node:path";
@@ -82,21 +150,29 @@ import { SIP_PROGRAM_ID } from "../../src/idl.js";
 import {
   agreementOf,
   compareAt,
+  coverageOf,
   creditsOf,
+  drillLedger,
   explainMismatches,
   foldShadowJobs,
   listingsPerMinute,
   perDay,
   productionDecisions,
   replayComparison,
+  weeklyDrillPlan,
   type CompareRow,
+  type Coverage,
+  type CoverageBeat,
+  type DrillResultLine,
+  type PlannedDrill,
   type ProductionSample,
   type ProxyLine,
   type ShadowWallet,
   type WorkerLogLine,
 } from "../../src/shadow-compare.js";
 
-const KEEPER_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const HARNESS = fileURLToPath(import.meta.url);
+const KEEPER_DIR = resolve(dirname(HARNESS), "../..");
 const SCHEMA = resolve(KEEPER_DIR, "sql/sip_solana.sql");
 const DEFAULT_PROXY = resolve(KEEPER_DIR, "test-local/shadow/census-proxy.mjs");
 const DEFAULT_PRODUCTION = [
@@ -104,6 +180,8 @@ const DEFAULT_PRODUCTION = [
   "https://sip-solana-volume-keeper-production.up.railway.app/status",
 ];
 const DEFAULT_DRILLS = "worker-kill@10,worker-sigterm@17,scheduler-kill@24,pg-pause@31,pg-outage@38";
+/** The long run's drills (plan §3.3.2's list), each once per covered day under `--drills week`. */
+const WEEK_DRILLS = ["worker-kill", "worker-sigterm-0", "worker-sigterm-30", "scheduler-kill", "scheduler-blocked", "pg-pause", "pg-outage"] as const;
 /**
  * pg-pause's 20 s: SHORTER than a held lease's life past the gate's margin
  * (LEASE_SECONDS − GATE_MARGIN_SECONDS = 35 s), so it shows what a brief outage
@@ -123,6 +201,35 @@ const PG_OUTAGE_THAW_AFTER_MS = 5_000;
 if (PG_OUTAGE_MS <= (LEASE_SECONDS - GATE_MARGIN_SECONDS) * 1_000 || PG_OUTAGE_MS <= DEFAULT_SWEEP_MS + DISPATCH_STATEMENT_TIMEOUT_MS) {
   throw new Error("pg-outage's pause must outlast a lease's gate margin and a whole scheduler tick");
 }
+/** Railway's draining as the plan sets it (RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30): SIGKILL follows SIGTERM after this. */
+const RAILWAY_DRAINING_MS = 30_000;
+if (SIGTERM_DRAIN_MS >= RAILWAY_DRAINING_MS) throw new Error("a worker's SIGTERM drain must fit inside Railway's 30 s draining");
+/** The bound on one RPC call: src/rpc-pool.ts's poolFetch timeout, which bin/scheduler.mts leaves at its default. */
+const RPC_CALL_BOUND_MS = 30_000;
+/**
+ * scheduler-blocked's freeze. A tick whose every call is held makes its calls
+ * one after another, each given up at RPC_CALL_BOUND_MS: measured 2026-10-13,
+ * two for the chain snapshot, the listing, then keeper_link's re-read — about
+ * 4 × 30 s. The freeze must hold a whole such tick, begun up to one sweep after
+ * the freeze, and see it end: one sweep + 4 bounds + a minute of margin.
+ */
+const SCHEDULER_BLOCK_MS = 240_000;
+if (SCHEDULER_BLOCK_MS < DEFAULT_SWEEP_MS + 4 * RPC_CALL_BOUND_MS + 60_000) throw new Error("scheduler-blocked must hold a whole tick of calls that each time out");
+/** A drill due within this much of the target is not started: it could not finish inside the run. */
+const DRILL_END_MARGIN_MS = 3 * 60_000;
+/** An interrupted drill is owed again until it has been interrupted this many times. */
+const DRILL_MAX_INTERRUPTIONS = 2;
+/** Replacements of processes that exited on their own, at most this many an hour: a crash loop is recorded, not fed. */
+const RESTARTS_PER_HOUR = 10;
+/** The fleet's shape: what keepFleetWhole restores and what a drill waits for. */
+const FLEET = { scheduler: 2, worker: 2 } as const;
+/**
+ * A database that has not answered, or a proxy that is gone, for this long
+ * outside any drill ends the session with code 1: mac/start.sh's loop resumes
+ * it with a fresh container on the same volume (Docker Desktop restarted, a
+ * container that died). Those minutes are gaps, never covered.
+ */
+const BROKEN_SESSION_MS = 5 * 60_000;
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 // ── arguments ─────────────────────────────────────────────────────────────────
@@ -132,25 +239,82 @@ const option = (name: string): string | undefined => {
   return index === -1 ? undefined : argv[index + 1];
 };
 const ANALYZE = option("analyze");
-const OUT = resolve(ANALYZE ?? option("out") ?? "");
-if (ANALYZE === undefined && option("out") === undefined) {
-  console.error("usage: harness.ts --out <dir> [--minutes 55] [--drills …|none] [--proxy …] [--model …] | --analyze <dir>");
+const STATE = option("state") ?? option("out");
+const OUT = resolve(ANALYZE ?? STATE ?? "");
+if (ANALYZE === undefined && STATE === undefined) {
+  console.error("usage: harness.ts --state <dir> [--resume] [--minutes 55 | --target-hours 168] [--pg-volume <name>] [--drills …|week|none] [--proxy …] [--model …] | --analyze <dir>");
   process.exit(2);
 }
-const MINUTES = Number(option("minutes") ?? 55);
-const DRILL_SPEC = option("drills") ?? DEFAULT_DRILLS;
-const DRILL_REPEAT_HOURS = Number(option("drill-repeat-hours") ?? 0);
-const PROXY = resolve(option("proxy") ?? DEFAULT_PROXY);
-const MODEL = option("model");
-const PRODUCTION = option("production") === "none" ? [] : (option("production")?.split(",") ?? DEFAULT_PRODUCTION);
-const CUTS = option("cuts") ?? "";
-const PG_IMAGE = option("pg-image") ?? "postgres:16-alpine";
+const RESUME = argv.includes("--resume");
+const MODEL_ARG = option("model");
+
+/** What a run is started with, kept in run.json: a resumed session runs with these, not with its own command line. */
+interface Settings {
+  readonly targetMinutes: number;
+  readonly drills: string;
+  readonly drillRepeatHours: number;
+  readonly drillWarmupMinutes: number;
+  readonly drillSpacingMinutes: number;
+  readonly proxy: string;
+  readonly model: string | null;
+  readonly production: readonly string[];
+  readonly cuts: string;
+  readonly pgImage: string;
+  readonly pgVolume: string | null;
+  readonly reportEveryMinutes: number;
+}
+
+const fromArgs: Settings = {
+  targetMinutes: option("target-hours") !== undefined ? Number(option("target-hours")) * 60 : Number(option("minutes") ?? 55),
+  drills: option("drills") ?? DEFAULT_DRILLS,
+  drillRepeatHours: Number(option("drill-repeat-hours") ?? 0),
+  drillWarmupMinutes: Number(option("drill-warmup-minutes") ?? 5),
+  drillSpacingMinutes: Number(option("drill-spacing-minutes") ?? 5),
+  proxy: resolve(option("proxy") ?? DEFAULT_PROXY),
+  model: MODEL_ARG === undefined ? null : resolve(MODEL_ARG),
+  production: option("production") === "none" ? [] : (option("production")?.split(",") ?? DEFAULT_PRODUCTION),
+  cuts: option("cuts") ?? "",
+  pgImage: option("pg-image") ?? "postgres:16-alpine",
+  pgVolume: option("pg-volume") ?? null,
+  reportEveryMinutes: Number(option("report-every-minutes") ?? 30),
+};
+if (ANALYZE === undefined) {
+  for (const [name, value] of Object.entries(fromArgs)) {
+    if (typeof value === "number" && !(Number.isFinite(value) && value >= 0)) {
+      console.error(`--${name} must be a number ≥ 0`);
+      process.exit(2);
+    }
+  }
+  if (!(fromArgs.targetMinutes > 0)) {
+    console.error("the target (--minutes or --target-hours) must be more than 0");
+    process.exit(2);
+  }
+  // A VOLUME NAME OF OURS ONLY: never one of the machine's other projects (sip_sip-db and the like).
+  if (fromArgs.pgVolume !== null && !/^sip-shadow-[A-Za-z0-9_.-]{1,50}$/.test(fromArgs.pgVolume)) {
+    console.error("--pg-volume must be named sip-shadow-<something> (letters, digits, _ . -)");
+    process.exit(2);
+  }
+}
 
 // ── recording ─────────────────────────────────────────────────────────────────
-const at = (): string => new Date().toISOString();
+const iso = (ms: number): string => new Date(ms).toISOString();
+const at = (): string => iso(Date.now());
 const jsonl = (file: string, value: unknown): void => appendFileSync(resolve(OUT, file), `${JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}\n`);
+/** Written whole or not at all: a kill -9 in the middle leaves the previous version, never a torn one. */
+const writeJsonAtomic = (file: string, value: unknown): void => {
+  const path = resolve(OUT, file);
+  writeFileSync(`${path}.tmp`, JSON.stringify(value, null, 2));
+  renameSync(`${path}.tmp`, path);
+};
+const readJsonOr = <T>(file: string): T | null => {
+  try {
+    return JSON.parse(readFileSync(resolve(OUT, file), "utf8")) as T;
+  } catch {
+    return null;
+  }
+};
 const event = (what: string, fields: Record<string, unknown> = {}): void => {
-  const line = { at: at(), event: what, ...fields };
+  const line = { at: at(), event: what, ...(session === null ? {} : { session: session.n }), ...fields };
   jsonl("events.jsonl", line);
   console.log(JSON.stringify(line));
 };
@@ -167,6 +331,12 @@ const readLines = <T>(file: string): T[] => {
     }
   }
   return out;
+};
+/** The command line of a live pid, or "" (no such process). */
+const commandOf = (pid: number): string => {
+  if (!Number.isInteger(pid) || pid <= 1) return "";
+  const result = spawnSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 10_000 });
+  return result.status === 0 ? (result.stdout ?? "").trim() : "";
 };
 
 // ── ports ─────────────────────────────────────────────────────────────────────
@@ -204,6 +374,16 @@ interface LogLine {
   readonly [field: string]: unknown;
 }
 
+/** Every child this process started and that still runs, by pid, in children.json: what a resumed session stops first. */
+const liveChildren = new Map<number, string>();
+const saveChildren = (): void => {
+  try {
+    writeJsonAtomic("children.json", [...liveChildren].map(([pid, name]) => ({ pid, name })));
+  } catch {
+    // The directory is gone (an --analyze-only run never gets here): nothing to keep.
+  }
+};
+
 class Child {
   exited: number | string | null = null;
   readonly pid: number | undefined;
@@ -231,6 +411,10 @@ class Child {
       { cwd: KEEPER_DIR, stdio: ["ignore", "pipe", "pipe"] },
     );
     this.pid = this.#child.pid;
+    if (this.pid !== undefined) {
+      liveChildren.set(this.pid, name);
+      saveChildren();
+    }
     const take = (chunk: Buffer): void => {
       this.#log.write(chunk);
       this.#partial += chunk.toString("utf8");
@@ -256,6 +440,10 @@ class Child {
     this.#child.on("exit", (code, signal) => {
       this.exited = code ?? signal ?? -1;
       this.#log.end();
+      if (this.pid !== undefined) {
+        liveChildren.delete(this.pid);
+        saveChildren();
+      }
     });
   }
 
@@ -291,11 +479,20 @@ class Child {
 }
 
 // ── the relay: one path per process, in front of the census proxy ─────────────
+/** A request the relay held on a frozen path: when it came, and whether its caller gave up on it or it was let through. */
+interface HeldCall {
+  readonly tag: string;
+  readonly at: number;
+  abandonedAfterMs: number | null;
+  releasedAfterMs: number | null;
+}
+
 class Relay {
   port = 0;
   readonly calls = new Map<string, number>();
   readonly #frozen = new Set<string>();
-  readonly #held = new Map<string, { readonly response: ServerResponse; readonly body: string }[]>();
+  readonly #held = new Map<string, { readonly response: ServerResponse; readonly body: string; readonly call: HeldCall }[]>();
+  readonly #heldCalls: HeldCall[] = [];
   #server: Server | null = null;
 
   constructor(private readonly proxyPort: number) {}
@@ -320,6 +517,11 @@ class Relay {
     return (this.#held.get(tag) ?? []).filter((entry) => !entry.response.destroyed && !entry.response.socket?.destroyed).length;
   }
 
+  /** The calls held on a path since an instant: each with how long its caller waited before giving up, or before the thaw let it through. */
+  heldCalls(tag: string, since: number): readonly HeldCall[] {
+    return this.#heldCalls.filter((call) => call.tag === tag && call.at >= since);
+  }
+
   /** Let the path answer again; requests held from a process still alive go on to the proxy. */
   thaw(tag: string): void {
     this.#frozen.delete(tag);
@@ -327,6 +529,7 @@ class Relay {
     this.#held.delete(tag);
     for (const entry of held) {
       if (entry.response.destroyed || entry.response.socket?.destroyed === true) continue;
+      entry.call.releasedAfterMs = Date.now() - entry.call.at;
       void this.#forward(tag, entry.body, entry.response);
     }
   }
@@ -349,8 +552,16 @@ class Relay {
     const body = Buffer.concat(chunks).toString("utf8");
     this.calls.set(tag, (this.calls.get(tag) ?? 0) + 1);
     if (this.#frozen.has(tag)) {
+      const call: HeldCall = { tag, at: Date.now(), abandonedAfterMs: null, releasedAfterMs: null };
+      this.#heldCalls.push(call);
+      // A WEEK OF DRILLS KEEPS AN HOUR OF HELD CALLS: the drills read only their own.
+      while (this.#heldCalls.length > 0 && this.#heldCalls[0]!.at < Date.now() - 3_600_000) this.#heldCalls.shift();
+      // THE CALLER GAVE UP (its own timeout closed the connection) before the path was thawed.
+      response.on("close", () => {
+        if (call.releasedAfterMs === null && call.abandonedAfterMs === null) call.abandonedAfterMs = Date.now() - call.at;
+      });
       const list = this.#held.get(tag) ?? [];
-      list.push({ response, body });
+      list.push({ response, body, call });
       this.#held.set(tag, list);
       return;
     }
@@ -384,6 +595,22 @@ interface Proc {
   readonly tag: string;
   readonly child: Child;
   id: string | null;
+  /** A drill ended it on purpose: not an exit "on its own". */
+  byDrill: boolean;
+  /** Its exit has been looked at by keepFleetWhole. */
+  accounted: boolean;
+}
+
+/** One start of the harness on the run's state directory. */
+interface Session {
+  readonly n: number;
+  readonly pid: number;
+  readonly startedAt: string;
+  steadyStart: number | null;
+  endedAt: string | null;
+  endReason: string | null;
+  /** Why the run was not beating before this session began: the cause the coverage clock names its gap by. */
+  readonly resumeCause: string | null;
 }
 
 interface RunMeta {
@@ -392,15 +619,28 @@ interface RunMeta {
   proxyPort: number | null;
   relayPort: number | null;
   startedAt: string;
+  /** The first session's; each session's own is in `sessions`. */
   steadyStart: number | null;
+  /** Unused since the coverage clock: the run ends on covered time, not at an instant. */
   endAt: number | null;
   program: string;
   cuts: string;
+  /** The coverage target in minutes (the name a run from before the coverage clock used for its window). */
   minutes: number;
+  targetMinutes: number;
   drills: string;
   drillRepeatHours: number;
+  drillWarmupMinutes: number;
+  drillSpacingMinutes: number;
   proxy: string;
   production: readonly string[];
+  model: string | null;
+  pgImage: string;
+  pgVolume: string | null;
+  reportEveryMinutes: number;
+  letters: { scheduler: number; worker: number };
+  sessions: Session[];
+  completedAt: string | null;
 }
 
 const meta: RunMeta = {
@@ -412,26 +652,73 @@ const meta: RunMeta = {
   steadyStart: null,
   endAt: null,
   program: SIP_PROGRAM_ID,
-  cuts: CUTS,
-  minutes: MINUTES,
-  drills: DRILL_SPEC,
-  drillRepeatHours: DRILL_REPEAT_HOURS,
-  proxy: PROXY,
-  production: PRODUCTION,
+  cuts: fromArgs.cuts,
+  minutes: fromArgs.targetMinutes,
+  targetMinutes: fromArgs.targetMinutes,
+  drills: fromArgs.drills,
+  drillRepeatHours: fromArgs.drillRepeatHours,
+  drillWarmupMinutes: fromArgs.drillWarmupMinutes,
+  drillSpacingMinutes: fromArgs.drillSpacingMinutes,
+  proxy: fromArgs.proxy,
+  production: fromArgs.production,
+  model: fromArgs.model,
+  pgImage: fromArgs.pgImage,
+  pgVolume: fromArgs.pgVolume,
+  reportEveryMinutes: fromArgs.reportEveryMinutes,
+  letters: { scheduler: 0, worker: 0 },
+  sessions: [],
+  completedAt: null,
 };
-const saveMeta = (): void => writeFileSync(resolve(OUT, "run.json"), JSON.stringify(meta, null, 2));
+const settingsOf = (m: RunMeta): Settings => ({
+  targetMinutes: m.targetMinutes,
+  drills: m.drills,
+  drillRepeatHours: m.drillRepeatHours,
+  drillWarmupMinutes: m.drillWarmupMinutes,
+  drillSpacingMinutes: m.drillSpacingMinutes,
+  proxy: m.proxy,
+  model: m.model,
+  production: m.production,
+  cuts: m.cuts,
+  pgImage: m.pgImage,
+  pgVolume: m.pgVolume,
+  reportEveryMinutes: m.reportEveryMinutes,
+});
+let S: Settings = fromArgs;
+const saveMeta = (): void => writeJsonAtomic("run.json", meta);
 
 const procs: Proc[] = [];
 const shadow = new Map<string, ShadowWallet>();
-const compareRows: CompareRow[] = [];
+const recentRows: CompareRow[] = [];
 const stopped: Record<string, unknown>[] = [];
+let session: Session | null = null;
 let proxyChild: Child | null = null;
 let relay: Relay | null = null;
 let db: pg.Pool | null = null;
 let databaseUrl = "";
 let finishing = false;
-/** Each kind's processes are lettered in start order: sched-a, sched-b, sched-c …; worker-a, worker-b, worker-c … */
-const letters = { scheduler: 0, worker: 0 };
+/** The one finish of this session: a signal and the end of the run share it, and the process exits only after it. */
+let finished: Promise<void> | null = null;
+/** The container THIS process started, and whether it has been stopped: the only one its exit may touch. */
+let ownContainer: string | null = null;
+let containerStopped = false;
+/** The coverage clock, recomputed at every beat from every beat of the run. */
+const beats: CoverageBeat[] = [];
+let coverage: Coverage = coverageOf([]);
+let plan: readonly PlannedDrill[] = [];
+let drillResults: (DrillResultLine & Record<string, unknown>)[] = [];
+let currentDrill: string | null = null;
+let lastDrillEnd = 0;
+let overlapMax = 0;
+let overlapLast: number | null = null;
+/** Since when the database has not answered the minute's audit outside a drill; null while it answers. */
+let dbDownSince: number | null = null;
+/** The code this session exits with: 1 when it ended itself because it could not work (the loop resumes it). */
+let exitCode = 0;
+let exitsOnTheirOwn = 0;
+const restarts: number[] = [];
+let restartLimitLoggedAt = 0;
+let analysisChild: ChildProcess | null = null;
+let lastReportAt = 0;
 
 const docker = (...args: string[]): { status: number | null; stdout: string; stderr: string } => {
   const result = spawnSync("docker", args, { encoding: "utf8", timeout: 120_000 });
@@ -441,19 +728,24 @@ const docker = (...args: string[]): { status: number | null; stdout: string; std
 const query = async <T extends Record<string, unknown>>(text: string, values: unknown[] = []): Promise<T[]> => (await db!.query<T>(text, values)).rows;
 
 const alive = (kind: Proc["kind"]): Proc[] => procs.filter((proc) => proc.kind === kind && proc.child.exited === null);
+/** How the census proxy exited, or null while it runs (or before it started). */
+const proxyExit = (): number | string | null => proxyChild?.exited ?? null;
+const fleetWhole = (): boolean => alive("scheduler").length >= FLEET.scheduler && alive("worker").length >= FLEET.worker;
 
 const shared = (tag: string): Record<string, string> => ({
   SIP_SOLANA_RPC_URLS: relay!.url(tag),
   SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
   DATABASE_URL: databaseUrl,
   SIP_SOLANA_DISPATCH: "shadow",
-  ...(CUTS === "" ? {} : { SIP_SOLANA_CUTS: CUTS }),
+  ...(S.cuts === "" ? {} : { SIP_SOLANA_CUTS: S.cuts }),
 });
 
 /** Start a scheduler or a worker and learn its worker_id from the row it registers at boot. */
 async function startProc(kind: Proc["kind"]): Promise<Proc> {
-  const n = letters[kind];
-  letters[kind] += 1;
+  // LETTERED ACROSS THE WHOLE RUN: a resumed session goes on from the last letter, so no log file is shared.
+  const n = meta.letters[kind];
+  meta.letters[kind] += 1;
+  saveMeta();
   const letter = String.fromCharCode(97 + (n % 26)) + (n >= 26 ? String(Math.floor(n / 26)) : "");
   const name = `${kind === "scheduler" ? "sched" : "worker"}-${letter}`;
   const known = new Set((await query<{ worker_id: string }>("SELECT worker_id FROM sip_solana.worker")).map((row) => row.worker_id));
@@ -466,7 +758,7 @@ async function startProc(kind: Proc["kind"]): Promise<Proc> {
       jsonl("ticks.jsonl", { process: from.name, ...line });
     }
   });
-  const proc: Proc = { name, kind, tag: name, child, id: null };
+  const proc: Proc = { name, kind, tag: name, child, id: null, byDrill: false, accounted: false };
   procs.push(proc);
   const started = Date.now();
   while (Date.now() - started < 90_000) {
@@ -479,7 +771,10 @@ async function startProc(kind: Proc["kind"]): Promise<Proc> {
     }
     await sleep(250);
   }
-  if (proc.id === null) throw new Error(`${name} registered no worker row within 90 s; see logs/${name}.log`);
+  if (proc.id === null) {
+    child.kill("SIGKILL");
+    throw new Error(`${name} registered no worker row within 90 s; see logs/${name}.log`);
+  }
   event("process started", { name, kind, pid: child.pid, workerId: proc.id });
   return proc;
 }
@@ -492,17 +787,68 @@ async function handover(...args: string[]): Promise<number | string | null> {
   return code;
 }
 
+// ── the database's container ──────────────────────────────────────────────────
+const STATE_LABEL = "sip.shadow.state";
+/** The container of a run with a named volume: one name per volume, so a resume finds what the last session left. */
+const containerFor = (volume: string): string => (volume.endsWith("-pgdata") ? `${volume.slice(0, -"-pgdata".length)}-pg` : `${volume}-pg`);
+
+/** The named volume, created with this run's label, or verified to carry it: a volume of anything else is refused, never mounted. */
+function ensureVolume(volume: string): "created" | "found" {
+  const label = docker("volume", "inspect", "-f", `{{ index .Labels "${STATE_LABEL}" }}`, volume);
+  if (label.status === 0) {
+    if (label.stdout.trim() !== OUT) throw new Error(`the docker volume ${volume} exists and is not this run's (its ${STATE_LABEL} label is not ${OUT}); pick another --pg-volume`);
+    return "found";
+  }
+  const created = docker("volume", "create", "--label", `${STATE_LABEL}=${OUT}`, volume);
+  if (created.status !== 0) throw new Error(`docker volume create failed: ${created.stderr.slice(0, 300)}`);
+  return "created";
+}
+
+/** A container of this name the last session left (a kill, a crash): unpaused, stopped, removed — only if it carries this run's label. */
+function removeLeftoverContainer(name: string): string | null {
+  const found = docker("ps", "-a", "--filter", `name=^${name}$`, "--format", "{{.State}}").stdout.trim();
+  if (found === "") return null;
+  const label = docker("inspect", "-f", `{{ index .Config.Labels "${STATE_LABEL}" }}`, name).stdout.trim();
+  if (label !== OUT) throw new Error(`a container named ${name} exists and is not this run's; it is left alone, and this run will not start`);
+  docker("unpause", name);
+  docker("stop", "-t", "30", name);
+  docker("rm", "-f", name);
+  return found;
+}
+
 // ── setup ─────────────────────────────────────────────────────────────────────
 async function setup(): Promise<void> {
   mkdirSync(resolve(OUT, "logs"), { recursive: true });
   mkdirSync(resolve(OUT, "rpc"), { recursive: true });
-  if (!existsSync(PROXY)) throw new Error(`no census proxy at ${PROXY}`);
-  event("harness starting", { out: OUT, minutes: MINUTES, drills: DRILL_SPEC, cuts: CUTS || "none", program: SIP_PROGRAM_ID, node: process.version });
+  if (!existsSync(S.proxy)) throw new Error(`no census proxy at ${S.proxy}`);
+  event("harness starting", {
+    out: OUT,
+    resumed: session!.n > 1,
+    targetHours: S.targetMinutes / 60,
+    drills: S.drills,
+    cuts: S.cuts || "none",
+    pgVolume: S.pgVolume ?? "none (the data goes with the container)",
+    program: SIP_PROGRAM_ID,
+    node: process.version,
+  });
 
-  // POSTGRES 16, OURS ALONE: a unique name, --rm, the loopback only, trust auth (no password exists to leak).
-  const pgName = `sip-shadow-pg-${randomBytes(4).toString("hex")}`;
-  const run = docker("run", "--rm", "-d", "--name", pgName, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-p", "127.0.0.1::5432", PG_IMAGE);
+  // POSTGRES 16, OURS ALONE: the loopback only, trust auth (no password exists to leak), and our label.
+  let pgName: string;
+  const runArgs = ["run", "--rm", "-d", "--label", `${STATE_LABEL}=${OUT}`, "-e", "POSTGRES_HOST_AUTH_METHOD=trust", "-p", "127.0.0.1::5432"];
+  if (S.pgVolume !== null) {
+    const volume = ensureVolume(S.pgVolume);
+    pgName = containerFor(S.pgVolume);
+    const leftover = removeLeftoverContainer(pgName);
+    if (leftover !== null) event("the last session's container was still there: stopped and removed (its data is in the volume)", { container: pgName, state: leftover });
+    runArgs.push("--name", pgName, "-v", `${S.pgVolume}:/var/lib/postgresql/data`);
+    event("database volume", { volume: S.pgVolume, state: volume });
+  } else {
+    pgName = `sip-shadow-pg-${randomBytes(4).toString("hex")}`;
+    runArgs.push("--name", pgName);
+  }
+  const run = docker(...runArgs, S.pgImage);
   if (run.status !== 0) throw new Error(`docker run failed: ${run.stderr.slice(0, 300)}`);
+  ownContainer = pgName;
   meta.pgName = pgName;
   saveMeta();
   const mapped = /127\.0\.0\.1:(\d+)/.exec(docker("port", pgName, "5432/tcp").stdout)?.[1];
@@ -516,22 +862,25 @@ async function setup(): Promise<void> {
       await admin.query("SELECT 1");
       break;
     } catch {
-      if (Date.now() - ready > 90_000) throw new Error("the database did not accept connections within 90 s");
+      // A first start runs initdb, and a resumed one may replay its WAL after a hard stop: both before the port answers.
+      if (Date.now() - ready > 180_000) throw new Error("the database did not accept connections within 3 minutes");
       await sleep(500);
     }
   }
-  await admin.query("CREATE DATABASE shadow");
+  const existed = (await admin.query("SELECT 1 FROM pg_database WHERE datname = 'shadow'")).rowCount === 1;
+  if (!existed) await admin.query("CREATE DATABASE shadow");
   await admin.end();
   databaseUrl = `postgres://postgres@127.0.0.1:${mapped}/shadow?sslmode=disable`;
   db = new pg.Pool({ connectionString: databaseUrl, max: 2, connectionTimeoutMillis: 5_000, query_timeout: 8_000 });
   db.on("error", () => undefined);
+  // IDEMPOTENT (its header says so): applied again on a resumed database, it changes nothing.
   await db.query(readFileSync(SCHEMA, "utf8"));
-  event("database ready", { container: pgName, port: meta.pgPort, image: PG_IMAGE });
+  event("database ready", { container: pgName, port: meta.pgPort, image: S.pgImage, database: existed ? "found (resumed)" : "created" });
 
   // THE CENSUS PROXY: the only way out to the chain.
   const proxyPort = await freePortPair();
   meta.proxyPort = proxyPort;
-  proxyChild = new Child("census-proxy", process.execPath, [PROXY, "--port", String(proxyPort), "--log", resolve(OUT, "rpc/calls.jsonl")], {});
+  proxyChild = new Child("census-proxy", process.execPath, [S.proxy, "--port", String(proxyPort), "--log", resolve(OUT, "rpc/calls.jsonl")], {});
   for (let i = 0; ; i += 1) {
     try {
       const census = await fetch(`http://127.0.0.1:${proxyPort}/__census`, { signal: AbortSignal.timeout(1_000) });
@@ -549,7 +898,9 @@ async function setup(): Promise<void> {
   event("census proxy and relay listening", { proxyPort, relayPort: relay.port, upstream: "https://api.mainnet-beta.solana.com (the proxy refuses any other)" });
 
   // THE HANDOVER, AS A SHADOW'S DATABASE NEEDS IT: new vaults go to the queue, through 'draining'.
-  if ((await handover("new-vaults", "queue")) !== 0) throw new Error("dispatch-handover new-vaults queue failed; see logs/handover-new-vaults.log");
+  const [fleetRow] = await query<{ new_vault_system: string }>("SELECT new_vault_system FROM sip_solana.fleet");
+  if (fleetRow?.new_vault_system === "queue") event("handover skipped: new vaults already go to the queue");
+  else if ((await handover("new-vaults", "queue")) !== 0) throw new Error("dispatch-handover new-vaults queue failed; see logs/handover-new-vaults.log");
 
   const first = await startProc("scheduler");
   const discovered = Date.now();
@@ -567,22 +918,29 @@ async function setup(): Promise<void> {
   await startProc("scheduler");
 
   // ARM: the first call records the height, the next moves every vault once 150 blocks are final.
-  const armStarted = Date.now();
-  for (;;) {
-    const code = await handover("arm", "--all", "--roles=none", "--allow-dry");
+  const allQueued = async (): Promise<boolean> => {
     const systems = await query<{ system: string }>("SELECT DISTINCT system FROM sip_solana.vault_work");
-    if (code === 0 && systems.length === 1 && systems[0]!.system === "queue") break;
-    if (Date.now() - armStarted > 6 * 60_000) throw new Error("arm did not move the vaults to the queue within 6 minutes");
-    await sleep(20_000);
+    return systems.length === 1 && systems[0]!.system === "queue";
+  };
+  if (await allQueued()) {
+    event("armed already: every vault is in the queue");
+  } else {
+    const armStarted = Date.now();
+    for (;;) {
+      const code = await handover("arm", "--all", "--roles=none", "--allow-dry");
+      if (code === 0 && (await allQueued())) break;
+      if (Date.now() - armStarted > 6 * 60_000) throw new Error("arm did not move the vaults to the queue within 6 minutes");
+      await sleep(20_000);
+    }
+    event("armed", { tookMs: Date.now() - armStarted });
   }
-  event("armed", { tookMs: Date.now() - armStarted });
 
   await startProc("worker");
   await startProc("worker");
-  meta.steadyStart = Date.now();
-  meta.endAt = meta.steadyStart + MINUTES * 60_000;
+  session!.steadyStart = Date.now();
+  meta.steadyStart ??= session!.steadyStart;
   saveMeta();
-  event("fleet up", { steadyStart: new Date(meta.steadyStart).toISOString(), endAt: new Date(meta.endAt).toISOString() });
+  event("fleet up", { steadyStart: iso(session!.steadyStart), coveredHours: coverage.coveredMs / 3_600_000, targetHours: S.targetMinutes / 60 });
 }
 
 // ── once a minute ─────────────────────────────────────────────────────────────
@@ -607,15 +965,19 @@ const trimmed = (body: unknown): unknown => {
   return { role: b["role"], mode: b["mode"], sweeps: b["sweeps"], lastSweepAt: b["lastSweepAt"], lastSweepError: b["lastSweepError"], wallets: b["wallets"] };
 };
 
+/** Why a session's gap began, by session number: what the coverage clock names the step across two sessions by. */
+const sessionCause = (n: number): string | undefined => meta.sessions.find((s) => s.n === n)?.resumeCause ?? undefined;
+
 async function minute(): Promise<void> {
   const now = Date.now();
-  if (PRODUCTION.length === 2) {
-    const [profit, volume] = await Promise.all(PRODUCTION.map((url) => fetchStatus(url)));
-    jsonl("production.jsonl", { at: new Date(now).toISOString(), profit: { status: profit!.status, body: trimmed(profit!.body) }, volume: { status: volume!.status, body: trimmed(volume!.body) } });
+  if (S.production.length === 2) {
+    const [profit, volume] = await Promise.all(S.production.map((url) => fetchStatus(url)));
+    jsonl("production.jsonl", { at: iso(now), profit: { status: profit!.status, body: trimmed(profit!.body) }, volume: { status: volume!.status, body: trimmed(volume!.body) } });
     // THE INVEST PER VAULT: the vaults are the ones the workers' jobs named.
     const rows = compareAt(Date.now(), productionDecisions(profit!.body, volume!.body, (wallet) => shadow.get(wallet)?.vault), shadow);
     for (const row of rows) jsonl("compare.jsonl", row);
-    compareRows.push(...rows);
+    recentRows.push(...rows);
+    if (recentRows.length > 50) recentRows.splice(0, recentRows.length - 50);
   }
   let audit: Record<string, unknown>;
   try {
@@ -627,22 +989,135 @@ async function minute(): Promise<void> {
     );
     const workers = await query("SELECT worker_id, kind, busy, rps_quota, stopped_at IS NOT NULL AS stopped FROM sip_solana.worker ORDER BY started_at");
     const fleet = await query("SELECT scheduler_id, tick_at, full_pass_reason, new_vault_system FROM sip_solana.fleet");
-    audit = { at: new Date(now).toISOString(), overlapRows: overlap.length, intents, work, workers, fleet: fleet[0] ?? null };
+    audit = { at: iso(now), overlapRows: overlap.length, intents, work, workers, fleet: fleet[0] ?? null };
+    overlapLast = overlap.length;
+    overlapMax = Math.max(overlapMax, overlap.length);
   } catch (error) {
-    audit = { at: new Date(now).toISOString(), unavailable: error instanceof Error ? error.message.slice(0, 200) : "error" };
+    audit = { at: iso(now), unavailable: error instanceof Error ? error.message.slice(0, 200) : "error" };
   }
   jsonl("audit.jsonl", audit);
-  const recent = compareRows.filter((row) => row.at >= now - 1_000);
+  // THE BEAT: what the coverage clock is read from. The shadow could work only with processes, a database that
+  // answers and a proxy — a drill's deliberate outage excepted.
+  const schedulers = alive("scheduler").length;
+  const workers = alive("worker").length;
+  const dbAnswered = audit["unavailable"] === undefined;
+  const proxyUp = proxyChild !== null && proxyChild.exited === null;
+  dbDownSince = dbAnswered || currentDrill !== null ? null : (dbDownSince ?? now);
+  const beat = { at: now, session: session!.n, fleetUp: schedulers >= 1 && workers >= 1 && proxyUp && (dbAnswered || currentDrill !== null) };
+  jsonl("coverage.jsonl", { at: iso(now), session: beat.session, fleetUp: beat.fleetUp, schedulers, workers, database: dbAnswered, proxy: proxyUp, drill: currentDrill });
+  beats.push(beat);
+  coverage = coverageOf(beats, { sessionCause });
+  writeStatus(true);
+  const recent = recentRows.filter((row) => row.at >= now - 1_000);
   console.log(
     JSON.stringify({
-      at: new Date(now).toISOString(),
-      minute: meta.steadyStart === null ? null : Math.round((now - meta.steadyStart) / 60_000),
+      at: iso(now),
+      coveredHours: Math.round((coverage.coveredMs / 3_600_000) * 100) / 100,
       compare: recent.map((row) => `${row.wallet.slice(0, 4)}:${row.verdict}`).join(" "),
       overlapRows: audit["overlapRows"] ?? "unavailable",
       alive: procs.filter((proc) => proc.child.exited === null).map((proc) => proc.name),
-      relayCalls: Object.fromEntries(relay?.calls ?? []),
+      drill: currentDrill,
     }),
   );
+}
+
+/** status.json: the one screen's numbers, rewritten every minute (and at the end, with running false). */
+function writeStatus(running: boolean): void {
+  const ledger = drillLedger(plan, drillResults, DRILL_MAX_INTERRUPTIONS);
+  const gapMs = coverage.gaps.reduce((sum, gap) => sum + gap.ms, 0);
+  writeJsonAtomic("status.json", {
+    at: at(),
+    running,
+    pid: process.pid,
+    session: session?.n ?? null,
+    sessionStartedAt: session?.startedAt ?? null,
+    steadySince: session?.steadyStart == null ? null : iso(session.steadyStart),
+    coveredHours: coverage.coveredMs / 3_600_000,
+    targetHours: S.targetMinutes / 60,
+    lastBeatAt: coverage.lastBeatAt === null ? null : iso(coverage.lastBeatAt),
+    gaps: {
+      count: coverage.gaps.length,
+      hours: gapMs / 3_600_000,
+      last: coverage.gaps.slice(-5).map((gap) => ({ from: iso(gap.from), to: iso(gap.to), minutes: Math.round(gap.ms / 6_000) / 10, cause: gap.cause })),
+    },
+    alive: procs.filter((proc) => proc.child.exited === null).map((proc) => proc.name),
+    overlap: { lastAudit: overlapLast, maxSeen: overlapMax },
+    drills: {
+      planned: plan.length,
+      done: ledger.done.length,
+      passed: ledger.done.filter((drill) => drill.ok).length,
+      failed: ledger.done.filter((drill) => !drill.ok).map((drill) => drill.id),
+      interruptedAttempts: Object.values(ledger.interrupted).reduce((sum, n) => sum + n, 0),
+      gaveUp: ledger.gaveUp,
+      owed: ledger.owed.length,
+      running: currentDrill,
+      next: ledger.owed[0] === undefined ? null : { id: ledger.owed[0].id, atCoveredHours: ledger.owed[0].atCoveredMs / 3_600_000 },
+    },
+    exitsOnTheirOwn,
+    completedAt: meta.completedAt,
+  });
+}
+
+/** Railway's ON_FAILURE, here: a process that exited on its own is recorded and replaced. Never while a drill runs (the drill replaces its own victims). */
+async function keepFleetWhole(): Promise<void> {
+  if (finishing || currentDrill !== null || session?.steadyStart == null) return;
+  for (const proc of procs) {
+    if (proc.child.exited === null || proc.accounted) continue;
+    proc.accounted = true;
+    // ITS LINES ARE NOT NEEDED ANY MORE: a week of replacements must not keep 3,000 lines each.
+    proc.child.ring.splice(0);
+    if (proc.byDrill) continue;
+    exitsOnTheirOwn += 1;
+    const line = { at: at(), session: session.n, name: proc.name, kind: proc.kind, pid: proc.child.pid, exit: proc.child.exited, warnings: proc.child.warnings, errors: proc.child.errors };
+    jsonl("exits.jsonl", line);
+    event("process exited on its own", line);
+  }
+  for (const kind of ["scheduler", "worker"] as const) {
+    while (!finishing && currentDrill === null && alive(kind).length < FLEET[kind]) {
+      const hourAgo = Date.now() - 3_600_000;
+      if (restarts.filter((t) => t > hourAgo).length >= RESTARTS_PER_HOUR) {
+        if (Date.now() - restartLimitLoggedAt > 3_600_000) {
+          restartLimitLoggedAt = Date.now();
+          event("restart limit reached: the fleet stays short until the hour passes", { kind, limitPerHour: RESTARTS_PER_HOUR });
+        }
+        break;
+      }
+      restarts.push(Date.now());
+      try {
+        const replacement = await startProc(kind);
+        event("replaced to keep the fleet whole", { kind, replacement: replacement.name });
+      } catch (error) {
+        event("a replacement failed to start", { kind, detail: error instanceof Error ? error.message.slice(0, 300) : String(error) });
+        break;
+      }
+    }
+  }
+}
+
+/** The rolling report: --analyze in its own process, so this one's event loop (the relay) never waits on a week of files. */
+function rollingReport(): void {
+  if (analysisChild !== null || finishing) return;
+  lastReportAt = Date.now();
+  const log = openSync(resolve(OUT, "logs", "analyze.log"), "a");
+  const child = spawn(process.execPath, ["--import", "tsx", HARNESS, "--analyze", OUT], {
+    cwd: KEEPER_DIR,
+    stdio: ["ignore", log, log],
+    env: { PATH: process.env["PATH"] ?? "/usr/bin:/bin", HOME: process.env["HOME"] ?? "/tmp" },
+  });
+  analysisChild = child;
+  if (child.pid !== undefined) {
+    liveChildren.set(child.pid, "analyze");
+    saveChildren();
+  }
+  child.on("exit", (code) => {
+    closeSync(log);
+    if (child.pid !== undefined) {
+      liveChildren.delete(child.pid);
+      saveChildren();
+    }
+    analysisChild = null;
+    if (code !== 0 && !finishing) event("the rolling report failed; see logs/analyze.log", { exit: code });
+  });
 }
 
 // ── the drills ────────────────────────────────────────────────────────────────
@@ -733,13 +1208,21 @@ async function auditRows(): Promise<number | null> {
   }
 }
 
-async function drillWorkerKill(): Promise<Record<string, unknown>> {
+/**
+ * worker-kill, and worker-sigterm-0 (`sigtermFirst`): Railway's draining at 0 s
+ * sends SIGTERM and SIGKILL in the same instant, so the SIGTERM handler gets no
+ * time to release — the lease must run out, exactly as for a plain SIGKILL
+ * (ADR §4.9 row 27).
+ */
+async function drillWorkerKill(sigtermFirst: boolean): Promise<Record<string, unknown>> {
   const workers = alive("worker");
   if (workers.length < 2) return { ok: false, detail: "fewer than two live workers" };
   const victim = workers[0]!;
   const held = await holdMidJob(victim);
   if (held === null) return { ok: false, detail: `${victim.name} held no vault mid-job within 4 minutes of its path being frozen` };
   const killAt = await dbNow();
+  victim.byDrill = true;
+  if (sigtermFirst) victim.child.kill("SIGTERM");
   victim.child.kill("SIGKILL");
   const exit = await victim.child.exit(30_000);
   relay!.thaw(victim.tag);
@@ -777,9 +1260,19 @@ async function drillWorkerKill(): Promise<Record<string, unknown>> {
     vaults.every((v) => v.fenceAfter !== null && BigInt(v.fenceAfter) > BigInt(v.fenceAtKill) && v.successorWaitedTheLease && v.successorIsAliveWorker && v.completedOutcome !== null) &&
     openOfVictim === 0 &&
     overlap === 0;
-  return { ok, victim: victim.name, exit, vaults, openIntentsOfVictimAfter: openOfVictim, overlapRows: overlap, replacement: replacement.name };
+  return {
+    ok,
+    victim: victim.name,
+    signals: sigtermFirst ? "SIGTERM, then SIGKILL in the same instant (Railway's draining at 0 s)" : "SIGKILL",
+    exit,
+    vaults,
+    openIntentsOfVictimAfter: openOfVictim,
+    overlapRows: overlap,
+    replacement: replacement.name,
+  };
 }
 
+/** worker-sigterm-30: SIGTERM, and SIGKILL at Railway's 30 s if the process still runs. */
 async function drillWorkerSigterm(): Promise<Record<string, unknown>> {
   const workers = alive("worker");
   if (workers.length < 2) return { ok: false, detail: "fewer than two live workers" };
@@ -788,12 +1281,18 @@ async function drillWorkerSigterm(): Promise<Record<string, unknown>> {
   if (held === null) return { ok: false, detail: `${victim.name} held no vault mid-job within 4 minutes of its path being frozen` };
   const termAt = await dbNow();
   const termLocal = Date.now();
+  victim.byDrill = true;
   victim.child.kill("SIGTERM");
   // THE PATH STAYS FROZEN: the job cannot end by itself, so the drain runs out and the job is aborted.
-  const exit = await victim.child.exit(SIGTERM_DRAIN_MS + 60_000);
+  let exit = await victim.child.exit(RAILWAY_DRAINING_MS);
   const exitAfterMs = Date.now() - termLocal;
+  // RAILWAY'S SIGKILL AT THE END OF ITS DRAINING: a worker still running at 30 s fails the drill.
+  const killedAtDeadline = exit === null;
+  if (exit === null) {
+    victim.child.kill("SIGKILL");
+    exit = await victim.child.exit(10_000);
+  }
   relay!.thaw(victim.tag);
-  if (exit === null) victim.child.kill("SIGKILL");
   const stoppedLine = victim.child.find("worker stopped", termLocal)?.line ?? null;
   const vaults = await Promise.all(
     held.map(async (hold) => {
@@ -818,6 +1317,7 @@ async function drillWorkerSigterm(): Promise<Record<string, unknown>> {
   const released = Number((stoppedLine?.["releasedOnSigterm"] as number | undefined) ?? -1);
   const ok =
     exit === 0 &&
+    !killedAtDeadline &&
     row?.stopped === true &&
     released >= held.length &&
     vaults.every((v) => v.releasedAfterTermMs !== null && v.releasedAfterTermMs <= SIGTERM_DRAIN_MS + 5_000 && v.claimedAfterReleaseMs !== null && v.claimedAfterReleaseMs < 10_000 && v.completedOutcome !== null) &&
@@ -827,6 +1327,8 @@ async function drillWorkerSigterm(): Promise<Record<string, unknown>> {
     victim: victim.name,
     exit,
     exitAfterTermMs: exitAfterMs,
+    railwayDrainingMs: RAILWAY_DRAINING_MS,
+    killedAtDeadline,
     drainMs: SIGTERM_DRAIN_MS,
     workerStopped: stoppedLine === null ? null : { drained: stoppedLine["drained"], releasedOnSigterm: stoppedLine["releasedOnSigterm"] },
     rowClosed: row?.stopped ?? null,
@@ -845,6 +1347,7 @@ async function drillSchedulerKill(): Promise<Record<string, unknown>> {
   const vaults = (await query("SELECT 1 FROM sip_solana.vault_work WHERE system = 'queue'")).length;
   const killLocal = Date.now();
   const killAt = await dbNow();
+  active.byDrill = true;
   active.child.kill("SIGKILL");
   const exit = await active.child.exit(30_000);
   let took: { at: number } | undefined;
@@ -888,8 +1391,93 @@ async function drillSchedulerKill(): Promise<Record<string, unknown>> {
   };
 }
 
+/**
+ * scheduler-blocked: the lock holder's every RPC call is held by the relay and
+ * never answered, for SCHEDULER_BLOCK_MS. What bounds it is the RPC pool's
+ * per-call timeout (RPC_CALL_BOUND_MS): each call must be given up within it,
+ * so a tick ends inside the freeze (failed, or on keeper_link's last-known-good
+ * list) instead of hanging, and the process lives on. The watchdog's own exit, for a wedge no
+ * timeout covers, is test/watchdog.test.ts's: if it fires here anyway (code 3),
+ * the standby must have taken the lock. After the thaw: a fresh listing and a
+ * completed job.
+ */
+async function drillSchedulerBlocked(): Promise<Record<string, unknown>> {
+  const [fleet] = await query<{ scheduler_id: string | null }>("SELECT scheduler_id FROM sip_solana.fleet");
+  const schedulers = alive("scheduler");
+  const active = schedulers.find((proc) => proc.id === fleet?.scheduler_id);
+  const standby = schedulers.find((proc) => proc !== active);
+  if (active === undefined || standby === undefined) return { ok: false, detail: "no acting scheduler with a live standby" };
+  // IF ITS WATCHDOG ENDS IT, THAT IS THIS DRILL'S DOING, not an exit on its own.
+  active.byDrill = true;
+  const freezeAt = Date.now();
+  relay!.freeze(active.tag);
+  await sleep(SCHEDULER_BLOCK_MS);
+  const thawAt = Date.now();
+  const calls = relay!.heldCalls(active.tag, freezeAt).map((call) => ({ ...call }));
+  relay!.thaw(active.tag);
+  const during = active.child.since(freezeAt, thawAt);
+  const ticks = {
+    failed: during.filter((entry) => entry.line.event === "scheduler tick failed").length,
+    actedOnLastKnownGood: during.filter((entry) => entry.line.event === "scheduler tick" && (entry.line["discovery"] as { source?: unknown } | undefined)?.source !== "fresh").length,
+    actedFresh: during.filter((entry) => entry.line.event === "scheduler tick" && (entry.line["discovery"] as { source?: unknown } | undefined)?.source === "fresh").length,
+    listingFellBack: during.filter((entry) => entry.line.event === "the link listing failed; this tick schedules keeper_link's last-known-good list").length,
+  };
+  // EACH HELD CALL: given up by its caller within the bound, or still inside the bound when the thaw let it through.
+  const heldPastBound = calls.filter((call) => (call.abandonedAfterMs ?? call.releasedAfterMs ?? thawAt - call.at) > RPC_CALL_BOUND_MS + 5_000);
+  // AFTER THE THAW: a tick with a fresh listing (any scheduler), and a job done.
+  let freshAfter: { process: string; afterThawMs: number } | null = null;
+  let jobAfter: number | null = null;
+  const waitFrom = Date.now();
+  while (Date.now() - waitFrom < 180_000 && (freshAfter === null || jobAfter === null)) {
+    for (const proc of procs) {
+      if (proc.kind === "scheduler" && freshAfter === null) {
+        const tick = proc.child.since(thawAt).find((entry) => entry.line.event === "scheduler tick" && (entry.line["discovery"] as { source?: unknown } | undefined)?.source === "fresh");
+        if (tick !== undefined) freshAfter = { process: proc.name, afterThawMs: tick.at - thawAt };
+      }
+      if (proc.kind === "worker" && jobAfter === null) {
+        const job = proc.child.find("job done", thawAt);
+        if (job !== undefined) jobAfter = job.at - thawAt;
+      }
+    }
+    await sleep(500);
+  }
+  const watchdogExit = active.child.exited;
+  const standbyTook = standby.child.find("took the scheduler lock: this tick is a full pass", freezeAt) !== undefined;
+  const lived = watchdogExit === null;
+  const overlap = await auditRows();
+  const replacement = lived ? null : await startProc("scheduler");
+  if (lived) active.byDrill = false;
+  const ok =
+    calls.length > 0 &&
+    heldPastBound.length === 0 &&
+    ticks.failed + ticks.actedOnLastKnownGood + ticks.actedFresh >= 1 &&
+    (lived || (watchdogExit === 3 && standbyTook)) &&
+    freshAfter !== null &&
+    jobAfter !== null &&
+    overlap === 0;
+  return {
+    ok,
+    blocked: active.name,
+    standby: standby.name,
+    blockedMs: thawAt - freezeAt,
+    boundMs: RPC_CALL_BOUND_MS,
+    heldCalls: calls.length,
+    abandonedWithinMs: calls.length === 0 ? null : Math.max(...calls.map((call) => call.abandonedAfterMs ?? 0)),
+    stillHeldAtThaw: calls.filter((call) => call.abandonedAfterMs === null).length,
+    heldPastBound: heldPastBound.length,
+    ticksDuringBlock: ticks,
+    processLived: lived,
+    exit: watchdogExit,
+    standbyTookTheLock: standbyTook,
+    freshListingAfterThaw: freshAfter,
+    jobDoneAfterThawMs: jobAfter,
+    overlapRows: overlap,
+    replacement: replacement?.name ?? null,
+  };
+}
+
 async function drillPgPause(): Promise<Record<string, unknown>> {
-  const pgName = meta.pgName!;
+  const pgName = ownContainer!;
   const [before] = await query<{ scheduler_id: string | null }>("SELECT scheduler_id FROM sip_solana.fleet");
   // THE PROCESSES THE PAUSE IS DONE TO: those alive when it starts (an earlier drill's victims are not).
   const running = procs.filter((proc) => proc.child.exited === null);
@@ -928,17 +1516,17 @@ async function drillPgPause(): Promise<Record<string, unknown>> {
   const parked = (await query("SELECT vault_addr FROM sip_solana.vault_work WHERE parked_reason IS NOT NULL")).length;
   const window = { from: pauseAt, until: unpauseAt + 60_000 };
   const byProcess = running.map((proc) => {
-      const lines = proc.child.since(window.from, window.until);
-      const noisy = lines.filter((entry) => entry.line.level === "warn" || entry.line.level === "error");
-      return {
-        name: proc.name,
-        alive: proc.child.exited === null,
-        exit: proc.child.exited,
-        warnOrError: noisy.length,
-        events: [...new Set(noisy.map((entry) => String(entry.line.event)))].slice(0, 8),
-        jobsStopped: lines.filter((entry) => entry.line.event === "job stopped").length,
-      };
-    });
+    const lines = proc.child.since(window.from, window.until);
+    const noisy = lines.filter((entry) => entry.line.level === "warn" || entry.line.level === "error");
+    return {
+      name: proc.name,
+      alive: proc.child.exited === null,
+      exit: proc.child.exited,
+      warnOrError: noisy.length,
+      events: [...new Set(noisy.map((entry) => String(entry.line.event)))].slice(0, 8),
+      jobsStopped: lines.filter((entry) => entry.line.event === "job stopped").length,
+    };
+  });
   const overlap = await auditRows();
   const ok =
     committed[0]!.intents === 0 &&
@@ -963,7 +1551,7 @@ async function drillPgPause(): Promise<Record<string, unknown>> {
 }
 
 async function drillPgOutage(): Promise<Record<string, unknown>> {
-  const pgName = meta.pgName!;
+  const pgName = ownContainer!;
   const workers = alive("worker");
   if (workers.length < 1) return { ok: false, detail: "no live worker" };
   const victim = workers[0]!;
@@ -1081,50 +1669,128 @@ async function drillPgOutage(): Promise<Record<string, unknown>> {
 }
 
 const DRILLS: Record<string, () => Promise<Record<string, unknown>>> = {
-  "worker-kill": drillWorkerKill,
+  "worker-kill": () => drillWorkerKill(false),
+  "worker-sigterm-0": () => drillWorkerKill(true),
+  "worker-sigterm-30": drillWorkerSigterm,
+  // THE 55-MINUTE RUN'S NAME for the 30 s case.
   "worker-sigterm": drillWorkerSigterm,
   "scheduler-kill": drillSchedulerKill,
+  "scheduler-blocked": drillSchedulerBlocked,
   "pg-pause": drillPgPause,
   "pg-outage": drillPgOutage,
 };
 
-function drillSchedule(): { readonly name: string; readonly atMs: number }[] {
-  if (DRILL_SPEC === "none") return [];
-  const once = DRILL_SPEC.split(",").map((entry) => {
-    const [name, minutes] = entry.split("@");
+/**
+ * The drills a run owes, each with an id that is the same in every session:
+ * `week` → weeklyDrillPlan; `name@minutes,…` → due at that many COVERED
+ * minutes (id: the name when it appears once and nothing repeats, else
+ * name@minutes, with r<k>- for the k-th repetition); `none` → none.
+ */
+function drillPlanOf(settings: Pick<Settings, "drills" | "drillRepeatHours" | "targetMinutes">): PlannedDrill[] {
+  if (settings.drills === "none") return [];
+  if (settings.drills === "week") return weeklyDrillPlan(WEEK_DRILLS, Math.max(1, Math.ceil(settings.targetMinutes / 1_440)));
+  const once = settings.drills.split(",").map((entry) => {
+    const [name, minutes] = entry.trim().split("@");
     if (name === undefined || DRILLS[name] === undefined || minutes === undefined || !Number.isFinite(Number(minutes))) throw new Error(`unknown drill entry: ${entry}`);
-    return { name, atMs: Number(minutes) * 60_000 };
+    return { name, minutes: Number(minutes) };
   });
-  if (!(DRILL_REPEAT_HOURS > 0)) return once;
-  const out: { name: string; atMs: number }[] = [];
-  for (let offset = 0; offset < MINUTES * 60_000; offset += DRILL_REPEAT_HOURS * 3_600_000) for (const drill of once) out.push({ name: drill.name, atMs: drill.atMs + offset });
-  return out.sort((a, b) => a.atMs - b.atMs);
+  const unique = (name: string): boolean => once.filter((drill) => drill.name === name).length === 1;
+  if (!(settings.drillRepeatHours > 0)) {
+    return once.map((drill) => ({ id: unique(drill.name) ? drill.name : `${drill.name}@${drill.minutes}`, name: drill.name, atCoveredMs: drill.minutes * 60_000 })).sort((a, b) => a.atCoveredMs - b.atCoveredMs);
+  }
+  const out: PlannedDrill[] = [];
+  for (let k = 0, offset = 0; offset < settings.targetMinutes * 60_000; k += 1, offset += settings.drillRepeatHours * 3_600_000) {
+    for (const drill of once) out.push({ id: `r${k + 1}-${drill.name}@${drill.minutes}`, name: drill.name, atCoveredMs: drill.minutes * 60_000 + offset });
+  }
+  return out.sort((a, b) => a.atCoveredMs - b.atCoveredMs);
 }
 
+/** One drill at a time, each when the coverage clock reaches it, the session is warm, the last drill is far enough back, and the fleet is whole. */
 async function runDrills(): Promise<void> {
-  for (const drill of drillSchedule()) {
-    const due = meta.steadyStart! + drill.atMs;
-    while (Date.now() < due && !finishing) await sleep(1_000);
-    if (finishing || Date.now() > meta.endAt! - 3 * 60_000) return;
-    event("drill starting", { drill: drill.name });
+  for (;;) {
+    if (finishing) return;
+    const next = drillLedger(plan, drillResults, DRILL_MAX_INTERRUPTIONS).owed[0];
+    if (next === undefined) return;
+    const targetMs = S.targetMinutes * 60_000;
+    // DUE TOO LATE TO FINISH INSIDE THE RUN: left owed, and the report says so.
+    if (next.atCoveredMs > targetMs - DRILL_END_MARGIN_MS) return;
+    const now = Date.now();
+    const ready =
+      coverage.coveredMs >= next.atCoveredMs &&
+      session!.steadyStart !== null &&
+      now - session!.steadyStart >= S.drillWarmupMinutes * 60_000 &&
+      now - lastDrillEnd >= S.drillSpacingMinutes * 60_000 &&
+      targetMs - coverage.coveredMs > DRILL_END_MARGIN_MS &&
+      fleetWhole();
+    if (!ready) {
+      await sleep(5_000);
+      continue;
+    }
+    currentDrill = next.id;
+    const coveredHoursAtStart = coverage.coveredMs / 3_600_000;
+    event("drill starting", { id: next.id, drill: next.name, coveredHours: coveredHoursAtStart });
     const started = Date.now();
     let result: Record<string, unknown>;
     try {
-      result = await DRILLS[drill.name]!();
+      result = await DRILLS[next.name]!();
     } catch (error) {
       result = { ok: false, detail: `the drill threw: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}` };
     }
-    const line = { drill: drill.name, startedAt: new Date(started).toISOString(), tookMs: Date.now() - started, ...result };
+    const line: DrillResultLine & Record<string, unknown> = {
+      id: next.id,
+      drill: next.name,
+      session: session!.n,
+      startedAt: iso(started),
+      tookMs: Date.now() - started,
+      coveredHoursAtStart,
+      ...result,
+      // A DRILL THE HARNESS BEGAN STOPPING IN THE MIDDLE OF proved nothing: owed again, not failed.
+      ...(finishing ? { ok: false, interrupted: true, interruptedBy: "the harness began stopping during the drill" } : {}),
+    };
+    drillResults.push(line);
     jsonl("drills.jsonl", line);
-    event("drill done", { drill: drill.name, ok: result["ok"] });
+    event("drill done", { id: next.id, drill: next.name, ok: line.ok, interrupted: line.interrupted === true });
+    currentDrill = null;
+    lastDrillEnd = Date.now();
+  }
+}
+
+/** At resume: a drill the last session started and never wrote a result for is recorded as interrupted (owed again, up to the limit). */
+function reconcileInterruptedDrills(): void {
+  const started = readLines<{ event?: string; id?: string; drill?: string; at?: string; session?: number }>("events.jsonl").filter(
+    (line) => line.event === "drill starting" && typeof line.id === "string",
+  );
+  for (const start of started) {
+    const id = start.id!;
+    const attempts = started.filter((line) => line.id === id).length;
+    const results = drillResults.filter((line) => line.id === id).length;
+    if (results >= attempts) continue;
+    // ONE LINE PER MISSING RESULT, written once: the next pass sees it as a result.
+    const line: DrillResultLine & Record<string, unknown> = {
+      id,
+      drill: start.drill ?? id,
+      session: start.session ?? null,
+      startedAt: start.at ?? null,
+      ok: false,
+      interrupted: true,
+      interruptedBy: "the harness ended during the drill (killed, crashed, a reboot or the power) and wrote no result",
+    };
+    drillResults.push(line);
+    jsonl("drills.jsonl", line);
+    event("drill interrupted by the last session's end: owed again", { id });
   }
 }
 
 // ── the end: stop everything, keep what the database knows, analyse ──────────
-async function finish(reason: string): Promise<void> {
-  if (finishing) return;
+function finish(reason: string, complete = false): Promise<void> {
+  finished ??= finishNow(reason, complete);
+  return finished;
+}
+
+async function finishNow(reason: string, complete: boolean): Promise<void> {
   finishing = true;
-  event("finishing", { reason });
+  event("finishing", { reason, coveredHours: coverage.coveredMs / 3_600_000 });
+  if (analysisChild !== null) analysisChild.kill("SIGKILL");
   // THE DATABASE'S LAST WORD, while the processes still run: the audit and the intents.
   const finalDb: Record<string, unknown> = {};
   if (db !== null) {
@@ -1166,24 +1832,40 @@ async function finish(reason: string): Promise<void> {
     if (proxyChild.exited === null) proxyChild.kill("SIGKILL");
     stopped.push({ what: "census proxy", pid: proxyChild.pid, exit: proxyChild.exited });
   }
-  if (meta.pgName !== null) {
-    docker("unpause", meta.pgName);
-    const stop = docker("stop", meta.pgName);
+  if (ownContainer !== null) {
+    docker("unpause", ownContainer);
+    // A CLEAN SHUTDOWN OF THE DATABASE: with a named volume, the next session starts without crash recovery.
+    const stop = docker("stop", "-t", "30", ownContainer);
     // --rm REMOVES IT AFTER THE STOP RETURNS: asked until it is gone, for up to 15 s.
-    let left = meta.pgName;
+    let left = ownContainer;
     for (let i = 0; i < 30 && left !== ""; i += 1) {
-      left = docker("ps", "-a", "--filter", `name=^${meta.pgName}$`, "--format", "{{.Names}}").stdout.trim();
+      left = docker("ps", "-a", "--filter", `name=^${ownContainer}$`, "--format", "{{.Names}}").stdout.trim();
       if (left !== "") await sleep(500);
     }
-    stopped.push({ what: "postgres container", name: meta.pgName, stopExit: stop.status, removed: left === "" });
+    if (left !== "") docker("rm", "-f", ownContainer);
+    containerStopped = true;
+    stopped.push({
+      what: "postgres container",
+      name: ownContainer,
+      stopExit: stop.status,
+      removed: left === "",
+      volume: S.pgVolume === null ? "none: the data went with the container" : `${S.pgVolume}, kept: a --resume finds the database in it`,
+    });
   }
+  if (session !== null) {
+    session.endedAt = at();
+    session.endReason = reason;
+  }
+  if (complete) meta.completedAt = at();
+  saveMeta();
   writeFileSync(resolve(OUT, "stopped.json"), JSON.stringify(stopped, null, 2));
+  writeStatus(false);
   analyse();
 }
 
 // ── the analysis: a pure function of the files in OUT ─────────────────────────
-function modelPrediction(tokens: readonly string[]): unknown {
-  if (MODEL === undefined) return null;
+function modelPrediction(model: string | null, tokens: readonly string[]): unknown {
+  if (model === null) return null;
   const script = `
 import json, sys
 sys.path.insert(0, sys.argv[1])
@@ -1217,7 +1899,7 @@ print(json.dumps({
   "modelQueueDesign": {"note": "the model's own 'queue' row: C4+C5+C8 assumed, a trusted doorbell, webhook traffic", "credits_day_P1": queue["credits_day_P1"], "credits_day_P2": queue["credits_day_P2"]},
 }))
 `;
-  const result = spawnSync("python3", ["-I", "-c", script, dirname(resolve(MODEL)), JSON.stringify(tokens)], { encoding: "utf8", timeout: 60_000 });
+  const result = spawnSync("python3", ["-I", "-c", script, dirname(resolve(model)), JSON.stringify(tokens)], { encoding: "utf8", timeout: 60_000 });
   if (result.status !== 0) return { error: (result.stderr ?? "").slice(-500) };
   try {
     return JSON.parse(result.stdout) as unknown;
@@ -1226,77 +1908,171 @@ print(json.dumps({
   }
 }
 
+const hours = (ms: number): number => Math.round((ms / 3_600_000) * 100) / 100;
+
 function analyse(): void {
-  const run = JSON.parse(readFileSync(resolve(OUT, "run.json"), "utf8")) as RunMeta;
-  const steadyStart = run.steadyStart ?? Date.parse(run.startedAt);
-  const events = readLines<{ at: string; event: string }>("events.jsonl");
-  const finishedAt = Date.parse(events.filter((line) => line.event === "finishing").at(-1)?.at ?? new Date().toISOString());
-  const end = Math.min(run.endAt ?? finishedAt, finishedAt);
+  const run = JSON.parse(readFileSync(resolve(OUT, "run.json"), "utf8")) as Partial<RunMeta> & { startedAt: string };
+  const sessions = run.sessions ?? [];
+  const model = MODEL_ARG !== undefined ? resolve(MODEL_ARG) : (run.model ?? null);
+  const targetMinutes = run.targetMinutes ?? run.minutes ?? 0;
+  // THE BEATS: coverage.jsonl; a run from before the coverage clock has its minute's audit lines instead.
+  let beats: CoverageBeat[] = readLines<{ at?: string; session?: number; fleetUp?: boolean }>("coverage.jsonl")
+    .map((line) => ({ at: Date.parse(line.at ?? ""), session: line.session ?? 1, fleetUp: line.fleetUp !== false }))
+    .filter((beat) => Number.isFinite(beat.at));
+  const beatsFrom = beats.length > 0 ? "coverage.jsonl" : "audit.jsonl (a run from before the coverage clock: one beat a minute, the fleet assumed up)";
+  if (beats.length === 0) {
+    beats = readLines<{ at?: string }>("audit.jsonl")
+      .map((line) => ({ at: Date.parse(line.at ?? ""), session: 1, fleetUp: true }))
+      .filter((beat) => Number.isFinite(beat.at));
+  }
+  const cov = coverageOf(beats, { sessionCause: (n) => sessions.find((s) => s.n === n)?.resumeCause ?? undefined });
+  const intervals = cov.intervals;
+  /** Whether an instant lies in a covered stretch (binary search: a week of calls against its stretches). */
+  const inCovered = (ts: number): boolean => {
+    let lo = 0;
+    let hi = intervals.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const interval = intervals[mid]!;
+      if (ts < interval.from) hi = mid - 1;
+      else if (ts > interval.to) lo = mid + 1;
+      else return true;
+    }
+    return false;
+  };
   // REPLAYED from production.jsonl and jobs.jsonl (compare.jsonl is the live loop's record of the same).
-  const rows = replayComparison(readLines<ProductionSample>("production.jsonl"), readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl")).filter(
-    (row) => row.at >= steadyStart && row.at <= end,
+  const rows = replayComparison(readLines<ProductionSample>("production.jsonl"), readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl"));
+  // A MISMATCH IN A WALLET'S LAST COMPARED MINUTE cannot be explained yet: no later minute exists to show a shift or a
+  // recovery. It is "open" — listed, counted as a mismatch in the percentage, apart from "unexplained" — and the next
+  // rolling report, with more minutes, explains it or not.
+  const lastCompared = new Map<string, number>();
+  for (const row of rows) if (row.verdict === "agree" || row.verdict === "mismatch") lastCompared.set(row.wallet, Math.max(lastCompared.get(row.wallet) ?? 0, row.at));
+  const explained = explainMismatches(rows).map((e) =>
+    e.explanation === "unexplained" && e.row.at >= (lastCompared.get(e.row.wallet) ?? Number.POSITIVE_INFINITY)
+      ? { ...e, explanation: "open" as const, note: `${e.note}; the data ends here, so no later minute can explain it yet` }
+      : e,
   );
-  const explained = explainMismatches(rows);
-  const drills = readLines<Record<string, unknown>>("drills.jsonl");
+  const drills = readLines<DrillResultLine & Record<string, unknown>>("drills.jsonl");
+  let drillPlan: PlannedDrill[] = [];
+  try {
+    drillPlan = drillPlanOf({ drills: run.drills ?? "none", drillRepeatHours: run.drillRepeatHours ?? 0, targetMinutes });
+  } catch {
+    // A drill name this harness no longer knows: its results are still listed below.
+  }
+  const ledger = drillLedger(drillPlan, drills, DRILL_MAX_INTERRUPTIONS);
   const audit = readLines<{ at: string; overlapRows?: number; unavailable?: string }>("audit.jsonl");
   const calls = readLines<ProxyLine>("rpc/calls.jsonl");
-  const listings = listingsPerMinute(calls, (tag) => tag.startsWith("sched-"), steadyStart, end);
-  const windowMs = end - steadyStart;
-  const steady = (tag: string, ts: number): boolean => tag !== "handover" && ts >= steadyStart && ts < end;
+  const exits = readLines<Record<string, unknown>>("exits.jsonl");
+  // THE DRILL WINDOWS: a drill, and two minutes after it (it turns vaults twice and restarts processes). From its
+  // result; and from its "drill starting" event when it has none yet — still running at a rolling report, or cut
+  // short by the session's end — up to the data's last beat (at most 30 minutes).
+  const drillWindows: (readonly [number, number])[] = [];
+  const lastBeat = cov.lastBeatAt;
+  const windowOf = (from: number, tookMs: number | null): readonly [number, number] => [
+    from,
+    from + Math.min(tookMs ?? Math.max(0, (lastBeat ?? from) - from), 30 * 60_000) + 120_000,
+  ];
+  for (const drill of drills) {
+    const from = Date.parse(String(drill.startedAt ?? ""));
+    if (Number.isFinite(from)) drillWindows.push(windowOf(from, typeof drill["tookMs"] === "number" ? drill["tookMs"] : null));
+  }
+  for (const start of readLines<{ event?: string; at?: string }>("events.jsonl")) {
+    if (start.event !== "drill starting") continue;
+    const from = Date.parse(start.at ?? "");
+    if (!Number.isFinite(from) || drills.some((drill) => Math.abs(Date.parse(String(drill.startedAt ?? "")) - from) < 5_000)) continue;
+    drillWindows.push(windowOf(from, null));
+  }
+  const inDrill = (from: number, until: number): boolean => drillWindows.some(([a, b]) => from < b && until > a);
+  // DISCOVERY, over the covered minutes only; a drill's minutes are judged apart.
+  const listingCalls = calls.filter((line) => line.method === "getProgramAccounts" || line.method === "getProgramAccountsV2");
+  const perInterval = intervals.map((interval) => listingsPerMinute(listingCalls, (tag) => tag.startsWith("sched-"), interval.from, interval.to));
+  const judged = perInterval.flatMap((result) => result.minutes).map((minute) => {
+    const start = Date.parse(`${minute.minute}:00.000Z`);
+    return { ...minute, drill: inDrill(start, start + 60_000) };
+  });
+  const quietListing = judged.filter((minute) => !minute.drill);
+  const drillListing = judged.filter((minute) => minute.drill);
+  const listingGaps = perInterval.flatMap((result) => result.gapsMs);
+  // CREDITS, over the covered time.
+  const coveredMs = cov.coveredMs;
+  const steady = (tag: string, ts: number): boolean => tag !== "handover" && inCovered(ts);
   const credit1 = creditsOf(calls, 1, steady);
   const credit10 = creditsOf(calls, 10, steady);
   const byKind = (prefix: string) => creditsOf(calls, 1, (tag, ts) => tag.startsWith(prefix) && steady(tag, ts));
-  // THE QUIET MINUTES: whole minutes no drill touched (a drill, and two minutes after it, turn vaults twice and
-  // restart processes). The model predicts a steady tick, so the credits are set beside it over these.
-  const drillWindows = drills.map((drill) => {
-    const from = Date.parse(String(drill["startedAt"]));
-    return [from, from + Number(drill["tookMs"] ?? 0) + 120_000] as const;
-  });
+  // THE QUIET MINUTES: whole covered minutes no drill touched. The model predicts a steady tick, so the credits are set beside it over these.
   const quiet = new Set<number>();
-  for (let m = Math.ceil(steadyStart / 60_000) * 60_000; m + 60_000 <= end; m += 60_000) {
-    if (!drillWindows.some(([from, until]) => m < until && m + 60_000 > from)) quiet.add(m);
+  for (const interval of intervals) {
+    for (let m = Math.ceil(interval.from / 60_000) * 60_000; m + 60_000 <= interval.to; m += 60_000) if (!inDrill(m, m + 60_000)) quiet.add(m);
   }
   const inQuiet = (tag: string, ts: number): boolean => steady(tag, ts) && quiet.has(Math.floor(ts / 60_000) * 60_000);
   const quiet1 = creditsOf(calls, 1, inQuiet);
   const quiet10 = creditsOf(calls, 10, inQuiet);
   const quietMs = quiet.size * 60_000;
   const quietDay = { archival1: perDay(quiet1.credits, quietMs), archival10: perDay(quiet10.credits, quietMs) };
-  const tokens = run.cuts === "" ? [] : run.cuts.split(",").map((token) => token.trim());
-  const model = modelPrediction(tokens) as { creditsPerDay?: { archival1: number; archival10: number }; perTick?: Record<string, number> } | null;
-  const measuredDay = { archival1: perDay(credit1.credits, windowMs), archival10: perDay(credit10.credits, windowMs) };
-  const minutes = windowMs / 60_000;
+  const tokens = (run.cuts ?? "") === "" ? [] : run.cuts!.split(",").map((token) => token.trim());
+  const prediction = modelPrediction(model, tokens) as { creditsPerDay?: { archival1: number; archival10: number }; perTick?: Record<string, number> } | null;
+  const measuredDay = { archival1: perDay(credit1.credits, coveredMs), archival10: perDay(credit10.credits, coveredMs) };
+  const minutes = coveredMs / 60_000;
+  const perMinute = (n: number): number | null => (minutes === 0 ? null : n / minutes);
   const blocked = calls.filter((line) => line.refused === true);
   const finalDb = existsSync(resolve(OUT, "final-db.json")) ? (JSON.parse(readFileSync(resolve(OUT, "final-db.json"), "utf8")) as Record<string, unknown>) : null;
+  const agreement = agreementOf(rows);
+  const unexplained = explained.filter((e) => e.explanation === "unexplained").length;
+  const openAtEnd = explained.filter((e) => e.explanation === "open").length;
+  const quietOverModel =
+    prediction?.creditsPerDay === undefined || quiet.size === 0
+      ? null
+      : { archival1: quietDay.archival1 / prediction.creditsPerDay.archival1, archival10: quietDay.archival10 / prediction.creditsPerDay.archival10 };
+  const overlapMaxSeen = Math.max(0, ...audit.map((line) => line.overlapRows ?? 0));
+  const finalOverlap = (finalDb?.["overlapRows"] as number | undefined) ?? null;
+  const gapMs = cov.gaps.reduce((sum, gap) => sum + gap.ms, 0);
+  const drillsPassed = ledger.done.filter((drill) => drill.ok).length;
   const report = {
-    window: { from: new Date(steadyStart).toISOString(), to: new Date(end).toISOString(), minutes: Math.round(minutes * 10) / 10 },
+    generatedAt: at(),
+    coverage: {
+      targetHours: targetMinutes / 60,
+      coveredHours: hours(coveredMs),
+      percent: targetMinutes === 0 ? null : Math.round((coveredMs / (targetMinutes * 60_000)) * 1_000) / 10,
+      beatsFrom,
+      firstBeat: cov.firstBeatAt === null ? null : iso(cov.firstBeatAt),
+      lastBeat: cov.lastBeatAt === null ? null : iso(cov.lastBeatAt),
+      gapHours: hours(gapMs),
+      gaps: cov.gaps.map((gap) => ({ from: iso(gap.from), to: iso(gap.to), minutes: Math.round(gap.ms / 6_000) / 10, cause: gap.cause })),
+      sessions: sessions.map((s) => ({ n: s.n, startedAt: s.startedAt, steadyStart: s.steadyStart === null ? null : iso(s.steadyStart), endedAt: s.endedAt, endReason: s.endReason, resumeCause: s.resumeCause })),
+      completedAt: run.completedAt ?? null,
+    },
+    window: { from: cov.firstBeatAt === null ? null : iso(cov.firstBeatAt), to: cov.lastBeatAt === null ? null : iso(cov.lastBeatAt), coveredMinutes: Math.round(minutes * 10) / 10 },
     agreement: {
-      ...agreementOf(rows),
+      ...agreement,
       explained: {
         timing: explained.filter((e) => e.explanation === "timing").length,
         dryRun: explained.filter((e) => e.explanation === "dry-run").length,
         transient: explained.filter((e) => e.explanation === "transient").length,
-        unexplained: explained.filter((e) => e.explanation === "unexplained").length,
+        unexplained,
+        openAtEnd,
       },
-      mismatches: explained.map((e) => ({ at: new Date(e.row.at).toISOString(), wallet: e.row.wallet, production: e.row.production, shadow: e.row.shadow, explanation: e.explanation, note: e.note })),
-      gaps: rows.filter((row) => row.verdict === "no-shadow" || row.verdict === "no-production").map((row) => ({ at: new Date(row.at).toISOString(), wallet: row.wallet, verdict: row.verdict })),
+      mismatches: explained.map((e) => ({ at: iso(e.row.at), wallet: e.row.wallet, production: e.row.production, shadow: e.row.shadow, explanation: e.explanation, note: e.note })),
+      gaps: rows.filter((row) => row.verdict === "no-shadow" || row.verdict === "no-production").map((row) => ({ at: iso(row.at), wallet: row.wallet, verdict: row.verdict })),
     },
     overlap: {
-      maxRowsSeen: Math.max(0, ...audit.map((line) => line.overlapRows ?? 0)),
+      maxRowsSeen: overlapMaxSeen,
       auditsRun: audit.filter((line) => line.overlapRows !== undefined).length,
       auditsUnavailable: audit.filter((line) => line.unavailable !== undefined).length,
-      final: finalDb?.["overlapRows"] ?? null,
+      final: finalOverlap,
       intents: finalDb?.["intents"] ?? null,
     },
     discovery: {
-      judgedMinutes: listings.judged,
-      minutesWithExactlyOne: listings.exactlyOne,
-      notOne: listings.minutes.filter((minute) => minute.listings !== 1),
-      gapsMs: { min: Math.min(...listings.gapsMs), max: Math.max(...listings.gapsMs), count: listings.gapsMs.length },
+      quietMinutesJudged: quietListing.length,
+      quietMinutesWithExactlyOne: quietListing.filter((minute) => minute.listings === 1).length,
+      quietNotOne: quietListing.filter((minute) => minute.listings !== 1).slice(0, 500),
+      drillMinutesJudged: drillListing.length,
+      drillMinutesWithExactlyOne: drillListing.filter((minute) => minute.listings === 1).length,
+      gapsMs: { min: listingGaps.length === 0 ? null : Math.min(...listingGaps), max: listingGaps.length === 0 ? null : Math.max(...listingGaps), count: listingGaps.length },
     },
     credits: {
-      callsPerMinute: credit1.calls / minutes,
-      byMethodPerMinute: Object.fromEntries(Object.entries(credit1.byMethod).map(([method, n]) => [method, Math.round((n / minutes) * 100) / 100])),
-      byProcessKindPerMinute: { schedulers: byKind("sched-").calls / minutes, workers: byKind("worker-").calls / minutes },
+      callsPerMinute: perMinute(credit1.calls),
+      byMethodPerMinute: Object.fromEntries(Object.entries(credit1.byMethod).map(([method, n]) => [method, Math.round((n / Math.max(1, minutes)) * 100) / 100])),
+      byProcessKindPerMinute: { schedulers: perMinute(byKind("sched-").calls), workers: perMinute(byKind("worker-").calls) },
       measuredPerDay: measuredDay,
       quiet: {
         minutes: quiet.size,
@@ -1305,35 +2081,74 @@ function analyse(): void {
         byClassPerMinute: Object.fromEntries(Object.entries(quiet1.byClass).map(([line, v]) => [line, Math.round((v.calls / Math.max(1, quiet.size)) * 100) / 100])),
         perDay: quietDay,
       },
-      model,
+      model: prediction,
       // THE GATE'S RATIO, over the quiet minutes: within +15 % of the model for the same token set.
-      quietOverModel:
-        model?.creditsPerDay === undefined || quiet.size === 0
-          ? null
-          : { archival1: quietDay.archival1 / model.creditsPerDay.archival1, archival10: quietDay.archival10 / model.creditsPerDay.archival10 },
+      quietOverModel,
       measuredOverModel:
-        model?.creditsPerDay === undefined
+        prediction?.creditsPerDay === undefined
           ? null
-          : { archival1: measuredDay.archival1 / model.creditsPerDay.archival1, archival10: measuredDay.archival10 / model.creditsPerDay.archival10 },
+          : { archival1: measuredDay.archival1 / prediction.creditsPerDay.archival1, archival10: measuredDay.archival10 / prediction.creditsPerDay.archival10 },
       refusedCalls: blocked.length,
       processMeters: finalDb?.["rpcUsage"] ?? null,
       proxyTotalsByClass: creditsOf(calls, 1).byClass,
     },
-    drills,
+    drills: {
+      planned: drillPlan.length,
+      done: ledger.done.length,
+      passed: drillsPassed,
+      failed: ledger.done.filter((drill) => !drill.ok).map((drill) => drill.id),
+      interrupted: ledger.interrupted,
+      gaveUp: ledger.gaveUp,
+      owed: ledger.owed.map((drill) => ({ id: drill.id, atCoveredHours: drill.atCoveredMs / 3_600_000 })),
+      results: drills,
+    },
+    exitsOnTheirOwn: exits,
+    // THE GATE (plan §3.3.2), check by check. PENDING: not reached yet; FAIL: reached and missed.
+    gate: {
+      coverage: { need: `≥ ${targetMinutes / 60} h covered`, have: `${hours(coveredMs)} h, ${cov.gaps.length} gaps (${hours(gapMs)} h)`, verdict: coveredMs >= targetMinutes * 60_000 ? "PASS" : "PENDING" },
+      agreement: {
+        need: "≥ 99 %, every mismatch explained (one in a wallet's last compared minute stays open until a later minute exists)",
+        have: `${agreement.percent === null ? "n/a" : agreement.percent.toFixed(2)} % (${agreement.agree}/${agreement.compared}), ${unexplained} unexplained, ${openAtEnd} open`,
+        verdict: agreement.percent === null ? "PENDING" : agreement.percent >= 99 && unexplained === 0 ? "PASS" : "FAIL",
+      },
+      overlap: { need: "0 rows", have: `max ${overlapMaxSeen}, final ${String(finalOverlap)}`, verdict: overlapMaxSeen === 0 && (finalOverlap === null || finalOverlap === 0) ? "PASS" : "FAIL" },
+      discovery: {
+        need: "exactly 1 listing every quiet covered minute",
+        have: `${quietListing.filter((minute) => minute.listings === 1).length}/${quietListing.length}`,
+        verdict: quietListing.length === 0 ? "PENDING" : quietListing.every((minute) => minute.listings === 1) ? "PASS" : "FAIL",
+      },
+      credits: {
+        need: "≤ +15 % over the model, archival 1 and 10",
+        have: quietOverModel === null ? "n/a" : `${quietOverModel.archival1.toFixed(3)} / ${quietOverModel.archival10.toFixed(3)}`,
+        verdict: quietOverModel === null ? "PENDING" : quietOverModel.archival1 <= 1.15 && quietOverModel.archival10 <= 1.15 ? "PASS" : "FAIL",
+      },
+      drills: {
+        need: `every planned drill passed (${drillPlan.length})`,
+        have: `${drillsPassed} passed, ${ledger.done.length - drillsPassed} failed, ${ledger.gaveUp.length} interrupted twice, ${ledger.owed.length} owed`,
+        verdict: ledger.done.length - drillsPassed > 0 || ledger.gaveUp.length > 0 ? "FAIL" : ledger.owed.length > 0 ? "PENDING" : "PASS",
+      },
+    },
     stopped: existsSync(resolve(OUT, "stopped.json")) ? (JSON.parse(readFileSync(resolve(OUT, "stopped.json"), "utf8")) as unknown) : null,
   };
-  writeFileSync(resolve(OUT, "report.json"), JSON.stringify(report, null, 2));
+  writeJsonAtomic("report.json", report);
   const a = report.agreement;
   const lines = [
-    `window ${report.window.from} → ${report.window.to} (${report.window.minutes} min)`,
-    `agreement ${a.percent === null ? "n/a" : a.percent.toFixed(2)} % (${a.agree}/${a.compared}); mismatches: timing ${a.explained.timing}, dry-run ${a.explained.dryRun}, transient ${a.explained.transient}, unexplained ${a.explained.unexplained}; gaps: no-shadow ${a.noShadow}, no-production ${a.noProduction}; frontier slots equal ${a.frontier.equal}/${a.frontier.compared}`,
+    `coverage ${report.coverage.coveredHours} h of ${report.coverage.targetHours} h (${String(report.coverage.percent)} %); ${cov.gaps.length} gaps, ${report.coverage.gapHours} h in all; ${sessions.length || 1} session(s)`,
+    ...report.coverage.gaps.slice(-20).map((gap) => `  gap ${gap.from} → ${gap.to} (${gap.minutes} min): ${gap.cause}`),
+    `window ${String(report.window.from)} → ${String(report.window.to)} (${report.window.coveredMinutes} covered min)`,
+    `agreement ${a.percent === null ? "n/a" : a.percent.toFixed(2)} % (${a.agree}/${a.compared}); mismatches: timing ${a.explained.timing}, dry-run ${a.explained.dryRun}, transient ${a.explained.transient}, unexplained ${a.explained.unexplained}, open in the data's last minute ${a.explained.openAtEnd}; gaps: no-shadow ${a.noShadow}, no-production ${a.noProduction}; frontier slots equal ${a.frontier.equal}/${a.frontier.compared}`,
     `overlap audit: max ${report.overlap.maxRowsSeen} rows over ${report.overlap.auditsRun} audits (${report.overlap.auditsUnavailable} unavailable), final ${String(report.overlap.final)}`,
-    `discovery: ${report.discovery.minutesWithExactlyOne}/${report.discovery.judgedMinutes} minutes with exactly one listing; gaps ${report.discovery.gapsMs.min}–${report.discovery.gapsMs.max} ms`,
-    `credits/day measured: ${Math.round(measuredDay.archival1)} (archival 1), ${Math.round(measuredDay.archival10)} (archival 10); calls/min ${report.credits.callsPerMinute.toFixed(2)}; refused calls ${report.credits.refusedCalls}`,
+    `discovery: ${report.discovery.quietMinutesWithExactlyOne}/${report.discovery.quietMinutesJudged} quiet covered minutes with exactly one listing; drill minutes ${report.discovery.drillMinutesWithExactlyOne}/${report.discovery.drillMinutesJudged}; gaps ${String(report.discovery.gapsMs.min)}–${String(report.discovery.gapsMs.max)} ms`,
+    `credits/day measured: ${Math.round(measuredDay.archival1)} (archival 1), ${Math.round(measuredDay.archival10)} (archival 10); calls/min ${report.credits.callsPerMinute?.toFixed(2) ?? "n/a"}; refused calls ${report.credits.refusedCalls}`,
     `credits/day over ${quiet.size} quiet minutes: ${Math.round(quietDay.archival1)} (archival 1), ${Math.round(quietDay.archival10)} (archival 10); calls/min ${report.credits.quiet.callsPerMinute?.toFixed(2) ?? "n/a"}`,
-    `model: ${model === null ? "not given" : JSON.stringify(model)}`,
-    `quiet / model: ${report.credits.quietOverModel === null ? "n/a" : `${report.credits.quietOverModel.archival1.toFixed(3)} (archival 1), ${report.credits.quietOverModel.archival10.toFixed(3)} (archival 10)`}`,
-    ...drills.map((drill) => `drill ${String(drill["drill"])}: ${drill["ok"] === true ? "PASS" : "FAIL"}`),
+    `model: ${prediction === null ? "not given" : JSON.stringify(prediction)}`,
+    `quiet / model: ${quietOverModel === null ? "n/a" : `${quietOverModel.archival1.toFixed(3)} (archival 1), ${quietOverModel.archival10.toFixed(3)} (archival 10)`}`,
+    `drills: ${ledger.done.length} of ${drillPlan.length} done, ${drillsPassed} passed; interrupted attempts ${Object.values(ledger.interrupted).reduce((sum, n) => sum + n, 0)}; owed ${ledger.owed.length}`,
+    ...drills.map((drill) => `  drill ${String(drill.id ?? drill.drill)}: ${drill.interrupted === true ? "INTERRUPTED (owed again)" : drill.ok === true ? "PASS" : "FAIL"}`),
+    `processes that exited on their own (replaced): ${exits.length}`,
+    `gate: ${Object.entries(report.gate)
+      .map(([check, value]) => `${check} ${value.verdict}`)
+      .join(", ")}`,
   ];
   writeFileSync(resolve(OUT, "summary.txt"), `${lines.join("\n")}\n`);
   console.log(lines.join("\n"));
@@ -1346,13 +2161,150 @@ if (ANALYZE !== undefined) {
 }
 
 mkdirSync(OUT, { recursive: true });
-saveMeta();
-// A HARNESS THAT DIES STILL TAKES ITS CONTAINER AND ITS CHILDREN WITH IT.
-process.on("exit", () => {
+// ONE HARNESS PER STATE DIRECTORY.
+const PID_FILE = resolve(OUT, "harness.pid");
+if (existsSync(PID_FILE)) {
+  const other = Number(readFileSync(PID_FILE, "utf8").trim());
+  if (other !== process.pid && commandOf(other).includes("harness.ts")) {
+    console.error(`another harness (pid ${other}) is running on ${OUT}; stop it first`);
+    process.exit(3);
+  }
+}
+writeFileSync(PID_FILE, String(process.pid));
+// A HARNESS THAT DIES STILL TAKES ITS CONTAINER AND ITS CHILDREN WITH IT, and says how its session ended.
+process.on("exit", (code) => {
   for (const proc of procs) proc.child.kill("SIGKILL");
   proxyChild?.kill("SIGKILL");
-  if (meta.pgName !== null && !stopped.some((entry) => entry["what"] === "postgres container")) spawnSync("docker", ["rm", "-f", meta.pgName], { timeout: 30_000 });
+  analysisChild?.kill("SIGKILL");
+  if (ownContainer !== null && !containerStopped) {
+    // WITH A NAMED VOLUME, A CLEAN SHUTDOWN FIRST; the data stays in the volume either way.
+    if (S.pgVolume !== null) spawnSync("docker", ["stop", "-t", "15", ownContainer], { timeout: 30_000 });
+    spawnSync("docker", ["rm", "-f", ownContainer], { timeout: 30_000 });
+  }
+  if (session !== null && session.endedAt === null) {
+    session.endedAt = at();
+    session.endReason = `the harness exited (code ${code}) without finishing`;
+    try {
+      saveMeta();
+    } catch {
+      // Nothing left to keep it in.
+    }
+  }
+  try {
+    if (readFileSync(PID_FILE, "utf8").trim() === String(process.pid)) rmSync(PID_FILE);
+  } catch {
+    // Already gone.
+  }
 });
+
+const stored = readJsonOr<Partial<RunMeta> & { startedAt: string }>("run.json");
+if (stored !== null && !RESUME) {
+  console.error(`${OUT} already holds a run (run.json): pass --resume to continue it, or choose another --state`);
+  process.exit(2);
+}
+if (stored?.completedAt) {
+  console.log(`the run in ${OUT} is complete (${stored.completedAt}); nothing to resume. Its report: summary.txt`);
+  process.exit(0);
+}
+if (stored !== null) {
+  // A RESUMED RUN KEEPS THE SETTINGS IT WAS STARTED WITH; a run from before resume existed gets today's defaults for what it lacks.
+  Object.assign(meta, stored, {
+    targetMinutes: stored.targetMinutes ?? stored.minutes ?? fromArgs.targetMinutes,
+    drillWarmupMinutes: stored.drillWarmupMinutes ?? fromArgs.drillWarmupMinutes,
+    drillSpacingMinutes: stored.drillSpacingMinutes ?? fromArgs.drillSpacingMinutes,
+    model: stored.model === undefined ? fromArgs.model : stored.model,
+    pgImage: stored.pgImage ?? fromArgs.pgImage,
+    pgVolume: stored.pgVolume ?? null,
+    reportEveryMinutes: stored.reportEveryMinutes ?? fromArgs.reportEveryMinutes,
+    letters: stored.letters ?? { scheduler: 0, worker: 0 },
+    sessions: stored.sessions ?? [],
+    completedAt: stored.completedAt ?? null,
+  });
+  S = settingsOf(meta);
+  const FLAGS: Record<keyof Settings, readonly string[]> = {
+    targetMinutes: ["minutes", "target-hours"],
+    drills: ["drills"],
+    drillRepeatHours: ["drill-repeat-hours"],
+    drillWarmupMinutes: ["drill-warmup-minutes"],
+    drillSpacingMinutes: ["drill-spacing-minutes"],
+    proxy: ["proxy"],
+    model: ["model"],
+    production: ["production"],
+    cuts: ["cuts"],
+    pgImage: ["pg-image"],
+    pgVolume: ["pg-volume"],
+    reportEveryMinutes: ["report-every-minutes"],
+  };
+  const differs = (Object.keys(FLAGS) as (keyof Settings)[]).filter(
+    (key) => FLAGS[key].some((flag) => argv.includes(`--${flag}`)) && JSON.stringify(fromArgs[key]) !== JSON.stringify(S[key]),
+  );
+  if (differs.length > 0) console.log(JSON.stringify({ at: at(), note: "a resumed run keeps the settings it was started with; these options were ignored", ignored: differs }));
+}
+try {
+  plan = drillPlanOf(S);
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(2);
+}
+
+// THE RUN SO FAR: its beats (the coverage clock), its drills, its overlap.
+for (const line of readLines<{ at?: string; session?: number; fleetUp?: boolean }>("coverage.jsonl")) {
+  const t = Date.parse(line.at ?? "");
+  if (Number.isFinite(t)) beats.push({ at: t, session: line.session ?? 1, fleetUp: line.fleetUp !== false });
+}
+drillResults = readLines<DrillResultLine & Record<string, unknown>>("drills.jsonl");
+overlapMax = Math.max(0, ...readLines<{ overlapRows?: number }>("audit.jsonl").map((line) => line.overlapRows ?? 0));
+exitsOnTheirOwn = readLines("exits.jsonl").length;
+
+// WHY THE RUN WAS NOT BEATING BEFORE THIS SESSION: what the gap since the last beat is named by.
+const previous = meta.sessions.at(-1);
+const lastBeatAt = beats.at(-1)?.at ?? null;
+const bootedAt = (() => {
+  const sec = /sec = (\d+)/.exec(spawnSync("sysctl", ["-n", "kern.boottime"], { encoding: "utf8" }).stdout ?? "")?.[1];
+  return sec === undefined ? null : Number(sec) * 1_000;
+})();
+const resumeCause =
+  previous === undefined
+    ? null
+    : previous.endedAt !== null && !(previous.endReason ?? "").startsWith("the harness exited")
+      ? `the harness was stopped (${previous.endReason}) and started again`
+      : bootedAt !== null && bootedAt > (lastBeatAt ?? Date.parse(previous.startedAt))
+        ? `the Mac restarted (booted ${iso(bootedAt)}); the harness had not stopped cleanly`
+        : previous.endedAt !== null
+          ? `${previous.endReason ?? "the harness ended"}; started again`
+          : "the harness ended without stopping cleanly (killed, crashed, or the power went)";
+session = { n: (previous?.n ?? 0) + 1, pid: process.pid, startedAt: at(), steadyStart: null, endedAt: null, endReason: null, resumeCause };
+meta.sessions.push(session);
+
+// WHAT THE LAST SESSION LEFT RUNNING: its children, by pid, only if they still run this keeper's code or name this directory.
+const reaped: { pid: number; name: string }[] = [];
+for (const entry of readJsonOr<{ pid: number; name: string }[]>("children.json") ?? []) {
+  const command = commandOf(entry.pid);
+  if (entry.pid === process.pid || command === "" || !(command.includes(KEEPER_DIR) || command.includes(OUT))) continue;
+  try {
+    process.kill(entry.pid, "SIGKILL");
+    reaped.push(entry);
+  } catch {
+    // Gone between the look and the kill.
+  }
+}
+saveChildren();
+saveMeta();
+if (stored !== null) {
+  event("resuming", {
+    previousSession: previous?.n ?? null,
+    lastBeatAt: lastBeatAt === null ? null : iso(lastBeatAt),
+    gapMinutes: lastBeatAt === null ? null : Math.round((Date.now() - lastBeatAt) / 6_000) / 10,
+    cause: resumeCause,
+    coveredHours: coverageOf(beats).coveredMs / 3_600_000,
+    reapedLeftovers: reaped,
+  });
+  reconcileInterruptedDrills();
+  const done = drillLedger(plan, drillResults, DRILL_MAX_INTERRUPTIONS).done.map((drill) => drill.id);
+  if (done.length > 0) event("drills already done: not repeated", { ids: done });
+}
+coverage = coverageOf(beats, { sessionCause });
+
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => void finish(`received ${signal}`).finally(() => process.exit(0)));
 }
@@ -1366,13 +2318,9 @@ try {
 }
 const drillsDone = runDrills();
 // THE MINUTE: thirty seconds past each wall-clock minute, between the production sweeps' usual instants.
-while (!finishing && Date.now() < meta.endAt!) {
+const targetMs = S.targetMinutes * 60_000;
+while (!finishing && coverage.coveredMs < targetMs) {
   const next = Math.floor((Date.now() - 30_000) / 60_000) * 60_000 + 90_000;
-  if (next > meta.endAt!) {
-    // THE WINDOW ENDS BEFORE THE NEXT MINUTE: wait it out, take no sample past it.
-    while (!finishing && Date.now() < meta.endAt!) await sleep(1_000);
-    break;
-  }
   await sleep(Math.max(1_000, next - Date.now()));
   if (finishing) break;
   try {
@@ -1380,7 +2328,35 @@ while (!finishing && Date.now() < meta.endAt!) {
   } catch (error) {
     event("minute failed", { detail: error instanceof Error ? error.message.slice(0, 300) : String(error) });
   }
+  try {
+    await keepFleetWhole();
+  } catch (error) {
+    event("keeping the fleet whole failed", { detail: error instanceof Error ? error.message.slice(0, 300) : String(error) });
+  }
+  // A SESSION THAT CANNOT WORK ENDS ITSELF, and the loop resumes it with a fresh container on the same volume.
+  const broken =
+    dbDownSince !== null && Date.now() - dbDownSince >= BROKEN_SESSION_MS
+      ? `the database has not answered for ${BROKEN_SESSION_MS / 60_000} minutes outside any drill`
+      : proxyExit() !== null && currentDrill === null
+        ? `the census proxy exited (${String(proxyExit())})`
+        : null;
+  if (broken !== null && !finishing) {
+    event("this session cannot work: ending it so it can be resumed", { why: broken });
+    exitCode = 1;
+    void finish(broken);
+    break;
+  }
+  // THE ROLLING REPORT: ten minutes into each session, then every --report-every-minutes.
+  const steadyFor = Date.now() - (session.steadyStart ?? Date.now());
+  if (S.reportEveryMinutes > 0 && ((lastReportAt === 0 && steadyFor >= 10 * 60_000) || (lastReportAt !== 0 && Date.now() - lastReportAt >= S.reportEveryMinutes * 60_000))) rollingReport();
 }
-await drillsDone;
-await finish("the window ended");
-process.exit(0);
+if (!finishing) {
+  // THE TARGET IS REACHED: a drill still running is let finish first.
+  event("the coverage target is reached", { coveredHours: coverage.coveredMs / 3_600_000, targetHours: S.targetMinutes / 60 });
+  while (currentDrill !== null && !finishing) await sleep(1_000);
+  void finish("the coverage target was reached", true);
+}
+// A SIGNAL'S FINISH, THE TARGET'S, OR A BROKEN SESSION'S: the process exits only when it is over.
+await finished;
+void drillsDone;
+process.exit(exitCode);
