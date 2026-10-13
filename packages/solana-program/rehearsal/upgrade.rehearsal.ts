@@ -74,6 +74,8 @@ const DEPLOYED_IDL = JSON.parse(readFileSync(join(PACKAGE_DIR, "tests", "fixture
 const NEW_IDL_PATH = join(PACKAGE_DIR, "target", "idl", "sip_vault.json");
 
 type Client = anchor.Program<anchor.Idl>;
+/** A client built from a plain Idl has untyped account namespaces. */
+const accounts = (client: Client) => client.account as unknown as Record<string, { fetch(address: PublicKey): Promise<unknown> }>;
 
 describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", function () {
   this.timeout(30 * 60_000);
@@ -146,6 +148,20 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     return { seconds: (Date.now() - started) / 1_000, output: output.trim().split("\n").slice(-6), buffer: bufferKeypair.publicKey };
   };
 
+  /**
+   * Compute units and serialized size of a landed transaction, kept by label.
+   * The keeper's signer allows no ComputeBudget instruction next to a settle,
+   * so a settle must fit the default budget; and a transaction 1,232 bytes.
+   */
+  const costs: Record<string, { computeUnits: number | null; bytes: number }> = {};
+  const recordCost = async (label: string, signature: string) => {
+    const tx = await connection().getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+    if (tx === null) throw new Error(`${label}: ${signature} is not visible`);
+    const bytes = tx.transaction.message.serialize().length + 1 + 64 * tx.transaction.signatures.length;
+    costs[label] = { computeUnits: tx.meta?.computeUnitsConsumed ?? null, bytes };
+    return costs[label]!;
+  };
+
   /** A vault owner, its vault and one linked trading wallet. */
   class Saver {
     readonly owner = Keypair.generate();
@@ -192,9 +208,9 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     }
 
     /** settle_v2, honest for the vault's own mode and active rate (Trap 1 included), through `client`. */
-    async settleV2(client: Client, baseLamports: bigint) {
-      const link = (await client.account.tradingLink.fetch(this.link)) as any;
-      const vault = (await client.account.vault.fetch(this.vault)) as any;
+    async settleV2(client: Client, baseLamports: bigint, costLabel?: string) {
+      const link = (await accounts(client).tradingLink.fetch(this.link)) as any;
+      const vault = (await accounts(client).vault.fetch(this.vault)) as any;
       const end = await slotAbove(BigInt(link.frontierSlot.toString()) + 1n);
       const inputs: AttestationInputs = {
         programId: SIP_VAULT_PROGRAM_ID,
@@ -211,20 +227,21 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
         validUntilSlot: end + 10_000n,
       };
       const before = await this.balance();
-      await client.methods
+      const signature = await client.methods
         .settleV2(inputs.mode, bn(inputs.sessionStartSlot), bn(end), bn(baseLamports), bn(inputs.validUntilSlot))
         .accountsPartial({ wallet: this.wallet.publicKey, vault: this.vault, tradingLink: this.link })
         .preInstructions([attestationInstruction(attester.secretKey, inputs)])
         .signers([this.wallet])
         .rpc();
+      if (costLabel !== undefined) await recordCost(costLabel, signature);
       return (await this.balance()) - before;
     }
 
     /** settle_v3 through the new client: a round-up window of `trades`, or `count` fixed trades. */
     async settleV3(spec: { trades?: { x: bigint; price: bigint }[]; count?: number }) {
-      const link = (await newClient.account.tradingLink.fetch(this.link)) as any;
-      const vault = (await newClient.account.vault.fetch(this.vault)) as any;
-      const policy = (await newClient.account.perTradePolicy.fetch(this.perTrade)) as any;
+      const link = (await accounts(newClient).tradingLink.fetch(this.link)) as any;
+      const vault = (await accounts(newClient).vault.fetch(this.vault)) as any;
+      const policy = (await accounts(newClient).perTradePolicy.fetch(this.perTrade)) as any;
       const end = await slotAbove(BigInt(link.frontierSlot.toString()) + 1n);
       const roundUp = vault.skimMode === MODE_ROUNDUP;
       const trades = spec.trades ?? [];
@@ -326,8 +343,8 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     await volume.openWithOldClient(MODE_VOLUME);
     await toRoundUp.openWithOldClient(MODE_PROFIT);
     await toFixed.openWithOldClient(MODE_VOLUME);
-    paidUnderOld.profit = await profit.settleV2(oldClient, SOL / 10n);
-    paidUnderOld.volume = await volume.settleV2(oldClient, 10n * SOL);
+    paidUnderOld.profit = await profit.settleV2(oldClient, SOL / 10n, "settle_v2 PROFIT, old binary");
+    paidUnderOld.volume = await volume.settleV2(oldClient, 10n * SOL, "settle_v2 VOLUME, old binary");
     assert.strictEqual(paidUnderOld.profit, SOL / 50n, "20 % of 0.1 SOL");
     assert.strictEqual(paidUnderOld.volume, SOL / 50n, "0.2 % of 10 SOL");
     assert.strictEqual(await toRoundUp.settleV2(oldClient, SOL / 10n), SOL / 50n);
@@ -376,16 +393,16 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     const checks: [string, PublicKey][] = [["protocolConfig", PublicKey.findProgramAddressSync([Buffer.from("config")], SIP_VAULT_PROGRAM_ID)[0]]];
     for (const saver of [profit, volume, toRoundUp, toFixed]) checks.push(["vault", saver.vault], ["tradingLink", saver.link]);
     for (const [kind, address] of checks) {
-      const decodedOld = await (oldClient.account as any)[kind].fetch(address);
-      const decodedNew = await (newClient.account as any)[kind].fetch(address);
+      const decodedOld = await accounts(oldClient)[kind]!.fetch(address);
+      const decodedNew = await accounts(newClient)[kind]!.fetch(address);
       assert.strictEqual(canon(decodedNew), canon(decodedOld), `${kind} ${address.toBase58()}`);
     }
     report.accountsDecoded = checks.length;
   });
 
   it("5a. the old PROFIT and VOLUME vaults settle with settle_v2, through the OLD client, exactly as before", async () => {
-    assert.strictEqual(await profit.settleV2(oldClient, SOL / 10n), paidUnderOld.profit);
-    assert.strictEqual(await volume.settleV2(oldClient, 10n * SOL), paidUnderOld.volume);
+    assert.strictEqual(await profit.settleV2(oldClient, SOL / 10n, "settle_v2 PROFIT, new binary"), paidUnderOld.profit);
+    assert.strictEqual(await volume.settleV2(oldClient, 10n * SOL, "settle_v2 VOLUME, new binary"), paidUnderOld.volume);
   });
 
   it("5b. an old vault moves to ROUND-UP and saves $0.40 of a $1.60 trade: 2,666,666 lamports", async () => {
@@ -393,12 +410,14 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     const { paid, signature } = await toRoundUp.settleV3({ trades: [{ x: 10_666_667n, price: 150_000_000n }] });
     assert.strictEqual(paid, 2_666_666n);
     roundUpSignature = signature;
+    await recordCost("settle_v3 ROUND-UP, 1 trade, with the Pyth account", signature);
   });
 
   it("5c. an old vault moves to FIXED and saves exactly count × F", async () => {
-    await toFixed.setPolicyV3(newClient, MODE_FIXED);
-    const { paid } = await toFixed.settleV3({ count: 7 });
+    await recordCost("set_policy_v3, creating the PerTradePolicy", await toFixed.setPolicyV3(newClient, MODE_FIXED));
+    const { paid, signature } = await toFixed.settleV3({ count: 7 });
     assert.strictEqual(paid, 7_000_000n);
+    await recordCost("settle_v3 FIXED, 7 trades", signature);
   });
 
   it("5d. a new saver opens ROUND-UP in one transaction, create_vault_v2 + set_policy_v3, and settles", async () => {
@@ -422,6 +441,11 @@ describe("L3 upgrade rehearsal: 60e94348 → this build → back → forward", f
     const events = [...parser.parseLogs(tx?.meta?.logMessages ?? [])];
     assert.deepEqual(events.map((event) => event.name.toLowerCase()), ["settled"]);
     assert.strictEqual((events[0]!.data as any).paid.toString(), "2666666");
+    for (const [label, cost] of Object.entries(costs)) {
+      assert.isTrue(cost.computeUnits !== null && cost.computeUnits < 200_000, `${label} fits the default compute budget`);
+      assert.isTrue(cost.bytes <= 1_232, `${label} fits a transaction`);
+    }
+    report.costs = costs;
   });
 
   it("6. ROLLBACK to 60e94348 by the same command: per-trade vaults rest, exits and PROFIT/VOLUME keep working", async () => {
