@@ -22,7 +22,10 @@
 // it; failing that, the OLDEST one after it within the same window. No sample
 // within ±TAPE_LOOKUP_SECONDS — a trade older than the tape, or one made while no
 // scheduler was sampling — is priced LATE, at the settle-time Pyth read, and
-// counted as such everywhere it is reported.
+// counted as such everywhere it is reported. That read is held to the tape's own
+// rules first (tapeRulesRefusal): a feed that stalled or widened, the usual
+// reason for a hole in the tape, prices nothing late — the turn is a RETRY until
+// a fresh read is in hand.
 //
 // NON-SECRET MARKET DATA, AND OPERATIONAL: losing the table costs late prices for
 // the trades it would have priced, never a key or a carry.
@@ -80,13 +83,31 @@ export function sampleSolUsd(
     return { rejected: "undecodable", detail: error instanceof PythPriceError ? error.message : String(error) };
   }
   if (update.price <= 0n || update.expo < -18 || update.expo > 18) return { rejected: "not-a-price", detail: `the feed quotes ${update.price} at expo ${update.expo}` };
+  const refused = tapeRulesRefusal(update, nowSeconds, "the sampler's clock");
+  if (refused !== null) return refused;
+  return { sample: { publishTime: Number(update.publishTime), slot, priceE6: toUsdE6(update.price, update.expo), confE6: toUsdE6(update.conf, update.expo) } };
+}
+
+/**
+ * THE TAPE'S OWN RULES for a positive SOL/USD read: published within
+ * TAPE_MAX_AGE_SECONDS of `nowSeconds`, and a confidence interval within
+ * TAPE_MAX_CONF_BPS of its price. Null when the read passes both. The sampler
+ * keeps a sample only under them, and a settle turn prices a LATE trade at its
+ * own Pyth read only under them too (src/settle-modules.ts): a trade the tape
+ * missed is never valued at a price the tape itself would have thrown away.
+ */
+export function tapeRulesRefusal(
+  update: Pick<PythPriceUpdate, "price" | "conf" | "publishTime">,
+  nowSeconds: number,
+  clock: string,
+): { readonly rejected: "stale" | "wide"; readonly detail: string } | null {
   const age = nowSeconds - Number(update.publishTime);
   // A NEGATIVE AGE IS KEPT: a publish ahead of this clock is fresher than the clock can tell (invest-decision.ts).
-  if (age > TAPE_MAX_AGE_SECONDS) return { rejected: "stale", detail: `published ${age} s before the sampler's clock, past ${TAPE_MAX_AGE_SECONDS} s` };
+  if (age > TAPE_MAX_AGE_SECONDS) return { rejected: "stale", detail: `published ${age} s before ${clock}, past ${TAPE_MAX_AGE_SECONDS} s` };
   if (update.conf * 10_000n > TAPE_MAX_CONF_BPS * update.price) {
     return { rejected: "wide", detail: `its confidence interval is ${(update.conf * 10_000n) / update.price} bps of its price, past ${TAPE_MAX_CONF_BPS}` };
   }
-  return { sample: { publishTime: Number(update.publishTime), slot, priceE6: toUsdE6(update.price, update.expo), confE6: toUsdE6(update.conf, update.expo) } };
+  return null;
 }
 
 /**

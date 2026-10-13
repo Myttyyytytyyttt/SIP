@@ -265,6 +265,28 @@ describe("the per-trade seam", () => {
     expect(await (await seamFor(MODE_FIXED_BYTE, { oracle: null }))(measured([]))).toMatchObject({ kind: "charge" });
   });
 
+  it("never prices a late trade at a Pyth read the tape would not keep: a feed 2 h stale or 60 bps wide is a RETRY for the trades the tape missed, and blocks nothing the tape priced", async () => {
+    const tape = new MemoryPriceTape();
+    await tape.record({ publishTime: NOW - 600, slot: 1n, priceE6: 140_000_000n, confE6: 0n });
+    const stale = pythAccount({ price: 15_000_000_000n, publishTime: BigInt(NOW - 7_200) });
+    const seam = await seamFor(MODE_ROUNDUP_BYTE, { serving: { tape }, oracle: stale });
+    // A trade in the tape's hole is not valued at the 2-hour-old price, nor is one with no block time.
+    const hole = await seam(measured([trade("taped", 100, 10_000_000n, NOW - 590), trade("in-the-hole", 101, 10_666_667n, NOW - 100), trade("unaged", 102, 10_666_667n, null)]));
+    expect(hole).toMatchObject({ kind: "retry", detail: expect.stringContaining("no fresh price for 2 trade(s)") });
+    expect(hole.kind === "retry" && hole.detail).toContain("published 7200 s before now, past 60 s");
+    // A STALE FEED BLOCKS ONLY THE TAPE'S GAPS (ADR §4.10): a span the tape priced whole is charged as before.
+    expect(charged(await seam(measured([trade("taped", 100, 10_000_000n, NOW - 590)]))).rows.map((row) => [row.priceSource, row.priceUsdE6])).toEqual([["tape", 140_000_000n]]);
+    // A forgiven trade needs no price at all.
+    const forgiving = await seamFor(MODE_ROUNDUP_BYTE, { serving: { tape }, oracle: stale, boundaries: boundaryAt(500n) });
+    expect(charged(await forgiving(measured([trade("before-serving", 400, 10_666_667n, NOW - 100)]))).rows.map((row) => row.status)).toEqual(["forgiven"]);
+    // Wide: 60 bps of its price.
+    const wide = await seamFor(MODE_ROUNDUP_BYTE, { oracle: pythAccount({ price: 15_000_000_000n, conf: 90_000_000n, publishTime: BigInt(NOW) }) });
+    expect(await wide(measured([trade("wide", 101, 10_666_667n, NOW - 100)]))).toMatchObject({ kind: "retry", detail: expect.stringContaining("60 bps of its price, past 50") });
+    // At the tape's own limits — published 60 s before now, 50 bps wide — the late price is used.
+    const edge = await seamFor(MODE_ROUNDUP_BYTE, { oracle: pythAccount({ price: 15_000_000_000n, conf: 75_000_000n, publishTime: BigInt(NOW - 60) }) });
+    expect(charged(await edge(measured([trade("edge", 101, 10_666_667n, NOW - 100)]))).rows.map((row) => [row.priceSource, row.priceUsdE6])).toEqual([["late", 150_000_000n]]);
+  });
+
   it("carries the vault's daily counter from one link's SETTLED turn to the next: a link after the day's cap is reached waits on the clock, not on size", async () => {
     // F = 0.03 SOL, max_contribution 0.06 SOL, cap 0.3 SOL with 0.27 SOL saved today: one more settle fills it.
     const today = dayIndexOf(NOW);

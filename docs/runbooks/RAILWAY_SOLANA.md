@@ -895,6 +895,10 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
   envía nada (M4). Para cobrar de verdad (M5): `SIP_SOLANA_EXTRA_MODES_FROM_SLOT=<el slot de ahora>` y `LIVE=1`.
 - **El vault tiene que estar en la cola** (`vault_work.system = queue`, 10.4): la lista de vaults solo dice qué modos
   puede cobrar el worker que ya lo tiene.
+- **Si Pyth se queda parado**: una operación de redondeo sin muestra de la cinta a ±120 s se valora con la lectura de
+  Pyth del trabajo solo si esa lectura cumple las reglas de la cinta (60 s, 50 bps). Si no, el enlace queda en `RETRY`
+  ("no fresh price for N trade(s)") hasta que Pyth vuelva; nada se cobra a un precio viejo. Las operaciones que la cinta
+  sí tiene se cobran igual.
 - **Volver atrás**: quitar `SIP_SOLANA_EXTRA_MODES` (o poner `LIVE=0`). El vault queda en reposo y nada se pierde.
 
 ## Si algo falla

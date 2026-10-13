@@ -36,7 +36,7 @@ import type { ManagedLink } from "./discovery.js";
 import { tradeNotional } from "./measure-volume.js";
 import { perTradeCadence, perTradeCharge, perTradeCounterAfter, perTradePaid, type PerTradePolicyParams, type TradePrice } from "./per-trade-base.js";
 import type { PolicyBoundaryBook, OwnerHistoryReader } from "./policy-boundary.js";
-import { toUsdE6, type PriceTapeReader, type TapeSample } from "./price-tape.js";
+import { TAPE_LOOKUP_SECONDS, tapeRulesRefusal, toUsdE6, type PriceTapeReader, type TapeSample } from "./price-tape.js";
 import { MODE_ROUNDUP } from "./program-scripts.js";
 import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID_HEX, decodePythPriceUpdate, type PythPriceUpdate } from "./pyth.js";
 import { keeperModeFor, type KeeperMode } from "./role-registry.js";
@@ -153,7 +153,13 @@ function readOracle(info: { readonly owner: PublicKey; readonly data: Buffer } |
  * time or late at the job's Pyth read, charged, and held to the cadence.
  *
  * WHAT IT CANNOT KNOW IS A RETRY, NEVER A GUESS: a tape it cannot read, a
- * policy boundary it cannot walk, a ROUND-UP span with no settle-time price.
+ * policy boundary it cannot walk, a ROUND-UP span with no settle-time price,
+ * and a LATE trade when the job's Pyth read is one the tape itself would not
+ * keep — older than TAPE_MAX_AGE_SECONDS or wider than TAPE_MAX_CONF_BPS
+ * (tapeRulesRefusal). A feed that stalls for hours leaves a hole in the tape;
+ * the trades in it wait for a fresh read rather than take the stalled one. The
+ * on-chain floor's 24 h (oracleRefusal) is a different question: whether the
+ * program accepts the window, not what a trade was worth.
  */
 export function perTradeSeam(args: {
   readonly context: SettleModuleContext;
@@ -203,15 +209,25 @@ export function perTradeSeam(args: {
       }
       settlePrice = toUsdE6(oracle.price, oracle.expo);
       if (settlePrice <= 0n) return { kind: "retry", detail: `Pyth's SOL/USD price ${oracle.price}e${oracle.expo} is under a micro-dollar; nothing was attested` };
-      const times = [
-        ...new Set(trades.filter((trade) => trade.blockTime !== null && (boundarySlot === null || trade.slot > boundarySlot)).map((trade) => trade.blockTime!)),
-      ];
+      const priced = trades.filter((trade) => boundarySlot === null || trade.slot > boundarySlot);
+      const times = [...new Set(priced.filter((trade) => trade.blockTime !== null).map((trade) => trade.blockTime!))];
       if (times.length > 0) {
         try {
           samples = await serving.tape.pricesAt(times);
         } catch (error) {
           return { kind: "retry", detail: `the price tape could not be read (${summarizeUpstreamError(error)}); nothing was attested, and the trades are priced next turn` };
         }
+      }
+      // A LATE PRICE IS HELD TO THE TAPE'S OWN RULES: only trades it would price, and only when there are any.
+      const untaped = priced.filter((trade) => trade.blockTime === null || (samples.get(trade.blockTime) ?? null) === null).length;
+      const refused = untaped === 0 ? null : tapeRulesRefusal(oracle, Math.floor(nowSeconds), "now");
+      if (refused !== null) {
+        return {
+          kind: "retry",
+          detail:
+            `no fresh price for ${untaped} trade(s): the tape holds no sample within ${TAPE_LOOKUP_SECONDS} s of them, and this job's Pyth SOL/USD read ` +
+            `is not one the tape would keep (${refused.detail}); nothing was attested, and they are priced late once a read passes`,
+        };
       }
     }
     const late = settlePrice;
