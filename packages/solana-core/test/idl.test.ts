@@ -63,6 +63,13 @@ describe("the instruction classification", () => {
     for (const name of ["wrap_sol", "convert", "invest", "settle_v2"]) expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, false, true]);
   });
 
+  it("keeps the per-trade instructions out of the web: settle_v3 is the keeper's, set_policy_v3 waits for the modes", () => {
+    for (const name of ["settle_v3", "set_policy_v3"]) {
+      expect(SIP_IDL.instructions.some((instruction) => instruction.name === name), `${name} is in the IDL`).toBe(true);
+      expect([name, isOwnerInstruction(name), isForbiddenInstruction(name)]).toEqual([name, false, true]);
+    }
+  });
+
   it("lists link_wallet's and unlink_wallet's accounts under the names and addresses the verifier binds", () => {
     const link = idlInstruction("link_wallet").accounts;
     expect(link.map((account) => account.name)).toEqual(["owner", "wallet", "vault", "trading_link", "config", "instructions_sysvar", "system_program"]);
@@ -101,7 +108,27 @@ describe("the program's errors", () => {
     expect(idlErrorByCode(6036)).toEqual({ name: "LinkConsentMissing", msg: "no Ed25519 verification of the wallet's link consent precedes link_wallet" });
     expect(idlErrorByCode(6037)).toEqual({ name: "LinkConsentWrongSigner", msg: "the link consent is signed by a key that is not the wallet being linked" });
     expect(idlErrorByCode(6038)).toEqual({ name: "LinkConsentMismatch", msg: "the verified link consent does not name this program, wallet, vault and owner" });
-    expect(idlErrorByCode(6039)).toBeNull();
+  });
+
+  it("number the per-trade refusals after LinkConsentMismatch, in the order the program appended them", () => {
+    const appended = [
+      "ModeNeedsSettleV3",
+      "ModeNeedsSettleV2",
+      "InvalidPerTradeMode",
+      "InvalidRoundUpUnit",
+      "InvalidFixedAmount",
+      "InvalidMinTrade",
+      "InvalidDailyCap",
+      "PerTradeAmountMismatch",
+      "PerTradeAmountAboveBound",
+      "PriceRequired",
+      "PriceNotAllowed",
+      "PriceBelowOracleFloor",
+      "OracleStale",
+      "OracleAccountInvalid",
+    ];
+    appended.forEach((name, index) => expect([6039 + index, idlErrorByCode(6039 + index)?.name]).toEqual([6039 + index, name]));
+    expect(idlErrorByCode(6039 + appended.length)).toBeNull();
   });
 });
 

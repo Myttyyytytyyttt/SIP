@@ -825,6 +825,121 @@
       ]
     },
     {
+      "name": "set_policy_v3",
+      "docs": [
+        "The only door into the per-trade modes, ROUND-UP (2) and FIXED (3): the",
+        "owner's, like set_policy_v2, and it bumps the same policy nonce. See",
+        "set_policy_v3.rs. Leaving them is set_policy_v2 with mode 0 or 1."
+      ],
+      "discriminator": [
+        133,
+        176,
+        174,
+        85,
+        32,
+        79,
+        58,
+        22
+      ],
+      "accounts": [
+        {
+          "name": "owner",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "owner"
+              }
+            ]
+          }
+        },
+        {
+          "name": "per_trade_policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  95,
+                  116,
+                  114,
+                  97,
+                  100,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "mode",
+          "type": "u8"
+        },
+        {
+          "name": "roundup_unit_cents",
+          "type": "u16"
+        },
+        {
+          "name": "fixed_lamports",
+          "type": "u32"
+        },
+        {
+          "name": "min_trade_cents",
+          "type": "u16"
+        },
+        {
+          "name": "min_trade_lamports",
+          "type": "u32"
+        },
+        {
+          "name": "daily_cap_lamports",
+          "type": "u64"
+        },
+        {
+          "name": "max_contribution",
+          "type": "u64"
+        },
+        {
+          "name": "wallet_reserve",
+          "type": "u64"
+        },
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
       "name": "set_protocol_paused",
       "docs": [
         "Protocol-wide pause of settle, link_wallet, wrap_sol, convert and invest.",
@@ -985,6 +1100,188 @@
         },
         {
           "name": "base_lamports",
+          "type": "u64"
+        },
+        {
+          "name": "valid_until_slot",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "settle_v3",
+      "docs": [
+        "Settles a per-trade vault's window: needs, immediately before it, an",
+        "Ed25519SigVerify of the SIP_SETTLE_V3 bytes; see settle_v3.rs.",
+        "prices_hash travels as four u64 words (bytes 8i..8i+8, little-endian),",
+        "because the keeper's Privy policy accepts primitive arguments only."
+      ],
+      "discriminator": [
+        145,
+        62,
+        164,
+        103,
+        237,
+        99,
+        66,
+        46
+      ],
+      "accounts": [
+        {
+          "name": "wallet",
+          "docs": [
+            "The trading wallet: signer AND payer of the contribution."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.owner",
+                "account": "Vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "trading_link",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  108,
+                  105,
+                  110,
+                  107
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "introspection of this very transaction."
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "per_trade_policy",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  114,
+                  95,
+                  116,
+                  114,
+                  97,
+                  100,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pyth_sol_usd",
+          "docs": [
+            "verification level (Full), feed id (SOL/USD) and age are checked in the",
+            "handler before its price is read; see per_trade.rs."
+          ],
+          "optional": true
+        }
+      ],
+      "args": [
+        {
+          "name": "mode",
+          "type": "u8"
+        },
+        {
+          "name": "session_start_slot",
+          "type": "u64"
+        },
+        {
+          "name": "session_end_slot",
+          "type": "u64"
+        },
+        {
+          "name": "trade_count",
+          "type": "u32"
+        },
+        {
+          "name": "amount_lamports",
+          "type": "u64"
+        },
+        {
+          "name": "price_min_usd_e6",
+          "type": "u64"
+        },
+        {
+          "name": "prices_hash_0",
+          "type": "u64"
+        },
+        {
+          "name": "prices_hash_1",
+          "type": "u64"
+        },
+        {
+          "name": "prices_hash_2",
+          "type": "u64"
+        },
+        {
+          "name": "prices_hash_3",
           "type": "u64"
         },
         {
@@ -1431,6 +1728,19 @@
       ]
     },
     {
+      "name": "PerTradePolicy",
+      "discriminator": [
+        74,
+        94,
+        18,
+        244,
+        252,
+        24,
+        89,
+        185
+      ]
+    },
+    {
       "name": "ProtocolConfig",
       "discriminator": [
         207,
@@ -1471,6 +1781,19 @@
     }
   ],
   "events": [
+    {
+      "name": "PerTradeSettled",
+      "discriminator": [
+        229,
+        157,
+        206,
+        106,
+        121,
+        203,
+        174,
+        170
+      ]
+    },
     {
       "name": "Settled",
       "discriminator": [
@@ -1680,6 +2003,76 @@
       "code": 6038,
       "name": "LinkConsentMismatch",
       "msg": "the verified link consent does not name this program, wallet, vault and owner"
+    },
+    {
+      "code": 6039,
+      "name": "ModeNeedsSettleV3",
+      "msg": "this vault is in a per-trade mode (round-up or fixed): it settles only through settle_v3"
+    },
+    {
+      "code": 6040,
+      "name": "ModeNeedsSettleV2",
+      "msg": "this vault is in profit or volume mode: it settles only through settle_v2"
+    },
+    {
+      "code": 6041,
+      "name": "InvalidPerTradeMode",
+      "msg": "set_policy_v3 sets mode 2 (round-up) or 3 (fixed) only; modes 0 and 1 are set with set_policy_v2"
+    },
+    {
+      "code": 6042,
+      "name": "InvalidRoundUpUnit",
+      "msg": "the round-up unit must be whole dollars, from 100 to 10000 cents in steps of 100"
+    },
+    {
+      "code": 6043,
+      "name": "InvalidFixedAmount",
+      "msg": "the fixed amount per trade must be between 100000 and 100000000 lamports"
+    },
+    {
+      "code": 6044,
+      "name": "InvalidMinTrade",
+      "msg": "the minimum trade is at most 10000 cents (round-up) and at most 1000000000 lamports (fixed)"
+    },
+    {
+      "code": 6045,
+      "name": "InvalidDailyCap",
+      "msg": "the daily cap must be greater than zero"
+    },
+    {
+      "code": 6046,
+      "name": "PerTradeAmountMismatch",
+      "msg": "the attested amount is not trade_count times the vault's fixed amount"
+    },
+    {
+      "code": 6047,
+      "name": "PerTradeAmountAboveBound",
+      "msg": "the attested amount is more than trade_count whole round-up units at the signed price"
+    },
+    {
+      "code": 6048,
+      "name": "PriceRequired",
+      "msg": "round-up needs a price: price_min_usd_e6 must be greater than zero"
+    },
+    {
+      "code": 6049,
+      "name": "PriceNotAllowed",
+      "msg": "fixed mode takes no price: price_min_usd_e6, prices_hash and the oracle account must all be absent"
+    },
+    {
+      "code": 6050,
+      "name": "PriceBelowOracleFloor",
+      "msg": "the signed price is below half of the Pyth SOL/USD price"
+    },
+    {
+      "code": 6051,
+      "name": "OracleStale",
+      "msg": "the Pyth SOL/USD price is more than 24 hours old"
+    },
+    {
+      "code": 6052,
+      "name": "OracleAccountInvalid",
+      "msg": "the oracle account is missing, or is not a fully verified Pyth SOL/USD price update owned by the Pyth receiver"
     }
   ],
   "types": [
@@ -1831,6 +2224,178 @@
                 32
               ]
             }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PerTradePolicy",
+      "docs": [
+        "The parameters of a vault's per-trade modes, and its daily counter.",
+        "",
+        "A SEPARATE ACCOUNT, for InvestmentPolicy's reason: every instruction that",
+        "loads a Vault, withdraw included, deserialises that type, so the upgrade",
+        "that brings these modes changes no existing layout. Created by the owner's",
+        "set_policy_v3 (init_if_needed) and left behind, inert, when the vault goes",
+        "back to mode 0 or 1.",
+        "",
+        "Seeds: [\"per_trade\", vault]. 96 bytes after the discriminator, 104 in all.",
+        "",
+        "BOTH MODES' PARAMETERS ARE ALWAYS STORED AND ALWAYS BOUNDED, whatever the",
+        "mode, as both rates are on the Vault: switching between round-up and fixed",
+        "is a policy write, never a chance to slip an unchecked value in."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "roundup_unit_cents",
+            "docs": [
+              "ROUND-UP unit u, in cents: whole dollars, 100..=10_000 in steps of 100."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "fixed_lamports",
+            "docs": [
+              "FIXED amount F saved per counted trade, lamports, 100_000..=100_000_000."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "min_trade_cents",
+            "docs": [
+              "ROUND-UP's minimum counted trade, cents, 0..=10_000. A keeper rule the",
+              "program cannot see trades to apply; it is signed into every attestation."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "min_trade_lamports",
+            "docs": [
+              "FIXED's minimum counted trade (the SOL leg), lamports, 0..=1_000_000_000."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "daily_cap_lamports",
+            "docs": [
+              "The most settle_v3 moves into this vault per UTC day. It clips; the",
+              "excess is forgiven, never carried."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "day_index",
+            "docs": [
+              "unix_timestamp / 86_400 of the last settle_v3 that paid or rolled the day."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "day_saved_lamports",
+            "docs": [
+              "Paid into the vault by settle_v3 on `day_index`. Written by settle_v3",
+              "only; set_policy_v3 never resets it."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "_reserved",
+            "type": {
+              "array": [
+                "u8",
+                30
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PerTradeSettled",
+      "docs": [
+        "What a per-trade settlement (settle_v3, mode 2 or 3) counted and signed,",
+        "emitted right AFTER its `Settled`.",
+        "",
+        "A SECOND EVENT, NOT A LONGER `Settled`. The deployed readers decode",
+        "`Settled` with its exact length and refuse trailing bytes, so settle_v3",
+        "emits an unchanged `Settled` (mode 2 or 3, base = owed = the attested",
+        "amount, bps = 10_000, paid) that every reader already counts, and puts",
+        "what is new here, under a discriminator old readers skip.",
+        "",
+        "`mode_param` is the round-up unit in cents (mode 2) or the fixed lamports",
+        "per trade (mode 3); `min_trade` is min_trade_cents (mode 2) or",
+        "min_trade_lamports (mode 3): the same two values the attestation signs.",
+        "`day_saved_lamports` is the vault's UTC-day total AFTER this payment."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "link_epoch",
+            "type": "u64"
+          },
+          {
+            "name": "settlement_nonce",
+            "type": "u64"
+          },
+          {
+            "name": "mode",
+            "type": "u8"
+          },
+          {
+            "name": "trade_count",
+            "type": "u32"
+          },
+          {
+            "name": "price_min_usd_e6",
+            "type": "u64"
+          },
+          {
+            "name": "prices_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "mode_param",
+            "type": "u64"
+          },
+          {
+            "name": "min_trade",
+            "type": "u64"
+          },
+          {
+            "name": "day_index",
+            "type": "u32"
+          },
+          {
+            "name": "day_saved_lamports",
+            "type": "u64"
           }
         ]
       }

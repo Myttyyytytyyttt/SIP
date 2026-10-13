@@ -67,6 +67,10 @@ export const SIP_ACCOUNT_SPACE = {
   get ProtocolConfig(): number {
     return spaceOf("ProtocolConfig");
   },
+  /** ["per_trade", vault]: a per-trade (round-up, fixed) vault's parameters and daily counter. */
+  get PerTradePolicy(): number {
+    return spaceOf("PerTradePolicy");
+  },
 };
 
 export type SipAccountName = keyof typeof SIP_ACCOUNT_SPACE;

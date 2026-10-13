@@ -181,4 +181,9 @@ describe("decoders agree with Anchor's coder", () => {
   it("covers every account the IDL declares", () => {
     expect(Object.keys(SIP_ACCOUNT_SPACE).sort()).toEqual(SIP_IDL.accounts.map((account) => account.name).sort());
   });
+
+  it("sizes the PerTradePolicy as the program allocates it: 8 + 96 bytes", () => {
+    // state.rs: const _: () = assert!(8 + PerTradePolicy::INIT_SPACE == 104);
+    expect(SIP_ACCOUNT_SPACE.PerTradePolicy).toBe(104);
+  });
 });
