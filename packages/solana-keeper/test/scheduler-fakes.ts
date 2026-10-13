@@ -277,6 +277,8 @@ export class FakeChain implements SchedulerChain {
   readonly statuses = new Map<string, { err: unknown } | null>();
   /** When set, snapshot() never answers: a tick blocked on a call that never returns. */
   hang = false;
+  /** The account a price-tape snapshot carries in `also` (SIP_SOLANA_PRICE_TAPE); undefined: a snapshot without it. */
+  also: ChainSnapshot["also"] = undefined;
 
   async snapshot(): Promise<ChainSnapshot> {
     this.calls.push("snapshot");
@@ -297,6 +299,7 @@ export class FakeChain implements SchedulerChain {
       configReadable: true,
       crankLamports: this.crankLamports,
       errors: [],
+      ...(this.also === undefined ? {} : { also: this.also }),
     };
   }
 

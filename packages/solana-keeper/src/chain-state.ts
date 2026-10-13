@@ -10,7 +10,7 @@
 // it before it is allowed to act.
 
 import type * as anchor from "@coral-xyz/anchor";
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, type AccountInfo } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
 import { readProtocolConfig, type ProtocolConfigState } from "./accounts.js";
 import { KEEPER_LOCK_NAME } from "./singleton.js";
@@ -26,17 +26,44 @@ export interface ChainSnapshot {
   readonly crankLamports: bigint | null;
   /** Summarized upstream failures; never a URL. */
   readonly errors: readonly string[];
+  /**
+   * Present only when the caller asked for one more account in the program
+   * account's request (readChainSnapshot's `alsoRead`: the lock-holding
+   * scheduler's price tape, SIP_SOLANA_PRICE_TAPE=on). Null when that request
+   * failed. Absent — every legacy keeper, every scheduler without the tape — the
+   * snapshot is read exactly as it always was.
+   */
+  readonly also?: { readonly info: AccountInfo<Buffer> | null; readonly slot: number } | null;
 }
 
-/** One read of the chain's view of this deployment. Never throws: an unreadable part is recorded as such. */
-export async function readChainSnapshot(connection: Connection, program: anchor.Program): Promise<ChainSnapshot> {
+/**
+ * One read of the chain's view of this deployment. Never throws: an unreadable part is recorded as such.
+ *
+ * `alsoRead`: one more account, in the SAME request as the program account
+ * (getMultipleAccounts instead of getAccountInfo, one call either way), returned
+ * as `also` with the request's context slot. Absent, nothing here changes.
+ */
+export async function readChainSnapshot(connection: Connection, program: anchor.Program, options: { readonly alsoRead?: PublicKey } = {}): Promise<ChainSnapshot> {
   const errors: string[] = [];
 
   let programDeployed: boolean | null = null;
-  try {
-    programDeployed = (await connection.getAccountInfo(program.programId, "confirmed"))?.executable === true;
-  } catch (error) {
-    errors.push(`program account unreadable: ${summarizeUpstreamError(error)}`);
+  let also: ChainSnapshot["also"];
+  if (options.alsoRead === undefined) {
+    try {
+      programDeployed = (await connection.getAccountInfo(program.programId, "confirmed"))?.executable === true;
+    } catch (error) {
+      errors.push(`program account unreadable: ${summarizeUpstreamError(error)}`);
+    }
+  } else {
+    try {
+      const answer = await connection.getMultipleAccountsInfoAndContext([program.programId, options.alsoRead], "confirmed");
+      if (answer.value.length !== 2) throw new Error(`asked for 2 accounts and got ${answer.value.length}`);
+      programDeployed = answer.value[0]?.executable === true;
+      also = { info: answer.value[1] ?? null, slot: answer.context.slot };
+    } catch (error) {
+      errors.push(`program account unreadable: ${summarizeUpstreamError(error)}`);
+      also = null;
+    }
   }
 
   let config: ProtocolConfigState | null = null;
@@ -57,7 +84,7 @@ export async function readChainSnapshot(connection: Connection, program: anchor.
     }
   }
 
-  return { at: new Date().toISOString(), programDeployed, config, configReadable, crankLamports, errors };
+  return { at: new Date().toISOString(), programDeployed, config, configReadable, crankLamports, errors, ...(also === undefined ? {} : { also }) };
 }
 
 export type LiveVerification =
