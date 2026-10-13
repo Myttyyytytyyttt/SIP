@@ -346,7 +346,8 @@ export function oracleRefusal(update: PythPriceUpdate, priceMinUsdE6: bigint, no
   if (update.verification.variant !== PYTH_VERIFICATION_FULL) {
     return "the Pyth SOL/USD account holds a partially verified update, and settle_v3 reads only a fully verified one (OracleAccountInvalid)";
   }
-  if (update.publishTime < BigInt(nowSeconds) - BigInt(ORACLE_FRESH_SECONDS)) {
+  // A WORKER'S CLOCK IS FRACTIONAL (Date.now() / 1000): floored, as the chain's unix_timestamp is.
+  if (update.publishTime < BigInt(Math.floor(nowSeconds)) - BigInt(ORACLE_FRESH_SECONDS)) {
     return `the Pyth SOL/USD account was published at ${update.publishTime}, more than a day before now, and settle_v3 would refuse it (OracleStale)`;
   }
   if (!pythFloorHolds(priceMinUsdE6, update.price, update.expo)) {

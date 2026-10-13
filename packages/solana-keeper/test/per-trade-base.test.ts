@@ -203,6 +203,11 @@ describe("oracleRefusal: settle_v3's Pyth floor, held before anything is signed 
     expect(oracleRefusal(update(15_000_000_000n), 1_500_000n, NOW)).toMatch(/PriceBelowOracleFloor/);
   });
 
+  it("takes a worker's fractional clock (Date.now() / 1000) as the chain takes its unix_timestamp: floored, never a throw", () => {
+    expect(oracleRefusal(update(15_000_000_000n), P150, NOW + 0.659)).toBeNull();
+    expect(oracleRefusal(update(15_000_000_000n, { publishTime: BigInt(NOW - ORACLE_FRESH_SECONDS) }), P150, NOW + 0.999)).toBeNull();
+  });
+
   it("refuses a feed more than a day stale and a partially verified update, as settle_v3 would", () => {
     expect(oracleRefusal(update(15_000_000_000n, { publishTime: BigInt(NOW - ORACLE_FRESH_SECONDS) }), P150, NOW)).toBeNull();
     expect(oracleRefusal(update(15_000_000_000n, { publishTime: BigInt(NOW - ORACLE_FRESH_SECONDS - 1) }), P150, NOW)).toMatch(/OracleStale/);
