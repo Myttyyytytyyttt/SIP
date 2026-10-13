@@ -46,6 +46,9 @@ import {
   settleOnlyIdl,
   writeAdminKeyFile,
   type PolicyLike,
+  KEEPER_POLICY_NAME,
+  KEEPER_POLICY_NAME_PER_TRADE,
+  instructionOnlyIdl,
 } from "../src/privy-policy.js";
 import { buildTestSettle } from "./settle-transaction.js";
 
@@ -601,5 +604,35 @@ describe("the refusal probes", () => {
       for (const instruction of Transaction.from(bytes).instructions) expect(allowedPrograms(policy)).not.toContain(instruction.programId.toBase58());
     }
     expect(() => buildMemoProbe(wallet, "not-a-blockhash")).toThrow(/blockhash is not a base58 32-byte hash/i);
+  });
+});
+
+describe("the per-trade modes' rule (buildKeeperPolicy's perTrade, ADR §5.7 U2)", () => {
+  it("is absent by default: today's policy is unchanged, settle_v2 only", () => {
+    const today = buildKeeperPolicy(SIP_PROGRAM_ID);
+    expect(today).toEqual(buildKeeperPolicy(SIP_PROGRAM_ID, {}));
+    expect(today.name).toBe(KEEPER_POLICY_NAME);
+    expect(allowedInstructions(today)).toEqual([`${SIP_PROGRAM_ID}: settle_v2 only`, "Ed25519SigVerify111111111111111111111111111: any instruction"]);
+  });
+
+  it("allows settle_v3 by name on sip-vault alone, beside settle_v2, through an IDL cut to settle_v3", () => {
+    const perTrade = buildKeeperPolicy(SIP_PROGRAM_ID, { perTrade: true });
+    expect(perTrade.name).toBe(KEEPER_POLICY_NAME_PER_TRADE);
+    expect(allowedInstructions(perTrade)).toEqual([
+      `${SIP_PROGRAM_ID}: settle_v2 only`,
+      `${SIP_PROGRAM_ID}: settle_v3 only`,
+      "Ed25519SigVerify111111111111111111111111111: any instruction",
+    ]);
+    const v3 = instructionOnlyIdl("settle_v3");
+    expect(v3.instructions).toHaveLength(1);
+    expect(Buffer.from(v3.instructions[0]!.discriminator).toString("hex")).toBe("913ea467ed63422e");
+    expect(v3.instructions[0]!.accounts.at(-1)).toEqual({ name: "pyth_sol_usd", optional: true });
+    expect(v3.instructions[0]!.args.map((arg) => arg.type)).toEqual(["u8", "u64", "u64", "u32", "u64", "u64", "u64", "u64", "u64", "u64", "u64"]);
+    // A settle_v3's data decodes, through that IDL, as the instruction the rule names.
+    const coder = new BorshInstructionCoder(v3 as unknown as Idl);
+    const data = Buffer.concat([Buffer.from("913ea467ed63422e", "hex"), Buffer.alloc(77)]);
+    expect(coder.decode(data)?.name).toBe("settle_v3");
+    // And the settle_v2 rule is the same rule as without the option.
+    expect(perTrade.rules[0]).toEqual(buildKeeperPolicy(SIP_PROGRAM_ID).rules[0]);
   });
 });
