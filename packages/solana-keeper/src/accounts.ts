@@ -314,3 +314,49 @@ function investmentPolicyState(address: PublicKey, decoded: unknown): Investment
     bucketAmounts: buckets("bucketAmounts").map((amount) => BigInt(String(amount))),
   };
 }
+
+/**
+ * A per-trade vault's PerTradePolicy (state.rs; ADR §5.4): ROUND-UP's unit and
+ * minimum, FIXED's F and minimum — both modes' parameters are always stored —
+ * the daily cap and the UTC day's counter. settle_v3 rebuilds the attested
+ * mode_param and min_trade from it, and clips every payment by its counter.
+ */
+export interface PerTradePolicyState {
+  readonly address: PublicKey;
+  readonly vault: PublicKey;
+  readonly version: number;
+  readonly roundupUnitCents: number;
+  readonly fixedLamports: number;
+  readonly minTradeCents: number;
+  readonly minTradeLamports: number;
+  readonly dailyCapLamports: bigint;
+  readonly dayIndex: number;
+  readonly daySavedLamports: bigint;
+}
+
+/** ["per_trade", vault]: created by set_policy_v3, the only door into modes 2 and 3. */
+export function perTradePolicyAddress(programId: PublicKey, vault: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from("per_trade"), vault.toBuffer()], programId)[0];
+}
+
+/**
+ * The PerTradePolicy from bytes in hand (a job's read, src/settle-modules.ts):
+ * null for no account, and a THROW for bytes that are not one — Anchor's
+ * discriminator check, then every field by name — as decodeInvestmentPolicy does.
+ */
+export function decodePerTradePolicy(program: anchor.Program, address: PublicKey, data: Buffer | null): PerTradePolicyState | null {
+  if (data === null || data.length === 0) return null;
+  const f = fields("PerTradePolicy", program.coder.accounts.decode("perTradePolicy", data));
+  return {
+    address,
+    vault: f.key("vault"),
+    version: f.small("version"),
+    roundupUnitCents: f.small("roundupUnitCents"),
+    fixedLamports: f.small("fixedLamports"),
+    minTradeCents: f.small("minTradeCents"),
+    minTradeLamports: f.small("minTradeLamports"),
+    dailyCapLamports: f.big("dailyCapLamports"),
+    dayIndex: f.small("dayIndex"),
+    daySavedLamports: f.big("daySavedLamports"),
+  };
+}

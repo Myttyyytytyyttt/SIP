@@ -18,12 +18,32 @@
 //   SIP_SOLANA_PLAN_RPS     the Helius plan's requests a second: 1 to 10 000,
 //                           default 50 (Developer, HELIUS_DEVELOPER_RPS).
 //
+// AND THE PER-TRADE MODES (ADR §5, §6.2 M4–M6; plan §3.4, §7 row 14), all four
+// strict, all four off when unset — and an unset SIP_SOLANA_EXTRA_MODES is TODAY:
+// no per-trade byte has a module (src/settle-modules.ts), and such a vault's
+// links rest at UNSUPPORTED_MODE before any RPC call.
+//   SIP_SOLANA_EXTRA_MODES            roundup, fixed or both (comma-separated):
+//                                     the per-trade modes this worker settles.
+//   SIP_SOLANA_EXTRA_MODES_VAULTS     REQUIRED with it: the vault addresses it
+//                                     settles them for, comma-separated, or `*`.
+//                                     Who acts on a vault at all is still
+//                                     vault_work.system's; this list is the
+//                                     module's allowlist (plan §7 row 14).
+//   SIP_SOLANA_EXTRA_MODES_LIVE       0 (unset) or 1. At 0 a live worker turns a
+//                                     per-trade vault DRY: measured, reported,
+//                                     never gated or sent (M4). 1 sends (M5).
+//   SIP_SOLANA_EXTRA_MODES_FROM_SLOT  trades at or below this slot are forgiven
+//                                     (RT-7): the slot serving widened at.
+//                                     REQUIRED for LIVE=1, so the first live
+//                                     window starts fresh.
+//
 // THE REST OF THE KEEPER'S CONFIG IS READ BY loadConfig (src/config.ts) AS FOR
 // ANY KEEPER, with these four names taken out first so it does not call them
 // misspellings. And then three refusals only a worker has (workerRefusals): a
 // shadow worker holds no key, a worker that is `on` holds one, and every worker
 // needs its database.
 
+import { PublicKey } from "@solana/web3.js";
 import type { KeeperConfig } from "./config.js";
 import { DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
@@ -35,8 +55,22 @@ import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
  */
 export { DISPATCH_MODES, readDispatchMode, type DispatchMode };
 
+/** The per-trade modes' four variables (readExtraModes). */
+export const EXTRA_MODES_VARS = ["SIP_SOLANA_EXTRA_MODES", "SIP_SOLANA_EXTRA_MODES_VAULTS", "SIP_SOLANA_EXTRA_MODES_LIVE", "SIP_SOLANA_EXTRA_MODES_FROM_SLOT"] as const;
+
 /** The variables this file reads; loadConfig is handed the environment without them. */
-export const WORKER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_WORKER_SLOTS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_RPS"] as const;
+export const WORKER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_WORKER_SLOTS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_RPS", ...EXTRA_MODES_VARS] as const;
+
+/** SIP_SOLANA_EXTRA_MODES's names, and the skim_mode byte each serves. */
+export const EXTRA_MODE_NAMES: Readonly<Record<string, number>> = Object.freeze({ roundup: 2, fixed: 3 });
+
+/** What a worker serves of the per-trade modes; null is none (every variable unset). */
+export interface ExtraModesSettings {
+  readonly modes: ReadonlySet<number>;
+  readonly vaults: ReadonlySet<string> | "*";
+  readonly live: boolean;
+  readonly fromSlot: bigint | null;
+}
 
 export const DEFAULT_WORKER_SLOTS = 2;
 export const MAX_WORKER_SLOTS = 8;
@@ -49,6 +83,76 @@ export interface WorkerSettings {
   readonly slots: number;
   readonly workersMax: number;
   readonly planRps: number;
+  /** The per-trade modes this worker serves, or null: none (every SIP_SOLANA_EXTRA_MODES* unset). */
+  readonly extraModes: ExtraModesSettings | null;
+}
+
+const U64_MAX = (1n << 64n) - 1n;
+
+/**
+ * The four SIP_SOLANA_EXTRA_MODES* variables, strictly (the header says what each
+ * is). Every value that is not an exact accepted form refuses to start, and so
+ * does any of the other three set WITHOUT SIP_SOLANA_EXTRA_MODES: set alone, it
+ * would do nothing, and a setting that silently does nothing is the misspelling
+ * this file exists to catch.
+ */
+export function readExtraModes(env: NodeJS.ProcessEnv): { readonly extraModes: ExtraModesSettings | null } | { readonly problems: readonly string[] } {
+  const problems: string[] = [];
+  const raw = (name: (typeof EXTRA_MODES_VARS)[number]): string | undefined => trimmed(env[name]);
+  const modesRaw = raw("SIP_SOLANA_EXTRA_MODES");
+  if (modesRaw === undefined) {
+    const stray = EXTRA_MODES_VARS.filter((name) => name !== "SIP_SOLANA_EXTRA_MODES" && raw(name) !== undefined);
+    if (stray.length > 0) {
+      return { problems: [`${stray.join(", ")} set without SIP_SOLANA_EXTRA_MODES: no per-trade mode is served, so it would do nothing. Unset it, or name the modes.`] };
+    }
+    return { extraModes: null };
+  }
+  const modes = new Set<number>();
+  modesRaw.split(",").forEach((entry, index) => {
+    const name = entry.trim();
+    const byte = Object.hasOwn(EXTRA_MODE_NAMES, name) ? EXTRA_MODE_NAMES[name]! : undefined;
+    if (byte === undefined) problems.push(`SIP_SOLANA_EXTRA_MODES entry #${index + 1} is not roundup or fixed; it holds a ${name.length}-character value.`);
+    else if (modes.has(byte)) problems.push(`SIP_SOLANA_EXTRA_MODES entry #${index + 1} repeats a mode an earlier entry already names.`);
+    else modes.add(byte);
+  });
+  let vaults: ReadonlySet<string> | "*" = new Set<string>();
+  const vaultsRaw = raw("SIP_SOLANA_EXTRA_MODES_VAULTS");
+  if (vaultsRaw === undefined) {
+    problems.push("SIP_SOLANA_EXTRA_MODES_VAULTS is required with SIP_SOLANA_EXTRA_MODES: the vault addresses served, comma-separated, or * for every vault.");
+  } else if (vaultsRaw === "*") {
+    vaults = "*";
+  } else {
+    const listed = new Set<string>();
+    vaultsRaw.split(",").forEach((entry, index) => {
+      const address = entry.trim();
+      let valid = false;
+      try {
+        valid = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address) && new PublicKey(address).toBase58() === address;
+      } catch {
+        valid = false;
+      }
+      if (!valid) problems.push(`SIP_SOLANA_EXTRA_MODES_VAULTS entry #${index + 1} is not a base58 vault address.`);
+      else listed.add(address);
+    });
+    vaults = listed;
+  }
+  const liveRaw = raw("SIP_SOLANA_EXTRA_MODES_LIVE");
+  let live = false;
+  if (liveRaw === "1") live = true;
+  else if (liveRaw !== undefined && liveRaw !== "0") problems.push("SIP_SOLANA_EXTRA_MODES_LIVE must be 0 or 1 (unset is 0).");
+  const fromRaw = raw("SIP_SOLANA_EXTRA_MODES_FROM_SLOT");
+  let fromSlot: bigint | null = null;
+  if (fromRaw !== undefined) {
+    if (!/^[0-9]{1,20}$/.test(fromRaw) || BigInt(fromRaw) > U64_MAX) problems.push("SIP_SOLANA_EXTRA_MODES_FROM_SLOT must be a slot: a whole number, digits only.");
+    else fromSlot = BigInt(fromRaw);
+  }
+  if (live && fromSlot === null) {
+    problems.push(
+      "SIP_SOLANA_EXTRA_MODES_LIVE=1 needs SIP_SOLANA_EXTRA_MODES_FROM_SLOT: the slot serving widened at, so trades made before it are forgiven rather than charged at a later price (ADR RT-7).",
+    );
+  }
+  if (problems.length > 0) return { problems };
+  return { extraModes: { modes, vaults, live, fromSlot } };
 }
 
 const trimmed = (value: string | undefined): string | undefined => {
@@ -68,7 +172,7 @@ export function readWorkerSettings(env: NodeJS.ProcessEnv): { readonly settings:
   const problems: string[] = [];
   const mode = readDispatchMode(env["SIP_SOLANA_DISPATCH"]);
   if ("problem" in mode) problems.push(mode.problem);
-  const read = (name: (typeof WORKER_VARS)[number], fallback: number, min: number, max: number): number => {
+  const read = (name: "SIP_SOLANA_WORKER_SLOTS" | "SIP_SOLANA_WORKERS_MAX" | "SIP_SOLANA_PLAN_RPS", fallback: number, min: number, max: number): number => {
     const raw = trimmed(env[name]);
     if (raw === undefined) return fallback;
     const value = wholeIn(raw, min, max);
@@ -78,8 +182,10 @@ export function readWorkerSettings(env: NodeJS.ProcessEnv): { readonly settings:
   const slots = read("SIP_SOLANA_WORKER_SLOTS", DEFAULT_WORKER_SLOTS, 1, MAX_WORKER_SLOTS);
   const workersMax = read("SIP_SOLANA_WORKERS_MAX", DEFAULT_WORKERS_MAX, 1, MAX_WORKERS);
   const planRps = read("SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, 1, MAX_PLAN_RPS);
-  if (problems.length > 0 || "problem" in mode) return { problems };
-  return { settings: { mode: mode.mode, slots, workersMax, planRps } };
+  const extra = readExtraModes(env);
+  if ("problems" in extra) problems.push(...extra.problems);
+  if (problems.length > 0 || "problem" in mode || "problems" in extra) return { problems };
+  return { settings: { mode: mode.mode, slots, workersMax, planRps, extraModes: extra.extraModes } };
 }
 
 /** The environment loadConfig is handed: the same, without the worker's own names. */

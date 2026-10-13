@@ -16,6 +16,12 @@
 //   * AttestationExpired, AttestationMismatch, SkimModeMismatch,
 //     InvalidSessionWindow — RETRY: the next sweep reads the vault and the link
 //     again and measures anew;
+//   * ModeNeedsSettleV3, ModeNeedsSettleV2 — RETRY: the owner moved the vault
+//     into or out of a per-trade mode after this turn read it, and the next turn
+//     settles it through the other instruction (ADR §5.4);
+//   * PriceBelowOracleFloor, OracleStale — RETRY: a ROUND-UP window's price
+//     against Pyth's, a market that more than doubled inside the window or a feed
+//     a day stale; nothing moved, and nothing is lost by asking again (ADR §5.2.5);
 //   * any other program error — FAILED.
 // With no program error in it, an error is about the road, not the settle. An
 // HTTP 4xx other than 408 and 429 is Privy refusing the request itself — its
@@ -61,6 +67,12 @@ export const NOT_A_DEFECT: Readonly<Record<string, Exclude<RefusalOutcome, "FAIL
   AttestationMismatch: "RETRY",
   SkimModeMismatch: "RETRY",
   InvalidSessionWindow: "RETRY",
+  // THE PER-TRADE MODES' (settle_v3, and settle_v2's one new guard). Only the
+  // upgraded program says any of these; on today's binary they cannot occur.
+  ModeNeedsSettleV3: "RETRY",
+  ModeNeedsSettleV2: "RETRY",
+  PriceBelowOracleFloor: "RETRY",
+  OracleStale: "RETRY",
 };
 
 /** The fields a nested error is searched through, in this order. */

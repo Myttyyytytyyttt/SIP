@@ -43,15 +43,30 @@ export type KeeperRole = "profit" | "volume";
 export const DEFAULT_KEEPER_ROLE: KeeperRole = "profit";
 
 /**
- * The program's skim_mode numbering (state.rs; MODE_PROFIT and MODE_VOLUME in
- * @sip/solana-program/attestation), the only bytes any sip-vault version defines.
- * Literals for the reason in this file's header; a test pins them to the program's.
+ * The program's skim_mode numbering (state.rs; MODE_PROFIT, MODE_VOLUME,
+ * MODE_ROUNDUP and MODE_FIXED in @sip/solana-program/attestation), the only bytes
+ * any sip-vault version defines. Literals for the reason in this file's header;
+ * a test pins them to the program's.
+ *
+ * 2 AND 3 EXIST ONLY ON THE UPGRADED PROGRAM (set_policy_v3 and settle_v3, ADR
+ * §5.4). The binary on mainnet today refuses both, so no vault reports them
+ * until the upgrade lands; after it, only set_policy_v3 writes them.
  */
 export const MODE_PROFIT_BYTE = 0;
 export const MODE_VOLUME_BYTE = 1;
+export const MODE_ROUNDUP_BYTE = 2;
+export const MODE_FIXED_BYTE = 3;
 
 /** A skim_mode byte this keeper has an entry for. A vault may report any byte; only these mean something. */
-export type ModeByte = typeof MODE_PROFIT_BYTE | typeof MODE_VOLUME_BYTE;
+export type ModeByte = typeof MODE_PROFIT_BYTE | typeof MODE_VOLUME_BYTE | typeof MODE_ROUNDUP_BYTE | typeof MODE_FIXED_BYTE;
+
+/** The per-trade bytes: settled by settle_v3, never by settle_v2 (ADR §5.4's guard). */
+export type PerTradeModeByte = typeof MODE_ROUNDUP_BYTE | typeof MODE_FIXED_BYTE;
+
+/** Whether a vault's byte is a per-trade mode (ROUND-UP or FIXED). Any number: a vault's byte is whatever the chain says. */
+export function isPerTradeMode(byte: number): byte is PerTradeModeByte {
+  return byte === MODE_ROUNDUP_BYTE || byte === MODE_FIXED_BYTE;
+}
 
 /**
  * A real probe on every sweep, which is what every mode gets today.
@@ -63,6 +78,24 @@ export type ModeByte = typeof MODE_PROFIT_BYTE | typeof MODE_VOLUME_BYTE;
  * row, and so a reader does not take 0 for "never".
  */
 export const EVERY_SWEEP = 0;
+
+/**
+ * THE PER-MODE PROBE CADENCE OF THE PER-TRADE MODES (ADR §2.3.7, §5.5; plan
+ * P4): ten minutes. A per-trade span settles on its own clock
+ * (PER_TRADE_MAX_WAIT_SECONDS) or its size, so probing such a link more often
+ * than this buys nothing but reads. A dispatcher worker that completes a resting
+ * per-trade vault makes it due again this soon at the latest
+ * (src/worker-job.ts, completionFor), where every other vault waits for the
+ * safety pass.
+ */
+export const PER_TRADE_PROBE_EVERY_MS = 10 * 60_000;
+
+/**
+ * The per-trade clock: one hour at launch, to move to six once Privy signatures
+ * pass 60 % of the free tier (ADR §5.5, owner decision 16). A per-trade span
+ * settles once its oldest charged trade is this old, whatever it owes.
+ */
+export const PER_TRADE_MAX_WAIT_SECONDS = 3_600;
 
 /**
  * What a vault in one mode needs from the keeper that settles it.
@@ -80,16 +113,27 @@ export interface KeeperMode {
    * The vault field settle_v2 charges at in this mode, as state.rs's
    * `Vault::active_bps` reads it. DESCRIPTIVE: activeBps (settle-decision.ts)
    * keeps the program's own branch, and a test holds this column to it.
+   *
+   * NULL FOR THE PER-TRADE MODES, which charge no rate: settle_v3 checks a
+   * per-trade amount, and settle_v2 refuses them (ModeNeedsSettleV3). activeBps
+   * still reads skim_bps for them, because that is what active_bps() does for any
+   * byte but 1 (ADR §5.6, Trap 1; pinned by T-O3).
    */
-  readonly rateField: keyof Pick<VaultState, "skimBps" | "volumeBps">;
+  readonly rateField: keyof Pick<VaultState, "skimBps" | "volumeBps"> | null;
   /**
    * Where the attested base comes from: the wallet's balance chain (a PROFIT
    * span's profit, src/measure-window.ts) or the notional its trades moved (a
    * VOLUME span, src/measure-volume.ts and src/volume-base.ts). bin/keeper.mts
    * hands a turn the volume probe and base seam exactly when this is
    * "trade-notional" and its own profile settles the byte.
+   *
+   * "per-trade": the same probe's trades, each charged on its own — rounded up
+   * to the unit at its own price (ROUND-UP) or a fixed amount (FIXED) — by
+   * src/per-trade-base.ts, and settled through settle_v3. No legacy role settles
+   * it; only a dispatcher worker does, and only under SIP_SOLANA_EXTRA_MODES
+   * (src/settle-modules.ts).
    */
-  readonly base: "balance-chain" | "trade-notional";
+  readonly base: "balance-chain" | "trade-notional" | "per-trade";
   /**
    * Whether a losing span's loss is carried into the next window
    * (settle-decision.ts, baseDecision). DESCRIPTIVE, like rateField, and held to
@@ -98,18 +142,19 @@ export interface KeeperMode {
    */
   readonly carriesLosses: boolean;
   /**
-   * THE PER-MODE PROBE CADENCE SLOT (PMC), UNREAD TODAY. The shortest interval
-   * between two real probes of a link resting in this mode. Every mode is
-   * EVERY_SWEEP, which is what settle-tick.ts does with no cadence at all;
-   * nothing reads this field yet, and a test holds every row at EVERY_SWEEP so
-   * that the day something does read it, a changed row is a decision and not a
-   * default.
+   * THE PER-MODE PROBE CADENCE (PMC). The shortest interval between two real
+   * probes of a link resting in this mode. PROFIT and VOLUME are EVERY_SWEEP,
+   * which is what settle-tick.ts does with no cadence at all, and nothing a
+   * legacy keeper runs reads this field. The per-trade modes are
+   * PER_TRADE_PROBE_EVERY_MS, which a dispatcher worker reads as the latest a
+   * resting per-trade vault is due again (src/worker-job.ts, completionFor).
    */
   readonly realProbeEveryMs: number;
   /**
    * The longest a per-trade mode's oldest charged trade waits before its span
-   * settles on the clock. Null for both of today's modes, which settle on their
-   * own rule (a profit, or VOLUME's cadence in src/volume-base.ts). A SLOT, UNREAD.
+   * settles on the clock (PER_TRADE_MAX_WAIT_SECONDS). Null for PROFIT and
+   * VOLUME, which settle on their own rule (a profit, or VOLUME's cadence in
+   * src/volume-base.ts).
    */
   readonly perTradeMaxWaitSeconds: number | null;
 }
@@ -133,6 +178,28 @@ export const KEEPER_MODES = {
     carriesLosses: false,
     realProbeEveryMs: EVERY_SWEEP,
     perTradeMaxWaitSeconds: null,
+  },
+  // THE PER-TRADE MODES (ADR §5): no legacy role settles them — ROLE_PROFILES
+  // below is unchanged — so a legacy keeper rests such a vault at
+  // UNSUPPORTED_MODE before any RPC call (T-O1, T-O2), and a dispatcher worker
+  // settles one only under SIP_SOLANA_EXTRA_MODES (src/settle-modules.ts).
+  [MODE_ROUNDUP_BYTE]: {
+    byte: MODE_ROUNDUP_BYTE,
+    name: "ROUND-UP",
+    rateField: null,
+    base: "per-trade",
+    carriesLosses: false,
+    realProbeEveryMs: PER_TRADE_PROBE_EVERY_MS,
+    perTradeMaxWaitSeconds: PER_TRADE_MAX_WAIT_SECONDS,
+  },
+  [MODE_FIXED_BYTE]: {
+    byte: MODE_FIXED_BYTE,
+    name: "FIXED",
+    rateField: null,
+    base: "per-trade",
+    carriesLosses: false,
+    realProbeEveryMs: PER_TRADE_PROBE_EVERY_MS,
+    perTradeMaxWaitSeconds: PER_TRADE_MAX_WAIT_SECONDS,
   },
 } as const satisfies Record<ModeByte, KeeperMode>;
 
@@ -288,9 +355,10 @@ export function settlesMode(profile: RoleProfile, byte: number): boolean {
 }
 
 /**
- * The roles that settle a byte: one for each byte any sip-vault version
- * defines today, none for the rest (test). A list rather than one role so the
- * test that no byte has two can read it.
+ * The legacy roles that settle a byte: one each for PROFIT and VOLUME, none for
+ * the per-trade bytes — which only a dispatcher worker's module settles — and
+ * none for a byte no sip-vault version defines (test). A list rather than one
+ * role so the test that no byte has two can read it.
  */
 export function rolesSettling(byte: number): readonly KeeperRole[] {
   return KEEPER_ROLES.filter((role) => settlesMode(ROLE_PROFILES[role], byte));

@@ -34,6 +34,8 @@ export const ED25519 = "Ed25519SigVerify111111111111111111111111111";
 /** Our own settle, as the walk classifies it: every program non-trading or sip-vault, sip-vault among them. */
 export const OWN_SETTLE = [ED25519, programId.toBase58(), SYSTEM];
 export const EPOCH = 300_000_000;
+/** The token a swap() moves: any mint but wSOL. */
+export const USDC_LIKE_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 /** What the node prices every settle at. */
 export const SETTLE_FEE = 10_000;
 export const RENT0 = 890_880;
@@ -74,6 +76,12 @@ export class SettleWorld {
   readonly sent: VersionedTransaction[] = [];
   /** What the next receipt says the vault received. */
   receiptVaultDelta = 0;
+  /**
+   * Accounts a getMultipleAccountsInfo answers, by address (the per-trade
+   * module's job read: the PerTradePolicy and Pyth's SOL/USD). Empty unless a
+   * test puts something here; every other address reads as no account.
+   */
+  readonly accounts = new Map<string, unknown>();
   #balance = 5_000_000_000;
   #slot: number;
   #n = 0;
@@ -102,7 +110,7 @@ export class SettleWorld {
     return this.#balance;
   }
 
-  #push(programs: readonly string[], delta: number, over: Partial<Pick<LedgerEntry, "signers">> = {}, sameSlot = false): LedgerEntry {
+  #push(programs: readonly string[], delta: number, over: Partial<Pick<LedgerEntry, "signers" | "signature" | "blockTime" | "token">> = {}, sameSlot = false): LedgerEntry {
     if (!sameSlot) this.#slot += 1;
     this.#n += 1;
     const entry: LedgerEntry = { signature: `tx-${this.#n}`, slot: this.#slot, pre: this.#balance, post: this.#balance + delta, programs, ...over };
@@ -113,6 +121,17 @@ export class SettleWorld {
 
   trade(delta: number, sameSlot = false): LedgerEntry {
     return this.#push([JUPITER, SYSTEM], delta, {}, sameSlot);
+  }
+
+  /**
+   * A swap the volume probe counts (the per-trade modes' tests): SOL out and a
+   * token in for a buy (delta < 0), the reverse for a sell, at `blockTime`, under
+   * a real base58 signature — pricesHash hashes its 64 bytes.
+   */
+  swap(delta: number, blockTime: number, signature: string): LedgerEntry {
+    const move = BigInt(Math.abs(delta));
+    const token = delta < 0 ? { mint: USDC_LIKE_MINT, pre: 0n, post: move } : { mint: USDC_LIKE_MINT, pre: move, post: 0n };
+    return this.#push([JUPITER, SYSTEM], delta, { signature, blockTime, token });
   }
 
   /** A stranger's zero-lamport transfer: it names the wallet, and the wallet signs nothing. */
@@ -237,6 +256,7 @@ export class SettleWorld {
         context: { slot: this.tip },
         value: [{ slot: this.tip, confirmations: 1, err: null, confirmationStatus: "confirmed" }],
       }),
+      getMultipleAccountsInfo: async (keys) => (keys as readonly PublicKey[]).map((key) => this.accounts.get(key.toBase58()) ?? null),
       getAccountInfoAndContext: async (address) => ({
         context: { slot: this.tip },
         value: (address as PublicKey).equals(this.link.linkAddress)

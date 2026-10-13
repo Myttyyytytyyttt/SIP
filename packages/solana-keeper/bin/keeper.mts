@@ -2202,6 +2202,11 @@ async function sweep(): Promise<void> {
             case null:
             case "balance-chain":
               break;
+            // NO LEGACY ROLE SETTLES A PER-TRADE BYTE (src/role-registry.ts, T-O1), so
+            // measuredBase answers null for one and this case is never reached; were it,
+            // the turn would carry no per-trade seam and rest at UNSUPPORTED_MODE.
+            case "per-trade":
+              break;
             case "trade-notional":
               volumeTurn = {
                 volumeProbe: tradeNotional,

@@ -241,3 +241,72 @@ describe("PolicyBoundaryBook", () => {
     expect(await book.boundary({ ...args, reader: caught.reader })).toMatchObject({ slot: 120n });
   });
 });
+
+// ── set_policy_v3, the per-trade modes' only door (ADR §5.5, §5.6, RT-5) ───────
+
+/** set_policy_v3's data (ADR §5.4): mode, unit, F, both minimums, the daily cap, the caps, the pause. 46 bytes. */
+function setPolicyV3Data(mode: number, p: { unit?: number; fixed?: number; minCents?: number; minLamports?: number; cap?: bigint } = {}): Buffer {
+  const data = Buffer.alloc(46);
+  discriminator("set_policy_v3").copy(data, 0);
+  data.writeUInt8(mode, 8);
+  data.writeUInt16LE(p.unit ?? 100, 9);
+  data.writeUInt32LE(p.fixed ?? 1_000_000, 11);
+  data.writeUInt16LE(p.minCents ?? 100, 15);
+  data.writeUInt32LE(p.minLamports ?? 10_000_000, 17);
+  data.writeBigUInt64LE(p.cap ?? 300_000_000n, 21);
+  data.writeBigUInt64LE(60_000_000n, 29);
+  data.writeBigUInt64LE(50_000_000n, 37);
+  data.writeUInt8(0, 45);
+  return data;
+}
+const v3 = (slot: number, mode: number, p: Parameters<typeof setPolicyV3Data>[1] = {}): Entry => ({ signature: `v3-${slot}`, slot, data: setPolicyV3Data(mode, p) });
+const PER_TRADE = { unitCents: 100, fixedLamports: 1_000_000, minTradeCents: 100, minTradeLamports: 10_000_000 };
+const ROUNDUP_1 = { mode: 2, volumeBps: 200, perTrade: PER_TRADE };
+
+describe("set_policy_v3 is a policy boundary (M0/RT-5)", () => {
+  it("decodes the mode and the four per-trade parameters at its own offsets, top-level; an inner one is a change of unknown content", () => {
+    expect(policyWrites(response(v3(10, 2, { unit: 500, fixed: 2_000_000, minCents: 250, minLamports: 20_000_000 })), SIP_PROGRAM_ID, vault, "s")).toEqual([
+      { slot: 10n, signature: "s", rule: { mode: 2, perTrade: { unitCents: 500, fixedLamports: 2_000_000, minTradeCents: 250, minTradeLamports: 20_000_000 } } },
+    ]);
+    expect(policyWrites(response({ ...v3(10, 2), inner: true }), SIP_PROGRAM_ID, vault, "i")).toEqual([{ slot: 10n, signature: "i", rule: null }]);
+    expect(policyWrites(response({ ...v3(10, 2), target: otherVault }), SIP_PROGRAM_ID, vault, "o")).toEqual([]);
+    expect(policyWrites(response({ ...v3(10, 2), err: { InstructionError: [0, "Custom"] } }), SIP_PROGRAM_ID, vault, "f")).toEqual([]);
+    // Too short to be one the program accepted: a change nobody can read, so a boundary.
+    expect(policyWrites(response({ signature: "x", slot: 10, data: setPolicyV3Data(2).subarray(0, 30) }), SIP_PROGRAM_ID, vault, "x")).toEqual([{ slot: 10n, signature: "x", rule: null }]);
+  });
+
+  it("closes the 1 → 2 → 1 trap: a VOLUME vault that spent a stretch in ROUND-UP charges nothing made before it came back", async () => {
+    // VOLUME at 50 from the start, ROUND-UP at slot 150, VOLUME at 50 again at slot 180.
+    const entries = [created(10, MODE_VOLUME, 50), other(120), v3(150, 2), other(160), policy(180, MODE_VOLUME, 50)];
+    expect(await boundary(entries, 100n, VOLUME_50)).toMatchObject({ slot: 180n, verified: true });
+    // Without set_policy_v3 decoded the walk saw VOLUME 50 → VOLUME 50, no change, and charged the whole span.
+  });
+
+  it("for a per-trade vault, a change of mode, unit, F or either minimum is a boundary; the daily cap and the pause are not", async () => {
+    const at = (entries: readonly Entry[], current = ROUNDUP_1) => findPolicyBoundary({ reader: history(entries).reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current });
+    expect(await at([created(10, MODE_PROFIT), v3(150, 2)])).toMatchObject({ slot: 150n, verified: true });
+    expect(await at([created(10), v3(20, 2), v3(150, 2, { cap: 1_000n })])).toMatchObject({ slot: null, verified: true });
+    for (const change of [{ unit: 200 }, { fixed: 2_000_000 }, { minCents: 0 }, { minLamports: 1 }] as const) {
+      const current = { mode: 2, volumeBps: 200, perTrade: { ...PER_TRADE, ...(change.unit === undefined ? {} : { unitCents: change.unit }), ...("fixed" in change ? { fixedLamports: change.fixed } : {}), ...("minCents" in change ? { minTradeCents: change.minCents } : {}), ...("minLamports" in change ? { minTradeLamports: change.minLamports } : {}) } };
+      expect(await at([created(10), v3(20, 2), v3(150, 2, change)], current), JSON.stringify(change)).toMatchObject({ slot: 150n, verified: true });
+    }
+    // ROUND-UP → FIXED with the same parameters is a change of mode.
+    expect(await at([created(10), v3(20, 2), v3(150, 3)], { ...ROUNDUP_1, mode: 3 })).toMatchObject({ slot: 150n, verified: true });
+  });
+
+  it("forgives the whole span when the history does not end on the per-trade rule the vault holds", async () => {
+    const entries = [created(10), v3(20, 2, { unit: 500 })];
+    expect(await findPolicyBoundary({ reader: history(entries).reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: ROUNDUP_1 })).toMatchObject({ slot: FORGIVE_ALL_SLOT, verified: false });
+    // And a per-trade vault read without its parameters is never "the same rule": nothing is charged on a guess.
+    expect(await findPolicyBoundary({ reader: history([created(10), v3(20, 2)]).reader, programId: SIP_PROGRAM_ID, vault, owner, from: 100n, current: { mode: 2, volumeBps: 200 } })).toMatchObject({ slot: FORGIVE_ALL_SLOT });
+  });
+
+  it("keeps a PROFIT or VOLUME vault's answer exactly what it was when its history holds no set_policy_v3", async () => {
+    const entries = [created(10, MODE_VOLUME, 50), policy(150, MODE_VOLUME, 200)];
+    expect(await boundary(entries, 100n, VOLUME_200)).toMatchObject({
+      slot: 150n,
+      verified: true,
+      detail: "the owner changed the mode or the volume rate at slot 150 (policy-150); trades at or before it are not charged",
+    });
+  });
+});

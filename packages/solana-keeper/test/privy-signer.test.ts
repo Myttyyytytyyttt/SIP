@@ -14,7 +14,11 @@ import { formatRequestForAuthorizationSignature, generateP256KeyPair } from "@pr
 import { Secret } from "@sip/solana-log";
 import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { instructionDiscriminator } from "../src/idl.js";
+import * as anchor from "@coral-xyz/anchor";
+import { GOLDEN_V3_FIXED_INPUTS } from "../src/attestation-golden.js";
+import { idl, instructionDiscriminator } from "../src/idl.js";
+import { attestationV3Instruction } from "../src/program-scripts.js";
+import { settleTransaction, settleV3Instruction } from "../src/settle-tick.js";
 import { COMPUTE_BUDGET_PROGRAM_ID, MEMO_PROGRAM_ID, type SignerSeat } from "../src/privy-policy.js";
 import {
   PRIVY_API_URL,
@@ -329,7 +333,9 @@ describe("assertSettleShape", () => {
       ["a Memo instruction added", tx([verifyIx, settleIx, memo]), /it has 3 instructions, not 2/],
       ["no Ed25519SigVerify", tx([settleIx]), /it has 1 instruction, not 2/],
       ["a second settle_v2", tx([verifyIx, settleIx, settleIx]), /it has 3 instructions, not 2/],
-      ["link_wallet's discriminator", tx([verifyIx, withData(settleIx, Buffer.concat([instructionDiscriminator("link_wallet"), settleIx.data.subarray(8)]))]), /instruction 1 is not settle_v2/],
+      ["link_wallet's discriminator", tx([verifyIx, withData(settleIx, Buffer.concat([instructionDiscriminator("link_wallet"), settleIx.data.subarray(8)]))]), /instruction 1 is neither settle_v2 nor settle_v3/],
+      // set_policy_v3, the owner's per-trade instruction, is not a settle either.
+      ["set_policy_v3's discriminator", tx([verifyIx, withData(settleIx, Buffer.concat([instructionDiscriminator("set_policy_v3"), settleIx.data.subarray(8)]))]), /instruction 1 is neither settle_v2 nor settle_v3/],
       [
         "settle_v2's bytes on another program",
         tx([verifyIx, new TransactionInstruction({ programId: Keypair.generate().publicKey, keys: settleIx.keys, data: settleIx.data })]),
@@ -364,5 +370,28 @@ describe("unsignableNote: the operator log's line for a wallet the keeper cannot
     expect(unbounded).toContain("Re-seat keeper on the wallet's row at /wallets");
     expect(unsignableNote({ outcome: "NOT_A_PRIVY_WALLET" })).toBe("wallet is not a Privy wallet in this app");
     for (const note of [rotated, none, unbounded]) expect(note).not.toMatch(/onboarding|step 3|re-run/i);
+  });
+});
+
+describe("T-N2: assertSettleShape and settle_v3", () => {
+  it("passes exactly [Ed25519SigVerify over SIP_SETTLE_V3, settle_v3] paid by the wallet, as settle-tick.ts builds it for a per-trade vault", async () => {
+    const programId = new PublicKey(idl.address);
+    const wallet = Keypair.generate().publicKey;
+    const vault = Keypair.generate().publicKey;
+    const link = { wallet, vault, linkAddress: PublicKey.findProgramAddressSync([Buffer.from("link"), wallet.toBuffer()], programId)[0] };
+    const refuse = async (): Promise<never> => Promise.reject(new Error("building a settle signs nothing"));
+    const offline = new Proxy({}, { get: (_t, prop) => (prop === "then" ? undefined : () => Promise.reject(new Error(`unexpected RPC call: ${String(prop)}`))) }) as never;
+    const program = new anchor.Program(idl, new anchor.AnchorProvider(offline, { publicKey: PublicKey.default, signTransaction: refuse, signAllTransactions: refuse }, {}));
+    const inputs = { ...GOLDEN_V3_FIXED_INPUTS, programId, wallet, vault };
+    const settle = await settleV3Instruction(program, link, inputs, null);
+    const blockhash = Keypair.generate().publicKey.toBase58();
+    const pair = settleTransaction({ blockhash, lastValidBlockHeight: 1_000 }, wallet, attestationV3Instruction(Keypair.generate().secretKey, inputs), settle);
+    expect(() => assertSettleShape(pair, programId, wallet)).not.toThrow();
+    // …and nothing else that carries it: another fee payer, a second settle_v3, the pair reversed.
+    const tx = (instructions: TransactionInstruction[], feePayer = wallet) => new Transaction({ blockhash, lastValidBlockHeight: 1_000, feePayer }).add(...instructions);
+    const [verify, v3] = pair.instructions as [TransactionInstruction, TransactionInstruction];
+    expect(() => assertSettleShape(tx([verify, v3], Keypair.generate().publicKey), programId, wallet)).toThrow(/it is paid by/);
+    expect(() => assertSettleShape(tx([verify, v3, v3]), programId, wallet)).toThrow(/3 instructions/);
+    expect(() => assertSettleShape(tx([v3, verify]), programId, wallet)).toThrow(/not Ed25519SigVerify/);
   });
 });
