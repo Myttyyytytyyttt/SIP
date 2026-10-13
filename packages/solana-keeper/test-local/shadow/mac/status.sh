@@ -58,6 +58,7 @@ const cause = (text) => {
   return text;
 };
 const verdict = { PASS: "OK", FAIL: "FALLA", PENDING: "pendiente" };
+const checkName = { coverage: "cobertura", agreement: "acuerdo", overlap: "solape", discovery: "listados", credits: "créditos", drills: "simulacros" };
 const out = [];
 out.push("SaverFi · sombra local de 7 días (mainnet solo lectura, sin claves)");
 out.push("");
@@ -78,7 +79,7 @@ if (run && run.completedAt) {
 }
 const covered = status?.coveredHours ?? report?.coverage?.coveredHours ?? 0;
 const target = status?.targetHours ?? report?.coverage?.targetHours ?? 168;
-out.push(`Horas cubiertas: ${h(covered)} de ${h(target)} (${((100 * covered) / target).toFixed(1)} %); faltan ${hm(Math.max(0, target - covered))}`);
+out.push(`Tiempo cubierto: ${hm(covered)} de ${hm(target)} (${((100 * covered) / target).toFixed(1)} %); faltan ${hm(Math.max(0, target - covered))}`);
 const lastBeat = status?.lastBeatAt ?? report?.coverage?.lastBeat ?? null;
 out.push(`Último minuto registrado: ${when(lastBeat)} (${ago(lastBeat)})`);
 if (running !== "si" && lastBeat && !(run && run.completedAt)) {
@@ -114,7 +115,7 @@ if (drills) {
 }
 if ((status?.exitsOnTheirOwn ?? 0) > 0) out.push(`Procesos que se cayeron solos (y se repusieron): ${status.exitsOnTheirOwn}`);
 if (report?.gate) {
-  out.push(`Puerta: ${Object.entries(report.gate).map(([k, v]) => `${k} ${verdict[v.verdict] ?? v.verdict}`).join(" · ")}`);
+  out.push(`Puerta del plan: ${Object.entries(report.gate).map(([k, v]) => `${checkName[k] ?? k} ${verdict[v.verdict] ?? v.verdict}`).join(" · ")}  [informe de ${when(report.generatedAt)}]`);
 }
 out.push("");
 out.push(`Reanudar: ${here}/start.sh   ·   Parar: ${here}/stop.sh   ·   Informe: ${state}/summary.txt`);
