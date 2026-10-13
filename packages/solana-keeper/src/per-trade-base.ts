@@ -284,6 +284,23 @@ export function perTradePaid(args: {
   return { paid, headroom, today, savedToday };
 }
 
+/**
+ * The daily counter after a settle_v3 that paid `paidLamports` at `nowSeconds`,
+ * as the program writes it (per_trade.rs rolled_day, then settle_v3.rs): on the
+ * counter's own day the payment is added, on any other the counter starts again
+ * from it. A zero payment still moves the counter to today. The keeper's clock
+ * names the day, with perTradePaid's caveat at midnight.
+ */
+export function perTradeCounterAfter(
+  policy: Pick<PerTradePolicyParams, "dayIndex" | "daySavedLamports">,
+  paidLamports: bigint,
+  nowSeconds: number,
+): { readonly dayIndex: number; readonly daySavedLamports: bigint } {
+  const today = dayIndexOf(nowSeconds);
+  const before = policy.dayIndex === today ? policy.daySavedLamports : 0n;
+  return { dayIndex: today, daySavedLamports: before + paidLamports };
+}
+
 /** Whether a span with charged trades settles now, or waits — and until when. */
 export type PerTradeCadence =
   | { readonly settle: true; readonly why: "size" | "clock" | "unaged" }

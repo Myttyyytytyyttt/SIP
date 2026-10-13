@@ -10,13 +10,14 @@ import { describe, expect, it } from "vitest";
 import { perTradePolicyAddress } from "../src/accounts.js";
 import { idl } from "../src/idl.js";
 import type { WindowMeasurement } from "../src/measure-window.js";
+import { dayIndexOf } from "../src/per-trade-base.js";
 import { tradeNotional } from "../src/measure-volume.js";
 import { PolicyBoundaryBook } from "../src/policy-boundary.js";
 import { MemoryPriceTape, type PriceTapeReader } from "../src/price-tape.js";
 import { KEEPER_MODES, MODE_FIXED_BYTE, MODE_PROFIT_BYTE, MODE_ROUNDUP_BYTE, MODE_VOLUME_BYTE } from "../src/role-registry.js";
 import type { PerTradeAnswer } from "../src/settle-decision.js";
 import { servesPerTrade, settleModuleFor, type ModuleJob, type PerTradeServing, type SettleModuleContext } from "../src/settle-modules.js";
-import { perTradePolicyBytes, pythAccount, trade } from "./per-trade-fixtures.js";
+import { perTradePolicyBytes, pythAccount, trade, type PolicyBytesInput } from "./per-trade-fixtures.js";
 import { vaultOf } from "./settle-world.js";
 
 const programId = new PublicKey(idl.address);
@@ -203,14 +204,18 @@ describe("the per-trade seam", () => {
     ...(trades === undefined ? {} : { volumeTrades: trades }),
   });
   const boundaryAt = (slot: bigint | null) => ({ boundary: async () => ({ slot, detail: "stub" }) }) as unknown as PolicyBoundaryBook;
-  async function seamFor(mode: number, over: { readonly serving?: Partial<PerTradeServing>; readonly boundaries?: PolicyBoundaryBook; readonly oracle?: unknown | null } = {}) {
-    const accounts = new Map<string, unknown>([[pda.toBase58(), { data: perTradePolicyBytes({ vault: vaultAddress }), owner: programId, lamports: 1, executable: false, rentEpoch: 0 }]]);
+  async function preparedFor(mode: number, over: { readonly serving?: Partial<PerTradeServing>; readonly oracle?: unknown | null; readonly policy?: Omit<PolicyBytesInput, "vault"> } = {}) {
+    const accounts = new Map<string, unknown>([[pda.toBase58(), { data: perTradePolicyBytes({ vault: vaultAddress, ...over.policy }), owner: programId, lamports: 1, executable: false, rentEpoch: 0 }]]);
     const oracle = over.oracle === undefined ? pythAccount({ price: 15_000_000_000n, publishTime: BigInt(NOW) }) : over.oracle;
     if (oracle !== null) accounts.set(ORACLE.toBase58(), oracle);
     const { connection } = accountsConnection(accounts);
     const program = new anchor.Program(idl, new anchor.AnchorProvider(connection, { publicKey: PublicKey.default, signTransaction: async () => Promise.reject(new Error("no")), signAllTransactions: async () => Promise.reject(new Error("no")) }, {}));
     const prepared = await settleModuleFor(mode, { vault: vaultAddress.toBase58(), serving: serving(over.serving) })!.prepare({ connection, program, vaultAddress, vault: vaultOf(mode) });
     if (prepared.kind !== "ready") throw new Error(prepared.detail);
+    return prepared;
+  }
+  async function seamFor(mode: number, over: { readonly serving?: Partial<PerTradeServing>; readonly boundaries?: PolicyBoundaryBook; readonly oracle?: unknown | null } = {}) {
+    const prepared = await preparedFor(mode, over);
     return prepared.turn(context(mode, { boundaries: over.boundaries ?? boundaryAt(null) })).perTrade!.base;
   }
   const charged = (answer: PerTradeAnswer) => {
@@ -258,6 +263,31 @@ describe("the per-trade seam", () => {
     expect(await (await seamFor(MODE_ROUNDUP_BYTE, { oracle: null }))(measured([]))).toMatchObject({ kind: "retry", detail: expect.stringContaining("Pyth") });
     // FIXED needs no price at all.
     expect(await (await seamFor(MODE_FIXED_BYTE, { oracle: null }))(measured([]))).toMatchObject({ kind: "charge" });
+  });
+
+  it("carries the vault's daily counter from one link's SETTLED turn to the next: a link after the day's cap is reached waits on the clock, not on size", async () => {
+    // F = 0.03 SOL, max_contribution 0.06 SOL, cap 0.3 SOL with 0.27 SOL saved today: one more settle fills it.
+    const today = dayIndexOf(NOW);
+    const prepared = await preparedFor(MODE_FIXED_BYTE, { policy: { fixedLamports: 30_000_000, dailyCapLamports: 300_000_000n, dayIndex: today, daySavedLamports: 270_000_000n } });
+    const vault = { ...vaultOf(MODE_FIXED_BYTE), maxContribution: 60_000_000n };
+    const first = prepared.turn(context(MODE_FIXED_BYTE, { vault, boundaries: boundaryAt(null) })).perTrade!;
+    expect(first.policy.daySavedLamports).toBe(270_000_000n);
+    const firstAnswer = await first.base(measured([trade("l1", 100, 20_000_000n, NOW - 60)]));
+    expect(firstAnswer).toMatchObject({ kind: "charge", wait: null });
+    // A turn that did not settle moves nothing.
+    prepared.afterTurn!({ outcome: "RETRY", expectedLamports: 30_000_000n, perTrade: charged(firstAnswer) }, NOW);
+    expect(prepared.turn(context(MODE_FIXED_BYTE, { vault, boundaries: boundaryAt(null) })).perTrade!.policy.daySavedLamports).toBe(270_000_000n);
+    // The first link settles its 0.03 SOL: the day is full.
+    prepared.afterTurn!({ outcome: "SETTLED", expectedLamports: 30_000_000n, settledLamports: 30_000_000n, perTrade: charged(firstAnswer) }, NOW);
+    const second = prepared.turn(context(MODE_FIXED_BYTE, { vault, boundaries: boundaryAt(null) })).perTrade!;
+    expect(second.policy).toMatchObject({ dayIndex: today, daySavedLamports: 300_000_000n });
+    expect(await second.base(measured([trade("l2", 100, 20_000_000n, NOW - 60)]))).toMatchObject({
+      kind: "charge",
+      wait: { dueAt: NOW - 60 + 3_600, detail: expect.stringContaining("saved its daily cap today") },
+    });
+    // Without a read receipt, what this keeper computed the program pays is what it carries; a new day starts again.
+    prepared.afterTurn!({ outcome: "SETTLED", expectedLamports: 0n, perTrade: charged(firstAnswer) }, NOW + 86_400);
+    expect(prepared.turn(context(MODE_FIXED_BYTE, { vault, boundaries: boundaryAt(null) })).perTrade!.policy).toMatchObject({ dayIndex: today + 1, daySavedLamports: 0n });
   });
 
   it("throws when the walk carries no volume trades: the turn was built without the probe", async () => {

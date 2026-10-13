@@ -13,16 +13,18 @@
 // The COMPLETE says when the vault is due again: its clock when it waits, its
 // mode's probe cadence when it rests.
 
-import { Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey, type Connection } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { perTradePolicyAddress } from "../src/accounts.js";
 import { idl, instructionDiscriminator } from "../src/idl.js";
 import type { InvestResult } from "../src/invest-tick.js";
+import { dayIndexOf } from "../src/per-trade-base.js";
 import type { PolicyBoundaryBook } from "../src/policy-boundary.js";
 import { MemoryPriceTape } from "../src/price-tape.js";
 import { MODE_FIXED, MODE_ROUNDUP } from "../src/program-scripts.js";
 import { MODE_FIXED_BYTE, MODE_ROUNDUP_BYTE, PER_TRADE_PROBE_EVERY_MS } from "../src/role-registry.js";
 import type { PerTradeServing } from "../src/settle-modules.js";
+import { runSettleTick } from "../src/settle-tick.js";
 import { REST_DUE_SECONDS, jobLogFields, runVaultJob, type VaultJobDeps } from "../src/worker-job.js";
 import { MemoryDb, MemoryDispatchStore } from "./memory-dispatch-store.js";
 import { perTradePolicyBytes, pythAccount, signatureFor } from "./per-trade-fixtures.js";
@@ -87,6 +89,53 @@ async function perTradeVault(
 
 /** A buy the probe counts: `x` lamports out (and the 5 000 fee), a token in. */
 const buy = (world: SettleWorld, x: number, blockTime: number, seed: string) => world.swap(-(x + 5_000), blockTime, signatureFor(seed));
+
+/**
+ * TWO LINKS OF ONE FIXED VAULT, each wallet's chain its own world, and a job
+ * whose every RPC goes to the world of the link being settled (the job's own
+ * settle, routed). F = 0.03 SOL, max_contribution 0.06 SOL, a 0.3 SOL daily cap
+ * with 0.27 SOL saved today: the first link's settle fills the day.
+ */
+async function twoLinkFixedVault(options: { readonly world: "shadow" | "live"; readonly live?: boolean }) {
+  const links = [new SettleWorld(), new SettleWorld()];
+  const db = new MemoryDb();
+  const vault = queued(db, links);
+  const store = new MemoryDispatchStore(db, "worker-per-trade", options.world);
+  links[0]!.accounts.set(perTradePolicyAddress(programId, links[0]!.link.vault).toBase58(), {
+    data: perTradePolicyBytes({ vault: links[0]!.link.vault, fixedLamports: 30_000_000, dailyCapLamports: 300_000_000n, dayIndex: dayIndexOf(NOW), daySavedLamports: 270_000_000n }),
+    owner: programId,
+    lamports: 1_000_000,
+    executable: false,
+    rentEpoch: 0,
+  });
+  const calls: string[] = [];
+  const connections = links.map((world) => world.connection(calls) as unknown as Record<string, (...args: unknown[]) => unknown>);
+  let current = 0;
+  const routed = new Proxy({}, { get: (_t, prop) => (typeof prop !== "string" || prop === "then" ? undefined : (...args: unknown[]) => connections[current]![prop]!(...args)) }) as Connection;
+  const router = { connection: () => routed } as unknown as SettleWorld;
+  const { chain } = jobChain([router], () => db.intents.length, { vault: { ...vaultOf(MODE_FIXED), maxContribution: 60_000_000n }, links });
+  const keys = keysFor(links);
+  const h = history();
+  const base = deps(store, chain, { history: h.writer, invest: restingInvest, now: () => NOW * 1_000 });
+  const jobDeps: VaultJobDeps = {
+    ...base,
+    shared: {
+      ...base.shared,
+      perTrade: { modes: new Set([MODE_FIXED_BYTE]), vaults: new Set([vault]), live: options.live ?? false, fromSlot: null, tape: new MemoryPriceTape(), oracle: ORACLE },
+      boundaries: { boundary: async () => ({ slot: null, detail: "no change" }) } as unknown as PolicyBoundaryBook,
+    },
+    settle: async (turn) => {
+      current = links.findIndex((world) => world.wallet.equals(turn.link.wallet));
+      return runSettleTick(turn);
+    },
+    ...(options.world === "live" ? { keys } : {}),
+  };
+  for (const [i, world] of links.entries()) buy(world, 20_000_000, NOW - 60, `two-links-${i}`);
+  for (const world of links) world.finalizeTo(world.tip);
+  // THE JOB TURNS ITS LINKS IN LINK-ADDRESS ORDER.
+  const [first, second] = [...links].sort((a, b) => (a.link.linkAddress.toBase58() < b.link.linkAddress.toBase58() ? -1 : 1)) as [SettleWorld, SettleWorld];
+  return { db, store, h, jobDeps, first, second };
+}
 
 describe("a per-trade vault's job", () => {
   it("SHADOW: the ROUND-UP module prices the swap from the tape, gates its settle_v3 as a 'shadow' intent and sends nothing", async () => {
@@ -173,6 +222,30 @@ describe("a per-trade vault's job", () => {
     expect(rested.report.settles).toMatchObject([{ outcome: "IDLE" }]);
     expect(rested.kind === "complete" && rested.completion).toMatchObject({ rests: true, dueInSeconds: PER_TRADE_PROBE_EVERY_MS / 1_000 });
     expect(PER_TRADE_PROBE_EVERY_MS / 1_000).toBeLessThan(REST_DUE_SECONDS);
+  });
+
+  it("TWO LINKS, ONE DAILY CAP (shadow): the second link is worked out against the counter the first one's settle leaves — it waits on the clock instead of settling on size", async () => {
+    const v = await twoLinkFixedVault({ world: "shadow" });
+    const end = await runVaultJob((await v.store.claim(1))[0]!, v.jobDeps);
+    expect(end.report.settles.map((turn) => turn.wallet)).toEqual([v.first.wallet.toBase58(), v.second.wallet.toBase58()]);
+    expect(end.report.settles[0]).toMatchObject({ outcome: "SETTLED", detail: expect.stringMatching(/^DRY RUN — would settle 30000000 lamports in FIXED through settle_v3/) });
+    expect(end.report.settles[1]).toMatchObject({ outcome: "NO_PROFIT", dueAt: NOW - 60 + 3_600, detail: expect.stringContaining("saved its daily cap today") });
+    // ONE SHADOW INTENT, the first link's: the second sends no forgiving zero settle on size.
+    expect(v.db.intents.map((row) => [row.kind, row.state, row.amountRaw])).toEqual([["settle", "shadow", 30_000_000n]]);
+  });
+
+  it("TWO LINKS, ONE DAILY CAP (live, LIVE=1): the first link's settle_v3 lands and fills the day; the second sends nothing and records nothing", async () => {
+    const v = await twoLinkFixedVault({ world: "live", live: true });
+    v.first.receiptVaultDelta = 30_000_000;
+    const end = await runVaultJob((await v.store.claim(1))[0]!, v.jobDeps);
+    expect(end.report.settles).toMatchObject([
+      { outcome: "SETTLED", wallet: v.first.wallet.toBase58() },
+      { outcome: "NO_PROFIT", wallet: v.second.wallet.toBase58(), dueAt: NOW - 60 + 3_600 },
+    ]);
+    expect(v.first.sent).toHaveLength(1);
+    expect(v.second.sent).toEqual([]);
+    expect(v.db.intents.map((row) => [row.kind, row.state, row.amountRaw])).toEqual([["settle", "landed", 30_000_000n]]);
+    expect(v.h.settlements).toEqual([expect.objectContaining({ walletAddr: v.first.wallet.toBase58(), mode: MODE_FIXED, contributionRaw: 30_000_000n })]);
   });
 
   it("a vault whose PerTradePolicy the job cannot read is a RETRY for each link, with nothing walked or sent", async () => {

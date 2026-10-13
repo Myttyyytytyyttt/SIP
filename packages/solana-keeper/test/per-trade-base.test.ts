@@ -11,6 +11,7 @@ import {
   oracleRefusal,
   perTradeCadence,
   perTradeCharge,
+  perTradeCounterAfter,
   perTradePaid,
   signatureBytes,
   type PerTradePolicyParams,
@@ -137,6 +138,17 @@ describe("perTradePaid: the per-settle cap and the UTC day's cap, as settle_v3 c
     expect(perTradePaid({ amountLamports: 5n, maxContribution: 60_000_000n, policy: { ...policy, daySavedLamports: 300_000_000n }, nowSeconds: NOW })).toMatchObject({ paid: 0n, headroom: 0n });
     expect(dayIndexOf(86_399)).toBe(0);
     expect(dayIndexOf(86_400)).toBe(1);
+  });
+
+  it("perTradeCounterAfter: the counter a settle_v3 leaves, so the next link of the vault is clipped by it — added on its own day, restarted on a new one", () => {
+    const policy = { dailyCapLamports: 300_000_000n, dayIndex: today, daySavedLamports: 270_000_000n };
+    const after = perTradeCounterAfter(policy, 30_000_000n, NOW);
+    expect(after).toEqual({ dayIndex: today, daySavedLamports: 300_000_000n });
+    // The next settle of the day has no room left: it pays nothing.
+    expect(perTradePaid({ amountLamports: 30_000_000n, maxContribution: 60_000_000n, policy: { ...policy, ...after }, nowSeconds: NOW })).toMatchObject({ paid: 0n, headroom: 0n });
+    // Yesterday's counter starts again from this payment; a zero payment still moves it to today.
+    expect(perTradeCounterAfter({ dayIndex: today - 1, daySavedLamports: 300_000_000n }, 30_000_000n, NOW)).toEqual({ dayIndex: today, daySavedLamports: 30_000_000n });
+    expect(perTradeCounterAfter({ dayIndex: today - 1, daySavedLamports: 300_000_000n }, 0n, NOW)).toEqual({ dayIndex: today, daySavedLamports: 0n });
   });
 });
 

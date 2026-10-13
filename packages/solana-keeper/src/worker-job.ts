@@ -18,10 +18,11 @@
 //      fence (src/fenced-sender.ts) with its PROFIT carry inside the gate (S-4).
 //      A per-trade vault's module (ROUND-UP, FIXED: plan §3.4) exists only
 //      under SIP_SOLANA_EXTRA_MODES and its vault list, reads its PerTradePolicy
-//      and the oracle once for the job, and turns DRY in the live world until
-//      SIP_SOLANA_EXTRA_MODES_LIVE is 1. A waiting per-trade span is due again
-//      when its own clock says (dueAt), a resting per-trade vault within its
-//      mode's probe cadence (PMC).
+//      and the oracle once for the job — the policy's daily counter carried
+//      forward past each SETTLED link, as settle_v3 moves it — and turns DRY
+//      in the live world until SIP_SOLANA_EXTRA_MODES_LIVE is 1. A waiting
+//      per-trade span is due again when its own clock says (dueAt), a resting
+//      per-trade vault within its mode's probe cadence (PMC).
 //   5. INVEST ONCE for the vault (owner decision 11), every wrap, convert and leg
 //      gated by the fence through the explicit-send order; each landed leg's
 //      history row written before its intent is resolved (the outbox, S-9).
@@ -592,6 +593,8 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       ...(result.dueAt === undefined ? {} : { dueAt: result.dueAt }),
       ...(result.perTrade === undefined ? {} : { perTrade: perTradeLogRows(result.perTrade) }),
     });
+    // THE MODULE HEARS HOW THE TURN ENDED before the next link's is built: a per-trade vault's daily counter moves with each settle.
+    if (prepared?.kind === "ready") prepared.afterTurn?.(result, now() / 1000);
     if (!settleLeavesSnapshotTrue(result.outcome)) moved = true;
     if (result.outcome === "SETTLED" || result.outcome === "FAILED" || result.outcome === "RETRY") {
       log(result.outcome === "FAILED" ? "error" : result.outcome === "RETRY" ? "warn" : "info", `settle ${result.outcome.toLowerCase()}`, {

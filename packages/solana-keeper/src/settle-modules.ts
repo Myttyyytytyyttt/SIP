@@ -34,14 +34,14 @@ import { summarizeUpstreamError } from "@sip/solana-log";
 import { decodePerTradePolicy, perTradePolicyAddress, type PerTradePolicyState, type VaultState } from "./accounts.js";
 import type { ManagedLink } from "./discovery.js";
 import { tradeNotional } from "./measure-volume.js";
-import { perTradeCadence, perTradeCharge, perTradePaid, type PerTradePolicyParams, type TradePrice } from "./per-trade-base.js";
+import { perTradeCadence, perTradeCharge, perTradeCounterAfter, perTradePaid, type PerTradePolicyParams, type TradePrice } from "./per-trade-base.js";
 import type { PolicyBoundaryBook, OwnerHistoryReader } from "./policy-boundary.js";
 import { toUsdE6, type PriceTapeReader, type TapeSample } from "./price-tape.js";
 import { MODE_ROUNDUP } from "./program-scripts.js";
 import { PYTH_RECEIVER_PROGRAM, PYTH_SOL_USD_FEED_ID_HEX, decodePythPriceUpdate, type PythPriceUpdate } from "./pyth.js";
 import { keeperModeFor, type KeeperMode } from "./role-registry.js";
 import { measurementStart, type PerTradeBase } from "./settle-decision.js";
-import type { SettleDeps } from "./settle-tick.js";
+import type { SettleDeps, SettleResult } from "./settle-tick.js";
 import { createVolumeBase } from "./volume-base.js";
 
 /** What a module may need to build a turn's measurement, beside the link and the vault. */
@@ -66,9 +66,22 @@ export interface ModuleJob {
   readonly vault: VaultState;
 }
 
+/** What a link's turn ended in, as afterTurn reads it. */
+export type ModuleTurnEnd = Pick<SettleResult, "outcome" | "expectedLamports" | "settledLamports" | "perTrade">;
+
 /** A module ready to build its vault's turns, or why none of them can run this job (each is then a RETRY). */
 export type ModulePrepared =
-  | { readonly kind: "ready"; turn(context: SettleModuleContext): SettleModuleTurn }
+  | {
+      readonly kind: "ready";
+      turn(context: SettleModuleContext): SettleModuleTurn;
+      /**
+       * Told how each link's turn ended, before the next link's turn is built
+       * (src/worker-job.ts), at `nowSeconds`. PROFIT and VOLUME keep nothing
+       * between links and have none; the per-trade module carries its vault's
+       * daily counter forward (perTradeModule).
+       */
+      afterTurn?(end: ModuleTurnEnd, nowSeconds: number): void;
+    }
   | { readonly kind: "retry"; readonly detail: string };
 
 /** One mode's settle code. */
@@ -245,17 +258,33 @@ function perTradeModule(mode: KeeperMode, serving: PerTradeServing): SettleModul
         return { kind: "retry", detail: `the PerTradePolicy at ${policyAddress.toBase58()} does not name this vault; nothing was attested` };
       }
       const update = roundUp ? readOracle(infos[1] ?? null) : null;
+      // THE DAILY COUNTER IS THE VAULT'S, AND THIS JOB SETTLES EVERY LINK OF IT:
+      // settle_v3 writes day_index and day_saved_lamports at each link, so the
+      // job's one read is carried forward past each SETTLED turn — a dry one
+      // included, since a dry turn says what a live one would do — and the next
+      // link's headroom, cadence and reserve are worked out against it.
+      let current = policy;
       return {
         kind: "ready",
-        turn: (context) => ({
-          volumeProbe: tradeNotional,
-          perTrade: {
-            base: perTradeSeam({ context, mode, policy, oracle: update, serving }),
-            policy,
-            oracle: update === null ? null : { address: serving.oracle, update },
-            nowSeconds: context.nowSeconds,
-          },
-        }),
+        turn: (context) => {
+          const turnPolicy = current;
+          return {
+            volumeProbe: tradeNotional,
+            perTrade: {
+              base: perTradeSeam({ context, mode, policy: turnPolicy, oracle: update, serving }),
+              policy: turnPolicy,
+              oracle: update === null ? null : { address: serving.oracle, update },
+              nowSeconds: context.nowSeconds,
+            },
+          };
+        },
+        afterTurn: (end, nowSeconds) => {
+          if (end.outcome !== "SETTLED" || end.perTrade === undefined) return;
+          // WHAT MOVED: the receipt's vault delta when it was read, else what this keeper computed the program pays (perTradePaid).
+          const paid = end.settledLamports ?? end.expectedLamports;
+          if (paid === undefined) return;
+          current = { ...current, ...perTradeCounterAfter(current, paid, nowSeconds) };
+        },
       };
     },
   };
