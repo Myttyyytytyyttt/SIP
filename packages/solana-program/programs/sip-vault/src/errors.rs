@@ -162,4 +162,96 @@ pub enum NuvemError {
     /// some other shape.
     #[msg("the verified link consent does not name this program, wallet, vault and owner")]
     LinkConsentMismatch,
+
+    // ── PER-TRADE MODES: ROUND-UP (2) AND FIXED (3), settle_v3 and set_policy_v3.
+    // Appended after LinkConsentMismatch (6038), in this order; see the unit test
+    // at the bottom of this file, which pins every number from here on. ───────
+
+    /// Trap 1: settle_v2 pays base × active_bps(), and active_bps() is skim_bps
+    /// for every mode but VOLUME. A v2 attestation on a round-up or fixed vault
+    /// would charge the PROFIT rate on a number that is not a profit.
+    #[msg("this vault is in a per-trade mode (round-up or fixed): it settles only through settle_v3")]
+    ModeNeedsSettleV3,
+
+    #[msg("this vault is in profit or volume mode: it settles only through settle_v2")]
+    ModeNeedsSettleV2,
+
+    /// InvalidMode keeps its message, which describes set_policy_v2's modes.
+    #[msg("set_policy_v3 sets mode 2 (round-up) or 3 (fixed) only; modes 0 and 1 are set with set_policy_v2")]
+    InvalidPerTradeMode,
+
+    #[msg("the round-up unit must be whole dollars, from 100 to 10000 cents in steps of 100")]
+    InvalidRoundUpUnit,
+
+    #[msg("the fixed amount per trade must be between 100000 and 100000000 lamports")]
+    InvalidFixedAmount,
+
+    #[msg("the minimum trade is at most 10000 cents (round-up) and at most 1000000000 lamports (fixed)")]
+    InvalidMinTrade,
+
+    #[msg("the daily cap must be greater than zero")]
+    InvalidDailyCap,
+
+    /// FIXED: amount must be exactly trade_count × fixed_lamports, and a window
+    /// with no counted trade owes nothing in either mode.
+    #[msg("the attested amount is not trade_count times the vault's fixed amount")]
+    PerTradeAmountMismatch,
+
+    /// ROUND-UP: no counted trade can save a whole unit, so amount is at most
+    /// trade_count × ceil(unit × 1e9 / price_min).
+    #[msg("the attested amount is more than trade_count whole round-up units at the signed price")]
+    PerTradeAmountAboveBound,
+
+    #[msg("round-up needs a price: price_min_usd_e6 must be greater than zero")]
+    PriceRequired,
+
+    #[msg("fixed mode takes no price: price_min_usd_e6, prices_hash and the oracle account must all be absent")]
+    PriceNotAllowed,
+
+    /// A price too LOW raises the bound and the amount by the same factor, so
+    /// the bound alone cannot see it. Half of Pyth's own price is the floor.
+    #[msg("the signed price is below half of the Pyth SOL/USD price")]
+    PriceBelowOracleFloor,
+
+    #[msg("the Pyth SOL/USD price is more than 24 hours old")]
+    OracleStale,
+
+    #[msg("the oracle account is missing, or is not a fully verified Pyth SOL/USD price update owned by the Pyth receiver")]
+    OracleAccountInvalid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Clients match on numbers. Every variant before the per-trade block keeps
+    /// the number it shipped with (the last one, LinkConsentMismatch, is 6038 in
+    /// the deployed IDL), and the new ones follow it in this exact order.
+    #[test]
+    fn error_numbers_are_appended_never_renumbered() {
+        let code = |e: NuvemError| u32::from(e);
+        assert_eq!(code(NuvemError::InvalidSkimBps), 6000);
+        assert_eq!(code(NuvemError::InvalidMode), 6029);
+        assert_eq!(code(NuvemError::WrongInMint), 6033);
+        assert_eq!(code(NuvemError::LinkConsentMismatch), 6038);
+        let appended = [
+            NuvemError::ModeNeedsSettleV3,
+            NuvemError::ModeNeedsSettleV2,
+            NuvemError::InvalidPerTradeMode,
+            NuvemError::InvalidRoundUpUnit,
+            NuvemError::InvalidFixedAmount,
+            NuvemError::InvalidMinTrade,
+            NuvemError::InvalidDailyCap,
+            NuvemError::PerTradeAmountMismatch,
+            NuvemError::PerTradeAmountAboveBound,
+            NuvemError::PriceRequired,
+            NuvemError::PriceNotAllowed,
+            NuvemError::PriceBelowOracleFloor,
+            NuvemError::OracleStale,
+            NuvemError::OracleAccountInvalid,
+        ];
+        for (offset, error) in appended.into_iter().enumerate() {
+            assert_eq!(code(error), 6039 + offset as u32);
+        }
+    }
 }
