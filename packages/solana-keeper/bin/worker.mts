@@ -57,7 +57,7 @@ import { poolFetch } from "../src/rpc-pool.js";
 import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
 import { loadLocalSigners } from "../src/signers.js";
 import { keeperEnvOf, readWorkerSettings, workerRefusals, type WorkerSettings } from "../src/worker-config.js";
-import { runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
+import { jobLogFields, runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
 import { WorkerLoop } from "../src/worker-loop.js";
 
 const log = createKeeperLogger();
@@ -239,18 +239,8 @@ const loop = new WorkerLoop({
       onGate: control.onGate,
       onSender: control.onSender,
     });
-    log.info(end.kind === "complete" ? "job done" : "job stopped", fields({
-      vault: claimed.vault,
-      fence: claimed.fence.toString(),
-      world,
-      live: end.report.live,
-      module: end.report.module,
-      settles: end.report.settles.map((turn) => turn.outcome),
-      invest: end.report.invest?.outcome ?? null,
-      intents: end.report.intents,
-      resolvedAtTakeover: end.report.resolvedAtTakeover,
-      ...(end.kind === "complete" ? { outcome: end.completion.outcome, dueInSeconds: end.completion.dueInSeconds } : { reason: end.reason }),
-    }));
+    // EACH WALLET'S SETTLE BY ADDRESS, beside the outcomes: what the local shadow compares with production's /status.
+    log.info(end.kind === "complete" ? "job done" : "job stopped", fields(jobLogFields(end)));
     return end;
   },
   beat: async () => {

@@ -16,7 +16,7 @@ import { tradeNotional } from "../src/measure-volume.js";
 import { MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { runSettleTick, type SettleDeps, type SettleResult } from "../src/settle-tick.js";
 import { SAFETY_PASS_STEPS_MS } from "../src/credit-governor.js";
-import { REST_DUE_SECONDS, completionFor, readStreaks, runVaultJob } from "../src/worker-job.js";
+import { JOB_LOG_DETAIL_CHARS, REST_DUE_SECONDS, completionFor, jobLogFields, readStreaks, runVaultJob } from "../src/worker-job.js";
 import { secondsUntilFinalizedPasses } from "../src/worker-takeover.js";
 import { MemoryDb, MemoryDispatchStore } from "./memory-dispatch-store.js";
 import { SettleWorld, vaultOf } from "./settle-world.js";
@@ -201,6 +201,36 @@ describe("the shadow world: intents written, nothing sent", () => {
     expect(buy.seen[0]!.live).toBe(false);
     expect(buy.seen[0]!.sender).toBeUndefined();
     expect(await store.overlapAudit()).toEqual([]);
+  });
+
+  it("logs each wallet's settle by its address, with its detail, and the vault's one invest: the row the local shadow sets beside production's /status", async () => {
+    const world = new SettleWorld();
+    world.trade(400_000_000);
+    world.finalizeTo(world.tip);
+    const db = new MemoryDb();
+    queued(db, [world]);
+    const store = new MemoryDispatchStore(db, "worker-shadow", "shadow");
+    const { chain } = jobChain([world], () => db.intents.length);
+    const end = await runVaultJob(await claimOne(store), deps(store, chain, { invest: buyingInvest(chain.program).invest }));
+    const fields = jobLogFields(end);
+    expect(fields).toMatchObject({
+      world: "shadow",
+      live: false,
+      module: "PROFIT",
+      settles: ["SETTLED"],
+      wallets: [{ wallet: world.wallet.toBase58(), settle: "SETTLED", detail: expect.stringContaining("DRY RUN — would settle") }],
+      invest: "INVESTED",
+      investDetail: expect.any(String),
+      intents: 4,
+      outcome: expect.stringMatching(/^settle SETTLED · invest INVESTED$/),
+    });
+    // A DETAIL IS CUT, never the line: a long one keeps its first JOB_LOG_DETAIL_CHARS characters.
+    const long = { ...end, report: { ...end.report, settles: [{ ...end.report.settles[0]!, detail: "x".repeat(1_000) }] } } as typeof end;
+    expect((jobLogFields(long)["wallets"] as { detail: string }[])[0]!.detail).toHaveLength(JOB_LOG_DETAIL_CHARS);
+    // A STOPPED JOB SAYS WHY instead of an outcome.
+    const stopped = jobLogFields({ kind: "stop", reason: "its lease was lost", report: end.report });
+    expect(stopped).toMatchObject({ reason: "its lease was lost" });
+    expect(stopped).not.toHaveProperty("outcome");
   });
 
   it("makes the NEXT shadow job wait out finality behind those rows, exactly as behind real sends", async () => {

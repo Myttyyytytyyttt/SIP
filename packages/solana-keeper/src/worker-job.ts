@@ -288,6 +288,35 @@ export function completionFor(input: {
   return { rests: false, lane, streaks, outcome, detail, dueInSeconds: delays.length === 0 ? 60 : Math.min(...delays) };
 }
 
+/** How much of an outcome's detail a job's log line carries, per wallet and for the invest. */
+export const JOB_LOG_DETAIL_CHARS = 300;
+
+/**
+ * A job's log line (bin/worker.mts, "job done" / "job stopped"): what it found
+ * and did, and EACH WALLET'S SETTLE BY ITS ADDRESS — the shape of a legacy
+ * keeper's per-wallet /status row, outcome and detail, so a reader can set a
+ * worker's turn beside production's for the same wallet (the local shadow's
+ * comparator, test-local/shadow, plan §3.3.2 "agreement"). The invest is the
+ * vault's, once: every wallet of the vault shares it, as /status shows it.
+ */
+export function jobLogFields(end: JobEnd): Record<string, unknown> {
+  const { report } = end;
+  return {
+    vault: report.vault,
+    fence: report.fence.toString(),
+    world: report.world,
+    live: report.live,
+    module: report.module,
+    settles: report.settles.map((turn) => turn.outcome),
+    wallets: report.settles.map((turn) => ({ wallet: turn.wallet, settle: turn.outcome, detail: turn.detail.slice(0, JOB_LOG_DETAIL_CHARS) })),
+    invest: report.invest?.outcome ?? null,
+    investDetail: report.invest === null ? null : report.invest.detail.slice(0, JOB_LOG_DETAIL_CHARS),
+    intents: report.intents,
+    resolvedAtTakeover: report.resolvedAtTakeover,
+    ...(end.kind === "complete" ? { outcome: end.completion.outcome, dueInSeconds: end.completion.dueInSeconds } : { reason: end.reason }),
+  };
+}
+
 /**
  * PROFIT carries for a worker's settle turns, READ THROUGH from Postgres on every
  * turn (the `on` phase's rule, ADR RT-8), and never written here: the fence
