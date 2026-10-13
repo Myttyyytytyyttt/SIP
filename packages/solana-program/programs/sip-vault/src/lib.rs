@@ -22,6 +22,7 @@ pub mod errors;
 pub mod events;
 pub mod instructions;
 pub mod link_consent;
+pub mod per_trade;
 pub mod state;
 pub mod venue_route;
 
@@ -159,5 +160,70 @@ pub mod sip_vault {
         valid_until_slot: u64,
     ) -> Result<()> {
         instructions::settle::settle_handler(ctx, mode, session_start_slot, session_end_slot, base_lamports, valid_until_slot)
+    }
+
+    /// The only door into the per-trade modes, ROUND-UP (2) and FIXED (3): the
+    /// owner's, like set_policy_v2, and it bumps the same policy nonce. See
+    /// set_policy_v3.rs. Leaving them is set_policy_v2 with mode 0 or 1.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_policy_v3(
+        ctx: Context<SetPolicyV3>,
+        mode: u8,
+        roundup_unit_cents: u16,
+        fixed_lamports: u32,
+        min_trade_cents: u16,
+        min_trade_lamports: u32,
+        daily_cap_lamports: u64,
+        max_contribution: u64,
+        wallet_reserve: u64,
+        paused: bool,
+    ) -> Result<()> {
+        instructions::set_policy_v3::set_policy_v3_handler(
+            ctx,
+            mode,
+            roundup_unit_cents,
+            fixed_lamports,
+            min_trade_cents,
+            min_trade_lamports,
+            daily_cap_lamports,
+            max_contribution,
+            wallet_reserve,
+            paused,
+        )
+    }
+
+    /// Settles a per-trade vault's window: needs, immediately before it, an
+    /// Ed25519SigVerify of the SIP_SETTLE_V3 bytes; see settle_v3.rs.
+    /// prices_hash travels as four u64 words (bytes 8i..8i+8, little-endian),
+    /// because the keeper's Privy policy accepts primitive arguments only.
+    #[allow(clippy::too_many_arguments)]
+    pub fn settle_v3(
+        ctx: Context<SettleV3>,
+        mode: u8,
+        session_start_slot: u64,
+        session_end_slot: u64,
+        trade_count: u32,
+        amount_lamports: u64,
+        price_min_usd_e6: u64,
+        prices_hash_0: u64,
+        prices_hash_1: u64,
+        prices_hash_2: u64,
+        prices_hash_3: u64,
+        valid_until_slot: u64,
+    ) -> Result<()> {
+        instructions::settle_v3::settle_v3_handler(
+            ctx,
+            mode,
+            session_start_slot,
+            session_end_slot,
+            trade_count,
+            amount_lamports,
+            price_min_usd_e6,
+            prices_hash_0,
+            prices_hash_1,
+            prices_hash_2,
+            prices_hash_3,
+            valid_until_slot,
+        )
     }
 }

@@ -95,9 +95,20 @@ export const OWNER_INSTRUCTIONS = [
 ] as const;
 export type OwnerInstructionName = (typeof OWNER_INSTRUCTIONS)[number];
 
-/** Keeper-only and authority-only instructions. The web never builds or relays them. */
+/**
+ * Keeper-only and authority-only instructions. The web never builds or relays them.
+ *
+ * set_policy_v3 IS AN OWNER'S INSTRUCTION ON CHAIN, and still forbidden here: it
+ * is the only door into the per-trade modes (round-up, fixed), and until the web
+ * offers them, refusing to relay it keeps /api/solana-tx exactly as it was
+ * before the program learned it. It moves to OWNER_INSTRUCTIONS, with its
+ * OWNER_TX_COMPUTE entry, in the change that ships those modes in the web.
+ * settle_v3 is the keeper's, like settle_v2, for good.
+ */
 export const FORBIDDEN_INSTRUCTIONS = [
   "settle_v2",
+  "settle_v3",
+  "set_policy_v3",
   "invest",
   "convert",
   "wrap_sol",
