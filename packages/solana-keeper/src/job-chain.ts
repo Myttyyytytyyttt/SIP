@@ -3,19 +3,27 @@
 // the few reads the job makes itself (dispatcher ADR §3.6 step 4; §4.9 row 10;
 // plan P3a Q3).
 //
-// minContextSlot, AFTER A TAKEOVER, ON EVERY READ. The pool fails over across
-// endpoints (src/rpc-pool.ts), and an endpoint that lags could answer with a
-// state from before the wait the takeover just sat through — the balances the
-// earlier holder's last transaction already moved. So once the job has waited
-// for its plan floor it sets the slot at which that wait cleared (requireSlot),
-// and from then on:
+// minContextSlot ON EVERY READ OF A JOB THAT HAD A PLAN FLOOR. The pool fails
+// over across endpoints (src/rpc-pool.ts), and an endpoint that lags could answer
+// with a state from before an earlier fence's transaction — the balances, or the
+// link nonce, it already moved. So once the job's plan floor has cleared, it sets
+// the slot at which that wait cleared (requireSlot; src/worker-takeover.ts,
+// readFromSlot, says how it is computed and why it is not the newest finalized
+// slot), and from then on:
 //   * every request whose method takes minContextSlot carries it (merged into
 //     the method's own config object, or appended as one) — the node refuses,
 //     -32016, rather than answer from behind it;
 //   * every answer that reports its context slot and still comes back from
 //     behind it — a method that takes no minContextSlot, getTokenAccountBalance
 //     among them — is turned into that same refusal here, so the turn reading it
-//     fails instead of planning from the past.
+//     fails instead of planning from the past;
+//   * A REFUSAL IS ASKED AGAIN, up to MIN_CONTEXT_RETRIES times
+//     MIN_CONTEXT_RETRY_MS apart, through the pool: a load-balanced endpoint's
+//     next answer usually comes from a node that has caught up, and the pool has
+//     no failover of its own for an answer that is a JSON-RPC error. Without it,
+//     one node a slot behind ended a settle turn THREW and cost the wallet a
+//     60 s retry. Only after the last one does the refusal reach the turn. A
+//     request carrying a sendTransaction is never repeated here.
 // Before requireSlot is called, the transport is the process's, byte for byte.
 //
 // A CONNECTION PER JOB, NOT A SETTING ON THE PROCESS'S: two jobs run side by side
@@ -51,6 +59,10 @@ export const MIN_CONTEXT_METHODS: ReadonlySet<string> = new Set([
 
 /** The node's own code for "Minimum context slot has not been reached". */
 export const MIN_CONTEXT_NOT_REACHED = -32016;
+/** How many times a request refused at the job's floor is asked again (the header). */
+export const MIN_CONTEXT_RETRIES = 3;
+/** How long apart: a finalized slot comes every ~0.4 s, so a node a few slots behind has caught up. */
+export const MIN_CONTEXT_RETRY_MS = 1_000;
 
 type RpcRequest = { readonly method?: unknown; params?: unknown; readonly id?: unknown };
 
@@ -71,6 +83,12 @@ function withMinContext(request: RpcRequest, slot: bigint): RpcRequest {
   return { ...request, params };
 }
 
+/** Whether one answer is the node's own -32016. */
+function notReached(answer: unknown): boolean {
+  if (answer === null || typeof answer !== "object") return false;
+  return (answer as { readonly error?: { readonly code?: unknown } }).error?.code === MIN_CONTEXT_NOT_REACHED;
+}
+
 /** An answer that reports a context slot below the floor, or null when it reports none or is at or above it. */
 function behind(answer: unknown, slot: bigint): number | null {
   if (answer === null || typeof answer !== "object") return null;
@@ -81,9 +99,17 @@ function behind(answer: unknown, slot: bigint): number | null {
 
 /**
  * The job's transport: `base` (the process's poolFetch), with the floor applied
- * once `requiredSlot()` names one. Batches are handled element by element.
+ * once `requiredSlot()` names one. Batches are handled element by element; a
+ * refusal at the floor is asked again (the header). `options` are the tests'.
  */
-export function minContextFetch(base: typeof fetch, requiredSlot: () => bigint | null): typeof fetch {
+export function minContextFetch(
+  base: typeof fetch,
+  requiredSlot: () => bigint | null,
+  options: { readonly retries?: number; readonly retryMs?: number; readonly sleep?: (ms: number) => Promise<void> } = {},
+): typeof fetch {
+  const retries = options.retries ?? MIN_CONTEXT_RETRIES;
+  const retryMs = options.retryMs ?? MIN_CONTEXT_RETRY_MS;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   return (async (input: unknown, init?: RequestInit): Promise<Response> => {
     const slot = requiredSlot();
     if (slot === null || typeof init?.body !== "string") return base(input as Parameters<typeof fetch>[0], init);
@@ -95,32 +121,47 @@ export function minContextFetch(base: typeof fetch, requiredSlot: () => bigint |
     }
     const requests: RpcRequest[] = Array.isArray(body) ? (body as RpcRequest[]) : [body as RpcRequest];
     const rewritten = requests.map((request) => withMinContext(request, slot));
-    const response = await base(input as Parameters<typeof fetch>[0], { ...init, body: JSON.stringify(Array.isArray(body) ? rewritten : rewritten[0]) });
-    if (!response.ok) return response;
-    const text = await response.text();
-    let answer: unknown;
-    try {
-      answer = JSON.parse(text);
-    } catch {
-      return new Response(text, { status: response.status, headers: response.headers });
+    const sent = JSON.stringify(Array.isArray(body) ? rewritten : rewritten[0]);
+    // A SEND IS NEVER REPEATED HERE: the sender owns what happens to signed bytes.
+    const mayRepeat = rewritten.every((request) => request.method !== "sendTransaction");
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await base(input as Parameters<typeof fetch>[0], { ...init, body: sent });
+      if (!response.ok) return response;
+      const text = await response.text();
+      let answer: unknown;
+      try {
+        answer = JSON.parse(text);
+      } catch {
+        return new Response(text, { status: response.status, headers: response.headers });
+      }
+      const answers: unknown[] = Array.isArray(answer) ? answer : [answer];
+      let refused = false;
+      let short = false;
+      const checked = answers.map((one) => {
+        if (notReached(one)) {
+          short = true;
+          return one;
+        }
+        const seen = behind(one, slot);
+        if (seen === null) return one;
+        refused = true;
+        short = true;
+        return {
+          jsonrpc: "2.0",
+          id: (one as { readonly id?: unknown }).id ?? null,
+          error: {
+            code: MIN_CONTEXT_NOT_REACHED,
+            message: `Minimum context slot has not been reached: this answer is from slot ${seen}, and this job reads from slot ${slot} on (where its plan floor cleared)`,
+          },
+        };
+      });
+      if (short && mayRepeat && attempt < retries) {
+        await sleep(retryMs);
+        continue;
+      }
+      const out = refused ? JSON.stringify(Array.isArray(answer) ? checked : checked[0]) : text;
+      return new Response(out, { status: response.status, headers: { "content-type": "application/json" } });
     }
-    const answers: unknown[] = Array.isArray(answer) ? answer : [answer];
-    let refused = false;
-    const checked = answers.map((one) => {
-      const seen = behind(one, slot);
-      if (seen === null) return one;
-      refused = true;
-      return {
-        jsonrpc: "2.0",
-        id: (one as { readonly id?: unknown }).id ?? null,
-        error: {
-          code: MIN_CONTEXT_NOT_REACHED,
-          message: `Minimum context slot has not been reached: this answer is from slot ${seen}, and this job reads from slot ${slot} on (after its takeover)`,
-        },
-      };
-    });
-    const out = refused ? JSON.stringify(Array.isArray(answer) ? checked : checked[0]) : text;
-    return new Response(out, { status: response.status, headers: { "content-type": "application/json" } });
   }) as typeof fetch;
 }
 
@@ -140,7 +181,7 @@ export interface VaultRead {
 export interface JobChain extends TakeoverChain {
   readonly connection: Connection;
   readonly program: anchor.Program;
-  /** From now on every read of this job must come from at least this slot. */
+  /** From now on every read of this job must come from at least this slot (never lowered). */
   requireSlot(slot: bigint): void;
   readonly requiredSlot: bigint | null;
   latestBlockhash(): Promise<{ readonly blockhash: string; readonly lastValidBlockHeight: number }>;
@@ -188,7 +229,12 @@ export function createJobChain(options: {
     },
     finalizedHeight: async () => BigInt(await connection.getBlockHeight("finalized")),
     confirmedHeight: async () => BigInt(await connection.getBlockHeight("confirmed")),
-    finalizedSlot: async () => BigInt(await connection.getSlot("finalized")),
+    async finalizedPoint() {
+      // ONE ANSWER, ONE BANK: the height and the slot of the same finalized block.
+      const info = await connection.getEpochInfo("finalized");
+      if (typeof info.blockHeight !== "number") throw new Error("getEpochInfo answered no blockHeight: the plan floor cannot be placed");
+      return { height: BigInt(info.blockHeight), slot: BigInt(info.absoluteSlot) };
+    },
     statuses: async (signatures) => {
       const { value } = await connection.getSignatureStatuses([...signatures], { searchTransactionHistory: true });
       return value.map((status): SeenStatus | null =>

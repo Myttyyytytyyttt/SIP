@@ -28,6 +28,23 @@
 // job that skipped this wait could not send anyway; this is the wait itself. A
 // send that landed a moment ago is waited out to finality, about 13 s.
 //
+// AND THE SLOT EVERY LATER READ MUST REACH (ADR §3.6 step 4): the slot at which
+// that wait cleared — where the finalized height first passed the floor — NOT the
+// finalized slot of whenever this job happened to look. A floor passed long ago
+// (any vault that has ever gated an intent has one) asked every read to come from
+// the newest finalized slot, and a load-balanced endpoint whose node was behind
+// it refused (-32016): in the 55-minute local shadow of 2026-10-13, 2 of the 13
+// jobs on the owner's vault after its first intents ended THREW, 6 and 13 minutes
+// after the one job that gated them. The slot is computed from ONE answer that
+// names the finalized bank's height and slot together (getEpochInfo at finalized,
+// TakeoverChain.finalizedPoint): blocks are at least a slot apart, so the block
+// at height floor + 1 is at most (height − floor − 1) slots before that bank's
+// slot, and
+//   readFrom = slot − (height − floor − 1)
+// is never below it. Every earlier intent acted at a height ≤ floor, so a node
+// that has reached readFrom has seen all of it; a node behind it is refused, as
+// before. Just past the floor, readFrom is the finalized slot itself.
+//
 // RESOLVED HEIGHTS ARE UPPER BOUNDS, NEVER GUESSES. A status carries a SLOT, and
 // the floor is a block HEIGHT; the two differ by every skipped slot since
 // genesis. So a landed or failed intent is resolved at the confirmed height read
@@ -58,8 +75,13 @@ export interface SeenStatus {
 export interface TakeoverChain {
   finalizedHeight(): Promise<bigint>;
   confirmedHeight(): Promise<bigint>;
-  /** The finalized SLOT now: the minContextSlot every later read of this job carries. */
-  finalizedSlot(): Promise<bigint>;
+  /**
+   * The finalized bank's block height and slot, from ONE answer (getEpochInfo at
+   * finalized): the pair the plan floor's read slot is computed from. Two reads
+   * could come from two nodes, and a slot from a node behind the height's would
+   * put that slot too low.
+   */
+  finalizedPoint(): Promise<{ readonly height: bigint; readonly slot: bigint }>;
   /** getSignatureStatuses with history, in order; null where the node knows nothing. */
   statuses(signatures: readonly string[]): Promise<readonly (SeenStatus | null)[]>;
 }
@@ -158,12 +180,26 @@ export async function resolvePriorIntents(
 }
 
 export type PlanFloorWait =
-  /** The finalized height passed the floor: plan at `height`, and read at least `slot` from here on. */
-  | { readonly kind: "cleared"; readonly height: bigint; readonly slot: bigint; readonly waitedMs: number }
+  /**
+   * The finalized height passed the floor: plan at `height`, and read at least
+   * `slot` from here on — the slot at which the wait cleared (the header), at
+   * most the finalized `finalizedSlot` this read saw.
+   */
+  | { readonly kind: "cleared"; readonly height: bigint; readonly slot: bigint; readonly finalizedSlot: bigint; readonly waitedMs: number }
   /** The floor was not passed before the job had to stop waiting: complete unchanged, due again soon. */
   | { readonly kind: "late"; readonly floor: bigint; readonly finalized: bigint }
   /** The job may no longer act (its lease, its ceiling, a drain): stop. */
   | { readonly kind: "blocked"; readonly reason: string };
+
+/**
+ * The slot a job's reads must reach once the finalized bank (`height`, `slot`) is
+ * above `floor`: the slot at which the finalized height first passed it, never
+ * above (the header). Null floor: the bank's own slot.
+ */
+export function readFromSlot(floor: bigint | null, point: { readonly height: bigint; readonly slot: bigint }): bigint {
+  if (floor === null || point.height <= floor + 1n) return point.slot;
+  return point.slot - (point.height - floor - 1n);
+}
 
 /**
  * Waits until the finalized height is ABOVE `floor` (null: no earlier intent —
@@ -171,7 +207,7 @@ export type PlanFloorWait =
  * and stops the moment mayAct says the job may not go on.
  */
 export async function waitForPlanFloor(
-  chain: Pick<TakeoverChain, "finalizedHeight" | "finalizedSlot">,
+  chain: Pick<TakeoverChain, "finalizedPoint">,
   floor: bigint | null,
   options: {
     readonly deadlineAt: number;
@@ -186,11 +222,10 @@ export async function waitForPlanFloor(
   for (;;) {
     const blocked = options.mayAct();
     if (blocked !== null) return { kind: "blocked", reason: blocked };
-    const finalized = await chain.finalizedHeight();
+    const point = await chain.finalizedPoint();
+    const finalized = point.height;
     if (floor === null || finalized > floor) {
-      // THE SLOT IS READ AFTER THE HEIGHT: whatever the node answers now is at least as far on.
-      const slot = await chain.finalizedSlot();
-      return { kind: "cleared", height: finalized, slot, waitedMs: now() - started };
+      return { kind: "cleared", height: finalized, slot: readFromSlot(floor, point), finalizedSlot: point.slot, waitedMs: now() - started };
     }
     if (now() + PLAN_FLOOR_POLL_MS > options.deadlineAt) return { kind: "late", floor, finalized };
     await sleep(PLAN_FLOOR_POLL_MS);

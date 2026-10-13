@@ -9,7 +9,7 @@ import { Keypair, PublicKey } from "@solana/web3.js";
 import { describe, expect, it } from "vitest";
 import { configAddress } from "../src/accounts.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import { MIN_CONTEXT_NOT_REACHED, byLinkAddress, createJobChain, minContextFetch } from "../src/job-chain.js";
+import { MIN_CONTEXT_NOT_REACHED, MIN_CONTEXT_RETRIES, MIN_CONTEXT_RETRY_MS, byLinkAddress, createJobChain, minContextFetch } from "../src/job-chain.js";
 
 type Rpc = { method: string; params: unknown[]; id: number; jsonrpc: string };
 
@@ -52,7 +52,8 @@ describe("minContextFetch: the takeover's floor on every read", () => {
 
   it("leaves a method that takes no minContextSlot as it is — and refuses its answer when it comes from behind the floor", async () => {
     const t = transport((request) => (request.id === 1 ? { context: { slot: 499 }, value: { amount: "7" } } : { context: { slot: 500 }, value: { amount: "8" } }));
-    const fetcher = minContextFetch(t.fetcher, () => 500n);
+    // NOT ASKED AGAIN HERE (retries 0): the refusal itself is what this test reads; the next describe asks again.
+    const fetcher = minContextFetch(t.fetcher, () => 500n, { retries: 0 });
     const stale = await (await post(fetcher, { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: ["ata", { commitment: "confirmed" }] })).json();
     expect((t.bodies[0] as Rpc).params).toEqual(["ata", { commitment: "confirmed" }]);
     expect(stale).toMatchObject({ id: 1, error: { code: MIN_CONTEXT_NOT_REACHED } });
@@ -63,7 +64,7 @@ describe("minContextFetch: the takeover's floor on every read", () => {
 
   it("handles a batch element by element", async () => {
     const t = transport((request) => ({ context: { slot: request.id === 1 ? 10 : 900 }, value: request.id }));
-    const fetcher = minContextFetch(t.fetcher, () => 500n);
+    const fetcher = minContextFetch(t.fetcher, () => 500n, { retries: 0 });
     const answers = (await (await post(fetcher, [
       { jsonrpc: "2.0", id: 1, method: "getTokenSupply", params: ["m"] },
       { jsonrpc: "2.0", id: 2, method: "getAccountInfo", params: ["k", { encoding: "base64" }] },
@@ -71,6 +72,66 @@ describe("minContextFetch: the takeover's floor on every read", () => {
     expect((t.bodies[0] as Rpc[])[1]!.params).toEqual(["k", { encoding: "base64", minContextSlot: 500 }]);
     expect(answers[0]).toMatchObject({ id: 1, error: { code: MIN_CONTEXT_NOT_REACHED } });
     expect(answers[1]).toMatchObject({ id: 2, result: { value: 2 } });
+  });
+});
+
+describe("minContextFetch: a refusal at the floor is asked again before the turn sees it", () => {
+  /** A node behind the floor for the first `behind` answers, then caught up: the node's own -32016, or an answer from an old slot. */
+  function lagging(behind: number, how: "server" | "stale", method = "getSlot") {
+    const bodies: unknown[] = [];
+    const fetcher = (async (_input: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Rpc;
+      bodies.push(body);
+      const late = bodies.length <= behind;
+      const out =
+        late && how === "server"
+          ? { jsonrpc: "2.0", id: body.id, error: { code: MIN_CONTEXT_NOT_REACHED, message: "Minimum context slot has not been reached", data: { contextSlot: 499 } } }
+          : { jsonrpc: "2.0", id: body.id, result: method === "getSlot" ? 600 : { context: { slot: late ? 499 : 600 }, value: { amount: "8" } } };
+      return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    return { fetcher, bodies };
+  }
+
+  it("asks the node's own -32016 again, a second apart, and answers the first reply from a node that has caught up", async () => {
+    const t = lagging(2, "server");
+    const sleeps: number[] = [];
+    const fetcher = minContextFetch(t.fetcher, () => 500n, { sleep: async (ms) => void sleeps.push(ms) });
+    const answer = await (await post(fetcher, { jsonrpc: "2.0", id: 7, method: "getSlot", params: [{ commitment: "finalized" }] })).json();
+    expect(answer).toEqual({ jsonrpc: "2.0", id: 7, result: 600 });
+    expect(t.bodies).toHaveLength(3);
+    expect(t.bodies.every((body) => JSON.stringify((body as Rpc).params) === JSON.stringify([{ commitment: "finalized", minContextSlot: 500 }]))).toBe(true);
+    expect(sleeps).toEqual([MIN_CONTEXT_RETRY_MS, MIN_CONTEXT_RETRY_MS]);
+  });
+
+  it("asks again an answer that comes back from behind the floor, and never hands the turn its stale state", async () => {
+    const t = lagging(1, "stale", "getTokenAccountBalance");
+    const fetcher = minContextFetch(t.fetcher, () => 500n, { sleep: async () => undefined });
+    const answer = await (await post(fetcher, { jsonrpc: "2.0", id: 1, method: "getTokenAccountBalance", params: ["ata"] })).json();
+    expect(answer).toMatchObject({ result: { context: { slot: 600 } } });
+    expect(t.bodies).toHaveLength(2);
+  });
+
+  it("gives up after MIN_CONTEXT_RETRIES more, and only then does the refusal reach the turn", async () => {
+    const t = lagging(100, "server");
+    const fetcher = minContextFetch(t.fetcher, () => 500n, { sleep: async () => undefined });
+    const answer = await (await post(fetcher, { jsonrpc: "2.0", id: 1, method: "getAccountInfo", params: ["k"] })).json();
+    expect(answer).toMatchObject({ error: { code: MIN_CONTEXT_NOT_REACHED } });
+    expect(t.bodies).toHaveLength(1 + MIN_CONTEXT_RETRIES);
+    const stale = lagging(100, "stale", "getTokenAccountBalance");
+    const refused = await (await post(minContextFetch(stale.fetcher, () => 500n, { sleep: async () => undefined }), { jsonrpc: "2.0", id: 2, method: "getTokenAccountBalance", params: ["ata"] })).json();
+    expect(refused).toMatchObject({ id: 2, error: { code: MIN_CONTEXT_NOT_REACHED } });
+    expect(JSON.stringify(refused)).not.toContain('"amount"');
+    expect(stale.bodies).toHaveLength(1 + MIN_CONTEXT_RETRIES);
+  });
+
+  it("never repeats a request that carries a send, and repeats nothing before a floor is set", async () => {
+    const send = lagging(100, "server", "sendTransaction");
+    const sent = await (await post(minContextFetch(send.fetcher, () => 500n, { sleep: async () => undefined }), { jsonrpc: "2.0", id: 1, method: "sendTransaction", params: ["AQID", { encoding: "base64" }] })).json();
+    expect(sent).toMatchObject({ error: { code: MIN_CONTEXT_NOT_REACHED } });
+    expect(send.bodies).toHaveLength(1);
+    const unset = lagging(100, "server");
+    await post(minContextFetch(unset.fetcher, () => null, { sleep: async () => undefined }), { jsonrpc: "2.0", id: 1, method: "getSlot", params: [] });
+    expect(unset.bodies).toHaveLength(1);
   });
 });
 
@@ -86,6 +147,20 @@ describe("createJobChain: the job's Connection carries its floor", () => {
     const params = t.bodies.map((body) => (body as Rpc).params.at(-1));
     expect(params[0]).toEqual({ commitment: "confirmed" });
     expect(params[1]).toEqual({ commitment: "confirmed", minContextSlot: 1_500 });
+  });
+
+  it("places the plan floor from ONE answer: the finalized bank's height and slot from getEpochInfo, never two reads", async () => {
+    let blockHeight: number | undefined = 6_100;
+    const t = transport((request) => {
+      if (request.method !== "getEpochInfo") throw new Error(`unexpected ${request.method}`);
+      return { epoch: 1_042, slotIndex: 7, slotsInEpoch: 432_000, absoluteSlot: 450_000_123, blockHeight, transactionCount: 1 };
+    });
+    const chain = createJobChain({ transport: t.fetcher, rpcUrl: "http://rpc", wallet: { publicKey: PublicKey.default, signTransaction: async (tx) => tx, signAllTransactions: async (txs) => txs } });
+    expect(await chain.finalizedPoint()).toEqual({ height: 6_100n, slot: 450_000_123n });
+    expect(t.bodies).toHaveLength(1);
+    expect((t.bodies[0] as Rpc).params).toEqual([{ commitment: "finalized" }]);
+    blockHeight = undefined;
+    await expect(chain.finalizedPoint()).rejects.toThrow(/no blockHeight/);
   });
 
   it("reads the vault, its config, the crank and its links in ONE request, keeping only the links that still name this vault", async () => {

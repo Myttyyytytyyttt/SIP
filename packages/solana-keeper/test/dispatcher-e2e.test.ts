@@ -26,10 +26,10 @@
 //      The overlap audit reads zero rows.
 //   5. SIGTERM: the survivor and the scheduler stop cleanly (exit 0, rows closed).
 //
-// The chain's heights are the test's (getBlockHeight is answered here, not by the
-// stub, which models no height): they climb ten blocks a second from below the
-// stub's one blockhash's last valid height (400 100 000) and jump where a step
-// needs time to pass.
+// The chain's heights are the test's (getBlockHeight, and getEpochInfo's
+// blockHeight, are answered here, not by the stub, which models no height): they
+// climb ten blocks a second from below the stub's one blockhash's last valid
+// height (400 100 000) and jump where a step needs time to pass.
 //
 // RUN ONLY WITH A THROWAWAY DATABASE ON THE LOOPBACK (KEEPER_TEST_PG_URL), as the
 // other *-pg tests; without it the block is skipped. Nothing leaves the machine:
@@ -185,6 +185,12 @@ class RpcStub {
           if (this.frozen === path) freeze = true;
         }
         return { jsonrpc: "2.0", id: call.id ?? null, result: commitment === "finalized" ? this.heights.finalized : this.heights.confirmed };
+      }
+      if (method === "getEpochInfo") {
+        // THE PLAN FLOOR'S ONE ANSWER (TakeoverChain.finalizedPoint): the stub's epoch and slot, at the test's heights.
+        const commitment = (params[0] as { commitment?: unknown } | undefined)?.commitment ?? "finalized";
+        const stub = this.chain.handle(method, params).result as Record<string, unknown>;
+        return { jsonrpc: "2.0", id: call.id ?? null, result: { ...stub, blockHeight: commitment === "finalized" ? this.heights.finalized : this.heights.confirmed } };
       }
       const result = this.chain.handle(method, params);
       return result.error === undefined ? { jsonrpc: "2.0", id: call.id ?? null, result: result.result ?? null } : { jsonrpc: "2.0", id: call.id ?? null, error: result.error };

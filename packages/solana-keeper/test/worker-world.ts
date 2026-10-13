@@ -85,7 +85,7 @@ export function jobChain(worlds: readonly SettleWorld[], intents: () => number |
     },
     finalizedHeight: async () => s.finalized,
     confirmedHeight: async () => s.confirmed,
-    finalizedSlot: async () => s.finalized + 20_000_000n,
+    finalizedPoint: async () => ({ height: s.finalized, slot: s.finalized + 20_000_000n }),
     statuses: async (signatures) => signatures.map(() => null),
     latestBlockhash: async () => ({ blockhash: "3Nx5J6yqnGRrZ2mYqPSgDh1ZrmQnrgjSvJnBeCxMwGWk", lastValidBlockHeight: Number(s.confirmed) + 150 }),
     readVault: async (): Promise<VaultRead> => ({

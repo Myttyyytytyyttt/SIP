@@ -13,6 +13,7 @@ import {
   investmentFromReceipt,
   resolvePriorIntents,
   secondsUntilFinalizedPasses,
+  readFromSlot,
   waitForPlanFloor,
   type SeenStatus,
   type TakeoverChain,
@@ -28,7 +29,7 @@ function chain(state: { finalized: bigint; confirmed: bigint; slot?: bigint; sta
     asked,
     finalizedHeight: async () => state.finalized,
     confirmedHeight: async () => state.confirmed,
-    finalizedSlot: async () => state.slot ?? state.finalized + 20_000_000n,
+    finalizedPoint: async () => ({ height: state.finalized, slot: state.slot ?? state.finalized + 20_000_000n }),
     statuses: async (signatures) => {
       asked.push([...signatures]);
       return signatures.map((signature) => state.statuses?.[signature] ?? null);
@@ -171,17 +172,14 @@ describe("resolvePriorIntents: the takeover rule", () => {
 
 describe("waitForPlanFloor: no plan until the finalized height is ABOVE the floor", () => {
   it("returns at once with nothing to wait for", async () => {
-    expect(await waitForPlanFloor(chain({ finalized: 5n, confirmed: 5n, slot: 77n }), null, { deadlineAt: 0, mayAct: () => null })).toMatchObject({ kind: "cleared", height: 5n, slot: 77n });
+    expect(await waitForPlanFloor(chain({ finalized: 5n, confirmed: 5n, slot: 77n }), null, { deadlineAt: 0, mayAct: () => null })).toMatchObject({ kind: "cleared", height: 5n, slot: 77n, finalizedSlot: 77n });
   });
 
-  it("polls until the finalized height passes the floor — equal is not above — and reads the slot after the height", async () => {
+  it("polls until the finalized height passes the floor — equal is not above — reading height and slot from ONE answer each time", async () => {
     let finalized = 1_000n;
     let now = 0;
     const reads: string[] = [];
-    const c = {
-      finalizedHeight: async () => (reads.push("height"), finalized),
-      finalizedSlot: async () => (reads.push("slot"), 4_242n),
-    };
+    const c = { finalizedPoint: async () => (reads.push("point"), { height: finalized, slot: finalized + 3_242n }) };
     const wait = await waitForPlanFloor(c, 1_000n, {
       deadlineAt: 60_000,
       mayAct: () => null,
@@ -191,13 +189,29 @@ describe("waitForPlanFloor: no plan until the finalized height is ABOVE the floo
         finalized += 1n;
       },
     });
-    expect(wait).toEqual({ kind: "cleared", height: 1_001n, slot: 4_242n, waitedMs: 2_000 });
-    expect(reads).toEqual(["height", "height", "slot"]);
+    // JUST PAST THE FLOOR: the wait cleared at this very bank, so its slot is the read floor.
+    expect(wait).toEqual({ kind: "cleared", height: 1_001n, slot: 4_243n, finalizedSlot: 4_243n, waitedMs: 2_000 });
+    expect(reads).toEqual(["point", "point"]);
+  });
+
+  it("a floor passed long ago asks reads to reach the slot at which it was passed, not the newest finalized slot", async () => {
+    // FINALIZED AT HEIGHT 6_100, SLOT 9_000; THE FLOOR IS 5_100. The block at height 5_101 is at least
+    // 999 slots before slot 9_000 — so at or below 8_001 — and every earlier intent acted at or below 5_100.
+    const wait = await waitForPlanFloor({ finalizedPoint: async () => ({ height: 6_100n, slot: 9_000n }) }, 5_100n, { deadlineAt: 0, mayAct: () => null });
+    expect(wait).toEqual({ kind: "cleared", height: 6_100n, slot: 8_001n, finalizedSlot: 9_000n, waitedMs: 0 });
+    expect(readFromSlot(5_100n, { height: 5_101n, slot: 9_000n })).toBe(9_000n);
+    expect(readFromSlot(null, { height: 6_100n, slot: 9_000n })).toBe(9_000n);
+    // NEVER BELOW THE CLEARING BLOCK'S SLOT, whatever the skipped slots: a chain with none puts it exactly there.
+    for (const skipped of [0n, 7n, 400n]) {
+      const slotOf = (height: bigint) => height * 2n + (height > 5_500n ? skipped : 0n);
+      expect(readFromSlot(5_100n, { height: 6_100n, slot: slotOf(6_100n) }) >= slotOf(5_101n)).toBe(true);
+    }
+    expect(readFromSlot(5_100n, { height: 6_100n, slot: 6_100n })).toBe(5_101n);
   });
 
   it("gives up at the deadline, and stops the moment the job may no longer act", async () => {
     let now = 0;
-    const stuck = { finalizedHeight: async () => 10n, finalizedSlot: async () => 1n };
+    const stuck = { finalizedPoint: async () => ({ height: 10n, slot: 1n }) };
     expect(await waitForPlanFloor(stuck, 10n, { deadlineAt: 5_000, mayAct: () => null, now: () => now, sleep: async (ms) => void (now += ms) })).toEqual({ kind: "late", floor: 10n, finalized: 10n });
     expect(await waitForPlanFloor(stuck, 10n, { deadlineAt: 5_000, mayAct: () => "lease lost" })).toEqual({ kind: "blocked", reason: "lease lost" });
   });

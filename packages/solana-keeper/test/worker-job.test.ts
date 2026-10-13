@@ -174,6 +174,31 @@ describe("the takeover: a job waits out what an earlier holder may still land", 
   });
 });
 
+describe("a vault claimed again long after its last intent: the read floor is where that intent's wait cleared", () => {
+  it("reads from the slot at which the finalized height passed the floor — not the newest finalized slot, which a node a slot behind refuses", async () => {
+    const world = new SettleWorld();
+    world.trade(400_000_000);
+    world.finalizeTo(world.tip);
+    const db = new MemoryDb();
+    const vault = queued(db, [world]);
+    const first = new MemoryDispatchStore(db, "worker-a");
+    const [claim1] = await first.claim(1);
+    const gated = await first.gateOneStatement({ vault, fence: claim1!.fence, kind: "wrap", link: null, blockhash: "bh", lastValidBlockHeight: 5_200n, planClearedHeight: null, signature: null, idempotencyKey: null, amountRaw: 1n });
+    if (gated.kind !== "gated") throw new Error("setup");
+    await first.resolveIntent(gated.intentId, "landed", 5_050n);
+    await first.complete(claim1!, { rests: false, lane: "busy", streaks: {}, outcome: "x", detail: null, dueInSeconds: 0 });
+    // A THOUSAND BLOCKS LATER (~7 minutes): the floor, 5_050, is long final.
+    const { chain, required } = jobChain([world], () => db.intents.length, { finalized: 6_100n, confirmed: 6_130n });
+    const claimed = await claimOne(first);
+    const end = await runVaultJob(claimed, deps(first, chain));
+    expect(end.kind).toBe("complete");
+    // THE STUB'S FINALIZED BANK IS (6_100, 20_006_100): the block at height 5_051 is at or below slot 20_006_100 − 1_049.
+    expect(required).toEqual([6_100n + 20_000_000n - (6_100n - 5_050n - 1n)]);
+    expect(required[0]).toBeLessThan(6_100n + 20_000_000n);
+    expect(await first.overlapAudit()).toEqual([]);
+  });
+});
+
 describe("the shadow world: intents written, nothing sent", () => {
   it("gates the would-be settle and the would-be wrap, convert and leg as 'shadow' rows, sends nothing, and the audit stays empty", async () => {
     const world = new SettleWorld();

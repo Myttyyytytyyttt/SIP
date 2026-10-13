@@ -6,9 +6,11 @@
 //      passing its last valid one — and one that can still land ends this job
 //      UNCHANGED, due once it cannot.
 //   2. THE PLAN FLOOR: nothing is planned until the finalized height is above
-//      the last height any earlier intent could act at; after a takeover every
-//      read of this job from then on carries minContextSlot ≥ the slot at which
-//      that wait cleared (src/job-chain.ts).
+//      the last height any earlier intent could act at — on every vault that has
+//      ever gated one, whoever gated it — and every read of this job from then on
+//      carries minContextSlot ≥ the slot at which that wait cleared: for a floor
+//      passed long ago, a slot as long ago, not the newest finalized one
+//      (src/worker-takeover.ts, readFromSlot; src/job-chain.ts).
 //   3. A FRESH READ: the vault, its links (addresses from keeper_link, every
 //      field from the chain), the protocol config and the crank, in one request.
 //   4. EACH LINK SETTLED, in link-address order, through the MODULE the vault's
@@ -394,7 +396,9 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       );
     }
     planClearedHeight = plan.height;
-    // AFTER A TAKEOVER, EVERY READ FROM HERE ON IS AT LEAST AS NEW AS THE WAIT (ADR §3.6 step 4).
+    // EVERY READ FROM HERE ON IS AT LEAST AS NEW AS THE WAIT (ADR §3.6 step 4): the
+    // slot at which it cleared, which for a floor passed long ago is far below the
+    // newest finalized slot, so a node a few slots behind still answers.
     chain.requireSlot(plan.slot);
   }
 
