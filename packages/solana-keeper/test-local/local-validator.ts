@@ -43,6 +43,13 @@ import { pollingConfirm } from "./polling-confirm.js";
 /** sha256 of the sip_vault.so that was tested and is published to mainnet unchanged. */
 export const TESTED_PROGRAM_SHA256 = "60e94348d7cf841ac4542b356ed1719047c33256a96894e3a12bdf32c63de823";
 
+/**
+ * sha256 of the per-trade binary (set_policy_v3, settle_v3) M1a built and
+ * rehearsed, 616 144 bytes: NOT on mainnet. Only the per-trade proof
+ * (settle-v3-local.local.test.ts) asks for it, through SIP_LOCAL_PER_TRADE_SO.
+ */
+export const PER_TRADE_PROGRAM_SHA256 = "802b9c9a9b14be77fa7ba487681d42597743a0348bd5e8456c4a4d6d4e96bf59";
+
 /** sip-vault's program id, the one the published binary declares. */
 export const SIP_VAULT_PROGRAM_ID = new PublicKey("6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J");
 
@@ -105,6 +112,23 @@ export function testedProgramBinary(): string {
   const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
   if (sha256 !== TESTED_PROGRAM_SHA256) {
     throw new Error(`refusing ${named}: its sha256 is ${sha256}, not the tested ${TESTED_PROGRAM_SHA256}`);
+  }
+  return path;
+}
+
+/**
+ * The per-trade binary, refused unless it is the rehearsed one. Named by
+ * SIP_LOCAL_PER_TRADE_SO only — never a default path, because target/deploy holds
+ * whichever binary was built last, and the deployed proof must keep its own.
+ */
+export function perTradeProgramBinary(): string {
+  const path = process.env.SIP_LOCAL_PER_TRADE_SO;
+  if (path === undefined || path === "" || !existsSync(path)) {
+    throw new Error("SIP_LOCAL_PER_TRADE_SO does not name a file: the per-trade proof runs only the rehearsed per-trade sip_vault.so");
+  }
+  const sha256 = createHash("sha256").update(readFileSync(path)).digest("hex");
+  if (sha256 !== PER_TRADE_PROGRAM_SHA256) {
+    throw new Error(`refusing the file SIP_LOCAL_PER_TRADE_SO names: its sha256 is ${sha256}, not the rehearsed ${PER_TRADE_PROGRAM_SHA256}`);
   }
   return path;
 }
@@ -220,7 +244,16 @@ async function checkPreloadedProgram(connection: Connection, authority: PublicKe
  * solana-test-validator on PATH, a binary that is not the tested one, or a busy
  * port each stop the run before anything is spawned.
  */
-export async function startLocalValidator(authority: PublicKey): Promise<LocalValidator> {
+export async function startLocalValidator(
+  authority: PublicKey,
+  /**
+   * `binary: "per-trade"` preloads the rehearsed per-trade binary (perTradeProgramBinary)
+   * instead of the deployed one; `accounts` preloads each file at its address
+   * (--account), as the program's suite preloads its Pyth fixtures. Absent: the
+   * deployed binary and nothing else, as every proof before the per-trade modes.
+   */
+  options: { readonly binary?: "deployed" | "per-trade"; readonly accounts?: readonly { readonly address: string; readonly file: string }[] } = {},
+): Promise<LocalValidator> {
   if (!process.versions.node.startsWith("22.")) {
     throw new Error(`the local proof needs Node 22 (@solana/web3.js does not load on Node 20); this is Node ${process.versions.node}`);
   }
@@ -228,7 +261,7 @@ export async function startLocalValidator(authority: PublicKey): Promise<LocalVa
   if (version.error !== undefined || version.status !== 0) {
     throw new Error("solana-test-validator is not on PATH, or `solana-test-validator --version` failed");
   }
-  const so = testedProgramBinary();
+  const so = options.binary === "per-trade" ? perTradeProgramBinary() : testedProgramBinary();
   const binary = readFileSync(so);
   const busy = await busyPorts();
   if (busy.length > 0) {
@@ -285,6 +318,7 @@ export async function startLocalValidator(authority: PublicKey): Promise<LocalVa
       SIP_VAULT_PROGRAM_ID.toBase58(),
       so,
       authority.toBase58(),
+      ...(options.accounts ?? []).flatMap((account) => ["--account", account.address, account.file]),
     ],
     { env: childEnvironment(home), stdio: ["ignore", "pipe", "pipe"] },
   );
