@@ -39,6 +39,13 @@ export const CLIPS: Readonly<Partial<Record<DocSlug, ClipFiles>>> = {
   "what-is-saverfi": clipFiles("what-is-saverfi"),
   "pension-key": clipFiles("pension-key"),
   "saving-from-profit": clipFiles("saving-from-profit"),
+  "saving-from-volume": clipFiles("saving-from-volume"),
+  "round-ups": clipFiles("round-ups"),
+  "timing-and-limits": clipFiles("timing-and-limits"),
+  "import-a-wallet": clipFiles("import-a-wallet"),
+  investing: clipFiles("investing"),
+  "take-money-out": clipFiles("take-money-out"),
+  "who-controls-what": clipFiles("who-controls-what"),
   dashboard: {
     webm: "/landing/app-loop.webm",
     mp4: "/landing/app-loop.mp4",
