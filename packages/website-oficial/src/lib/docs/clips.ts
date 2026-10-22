@@ -59,16 +59,16 @@ export function clipFiles(slug: DocSlug, v: Versions): ClipFiles {
 }
 
 export const CLIPS: Readonly<Partial<Record<DocSlug, ClipFiles>>> = {
-  "what-is-saverfi": clipFiles("what-is-saverfi", { webm: "4e14e0ee", mp4: "77275341", poster: "0f98f5d9" }),
-  "pension-key": clipFiles("pension-key", { webm: "5bfc4bc5", mp4: "54192c86", poster: "bb84d300" }),
-  "saving-from-profit": clipFiles("saving-from-profit", { webm: "893bb724", mp4: "3f7c9a3c", poster: "2e237866" }),
-  "saving-from-volume": clipFiles("saving-from-volume", { webm: "d0d0be56", mp4: "63ed1f9d", poster: "62086fc4" }),
-  "round-ups": clipFiles("round-ups", { webm: "5e37aa00", mp4: "474fe02b", poster: "a5a6ec23" }),
-  "timing-and-limits": clipFiles("timing-and-limits", { webm: "3163fe15", mp4: "3268b595", poster: "edcccc9a" }),
-  "import-a-wallet": clipFiles("import-a-wallet", { webm: "91b16835", mp4: "4eb003dc", poster: "797cf887" }),
-  investing: clipFiles("investing", { webm: "540f4c5d", mp4: "a2a4b502", poster: "96c890bd" }),
-  "take-money-out": clipFiles("take-money-out", { webm: "8fb0a00d", mp4: "9b3c8632", poster: "8f7acf8c" }),
-  "who-controls-what": clipFiles("who-controls-what", { webm: "0966641e", mp4: "7861b2e8", poster: "18b62928" }),
+  "what-is-saverfi": clipFiles("what-is-saverfi", { webm: "52d2fa73", mp4: "9b35ddaa", poster: "8c6baa47" }),
+  "pension-key": clipFiles("pension-key", { webm: "4805f4bd", mp4: "cba8839f", poster: "26beb5e2" }),
+  "saving-from-profit": clipFiles("saving-from-profit", { webm: "f4844567", mp4: "45f92468", poster: "bd0e0fc9" }),
+  "saving-from-volume": clipFiles("saving-from-volume", { webm: "fc07fae3", mp4: "e970f659", poster: "3a22f1cf" }),
+  "round-ups": clipFiles("round-ups", { webm: "a6b40bb7", mp4: "fa25e79e", poster: "24d3b430" }),
+  "timing-and-limits": clipFiles("timing-and-limits", { webm: "0b69eb29", mp4: "69b93f31", poster: "2d6448ab" }),
+  "import-a-wallet": clipFiles("import-a-wallet", { webm: "58c55dfa", mp4: "20bc9f8b", poster: "43faad35" }),
+  investing: clipFiles("investing", { webm: "5e07c456", mp4: "15d46dfe", poster: "05a92ca7" }),
+  "take-money-out": clipFiles("take-money-out", { webm: "aa6c799a", mp4: "e2c4bd53", poster: "83e7a1f4" }),
+  "who-controls-what": clipFiles("who-controls-what", { webm: "7f07c7b7", mp4: "26d566dd", poster: "d0ba132a" }),
   dashboard: {
     webm: "/landing/app-loop.webm",
     mp4: "/landing/app-loop.mp4",
