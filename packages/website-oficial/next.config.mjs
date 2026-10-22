@@ -45,7 +45,17 @@ const nextConfig = {
   // One policy, on every response. Lives in security-headers.mjs so a guard
   // can read the same object the server sends.
   async headers() {
-    return [{ source: "/:path*", headers: securityHeaders() }];
+    return [
+      { source: "/:path*", headers: securityHeaders() },
+      // THE DOCS' CLIPS ARE KEPT FOR A YEAR, WITHOUT ASKING AGAIN (10-22,
+      // measured). public/ is served "max-age=0", so every visit asked again for
+      // the poster and for each range of the loop, a round trip each before the
+      // loop played. Safe only because every URL a docs page uses carries its
+      // file's version (?v=, src/lib/docs/clips.ts), which docs.test.ts checks:
+      // a re-rendered clip gets a new address. Nothing outside /docs/clips/
+      // changes: the landing's /landing/* keeps public/'s default.
+      { source: "/docs/clips/:file*", headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }] },
+    ];
   },
 
   // Emits .next/standalone with a self-contained server.js, which is what

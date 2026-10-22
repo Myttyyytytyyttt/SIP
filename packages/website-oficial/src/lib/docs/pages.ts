@@ -6,7 +6,7 @@
  *
  * THE LIST AND THE SLUGS ARE THE OWNER'S (10-22): 6 groups, 17 pages and 1
  * sub-page. A slug is also the name of its page's clip
- * (public/docs/clips/<slug>.{webm,mp4,jpg}, see clips.ts), so renaming one
+ * (public/docs/clips/<slug>.{webm,mp4,webp}, see clips.ts), so renaming one
  * renames the other.
  *
  * NO STATUS TAGS (owner, 10-22). Nothing here, and nothing in a page, is marked

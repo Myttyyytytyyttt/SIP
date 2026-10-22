@@ -18,6 +18,7 @@
     "check:csp": "tsx scripts/check-csp.mts",
     "check:public-ws": "tsx scripts/check-public-ws.mts",
     "check:idl": "pnpm --dir ../solana-core run check:idl",
+    "docs:clip": "tsx scripts/docs-clip.mts",
     "verify": "pnpm run check:csp && pnpm run check:idl && pnpm run typecheck && pnpm run test && next build"
   },
   "dependencies": {

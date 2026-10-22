@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildCommitOf, privyStubAlias } from "../next.config.mjs";
+import { securityHeaders } from "../security-headers.mjs";
 
 const PRIVY = "@privy-io/react-auth";
 const PRIVY_SOLANA = "@privy-io/react-auth/solana";
@@ -43,6 +44,25 @@ describe("the config itself", () => {
     vi.stubEnv("SIP_WEB_PRIVY_STUB", "");
     const config = (await import("../next.config.mjs")).default;
     expect(config.turbopack).toBeUndefined();
+  });
+});
+
+/**
+ * THE HEADERS THE CONFIG ADDS (10-22): the security policy on every path, and a
+ * year-long cache on the docs' clips alone, whose URLs carry their file's
+ * version (src/lib/docs/clips.ts). Anything else cached that way would keep a
+ * changed file from ever reaching a browser that has the old one.
+ */
+describe("the headers the config adds", () => {
+  it("sends the security headers on every path", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect((await config.headers())[0]).toEqual({ source: "/:path*", headers: securityHeaders() });
+  });
+
+  it("caches the docs' clips for a year, immutable, and nothing else", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    const cached = (await config.headers()).filter((rule) => rule.headers.some((header) => header.key.toLowerCase() === "cache-control"));
+    expect(cached).toEqual([{ source: "/docs/clips/:file*", headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }] }]);
   });
 });
 

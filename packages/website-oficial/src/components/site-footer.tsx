@@ -21,9 +21,9 @@
  */
 
 import { Mail } from "lucide-react";
-import Image from "next/image";
 
 import { AppLink } from "@/components/app-link";
+import { SipMark } from "@/components/sip-mark";
 import { Separator } from "@/components/ui/separator";
 import { LABEL, MONO } from "@/lib/classes";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
@@ -151,33 +151,8 @@ export function SiteFooter({ now, className, mode = null }: { now: string; class
   );
 }
 
-/**
- * THE MARK, ONE PER THEME.
- *
- * The source art is two flat PNGs with no alpha — black on white, white on
- * black — so either one dropped straight in would paint its own rectangle over
- * the page. `public/logo/sip-mark-*.png` are the ink cut out of them: the same
- * shape, transparent ground, trimmed to the glyph (218 x 256 of the original
- * 5504 x 3072 sheet, which was almost all margin).
- *
- * Two <Image>s rather than one recoloured asset, because a PNG cannot take
- * `currentColor`. `dark:` is the class-strategy variant next-themes sets on
- * <html> before React hydrates, so the right one is on screen from the first
- * paint — no flash of the wrong ink.
- *
- * alt="" on purpose: the wordmark beside it already says SIP, and a screen
- * reader announcing the name twice is worse than not announcing the image.
- */
-const MARK = { width: 218, height: 256 } as const;
-
-export function SipMark({ className }: { className?: string }) {
-  return (
-    <>
-      <Image alt="" className={cn("dark:hidden", className)} src="/logo/sip-mark-black.png" {...MARK} />
-      <Image alt="" className={cn("hidden dark:block", className)} src="/logo/sip-mark-white.png" {...MARK} />
-    </>
-  );
-}
+/** The mark, one per theme: its own module, so the docs can draw it without this footer (sip-mark.tsx). */
+export { SipMark } from "@/components/sip-mark";
 
 /**
  * Brand marks, inline. `currentColor` and `size-4` so they take the link's

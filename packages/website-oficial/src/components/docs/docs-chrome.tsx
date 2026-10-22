@@ -25,7 +25,7 @@ import { usePathname } from "next/navigation";
 
 import { DocsNav } from "@/components/docs/docs-nav";
 import { ModeToggle } from "@/components/mode-toggle";
-import { SipMark } from "@/components/site-footer";
+import { SipMark } from "@/components/sip-mark";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";

@@ -3,15 +3,18 @@
 // by their URL alone. These hold the owner's list of pages, what every page
 // renders, and his decisions that a writer could undo without noticing: no
 // status tags, noindex, no link from the header or the footer, never a broken
-// video.
+// video. And what makes a page load fast (10-22, measured): the poster asked for
+// first, no video byte before the loop plays, every clip's URL versioned by its
+// content so it can be cached for a year.
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import DocsPage, { generateMetadata, generateStaticParams } from "@/app/docs/[slug]/page";
 import DocsLayout, { metadata as layoutMetadata } from "@/app/docs/layout";
@@ -24,6 +27,10 @@ import { CLIPS, clipOf } from "@/lib/docs/clips";
 import { DOC_GROUPS, DOC_PAGES, docNeighbours, docSlugOf, type DocSlug } from "@/lib/docs/pages";
 
 const PACKAGE = fileURLToPath(new URL("../../../", import.meta.url));
+
+// The clip's poster preload, watched: a static render has no <head> to show it in, so the call is what is checked.
+const { preload } = vi.hoisted(() => ({ preload: vi.fn() }));
+vi.mock("react-dom", async (original) => ({ ...(await original<typeof import("react-dom")>()), preload }));
 
 /** The owner's list (DOCS_DECISIONS, 10-22), in order: group, then [slug, title, parent?]. */
 const OWNER_LIST: readonly (readonly [string, readonly (readonly [string, string, string?])[]])[] = [
@@ -238,17 +245,20 @@ describe("the docs' chrome", () => {
 });
 
 describe("a page's clip", () => {
+  /** A URL without its version: the file in public/. */
+  const pathOf = (url: string): string => url.split("?v=")[0]!;
+
   it("is the landing's app loop on the dashboard page, with its caption, playing only once the browser allows it", async () => {
     const html = await renderPage("dashboard");
     const video = html.match(/<video [^>]*>/)?.[0] ?? "";
-    expect(video).toContain('poster="/landing/app-loop.jpg"');
-    expect(video).toContain('preload="metadata"');
+    // The loop is the landing's; its poster is the docs' own WebP of that loop's first frame.
+    expect(video).toMatch(/poster="\/docs\/clips\/dashboard\.webp\?v=[0-9a-f]{8}"/);
     expect(video).toContain("loop");
     expect(video).toContain("playsInline");
     // No autoplay in the HTML: the loop is started from the browser, which knows the reader's motion setting.
     expect(video).not.toMatch(/autoplay/i);
-    expect(html).toContain('<source src="/landing/app-loop.webm" type="video/webm"/>');
-    expect(html).toContain('<source src="/landing/app-loop.mp4" type="video/mp4"/>');
+    expect(html).toMatch(/<source src="\/landing\/app-loop\.webm\?v=[0-9a-f]{8}" type="video\/webm"\/>/);
+    expect(html).toMatch(/<source src="\/landing\/app-loop\.mp4\?v=[0-9a-f]{8}" type="video\/mp4"\/>/);
     expect(html).toContain("Example — nobody’s pension</figcaption>");
     // No button over a loop that is about to start: it appears once the browser has answered.
     expect(html).not.toContain("the clip");
@@ -259,13 +269,29 @@ describe("a page's clip", () => {
     async (slug) => {
       const html = await renderPage(slug);
       const video = html.match(/<video [^>]*>/)?.[0] ?? "";
-      expect(video).toContain(`poster="/docs/clips/${slug}.jpg"`);
+      expect(video).toMatch(new RegExp(`poster="/docs/clips/${slug}\\.webp\\?v=[0-9a-f]{8}"`));
       expect(video).not.toMatch(/autoplay/i);
-      expect(html).toContain(`<source src="/docs/clips/${slug}.webm" type="video/webm"/>`);
-      expect(html).toContain(`<source src="/docs/clips/${slug}.mp4" type="video/mp4"/>`);
+      expect(html).toMatch(new RegExp(`<source src="/docs/clips/${slug}\\.webm\\?v=[0-9a-f]{8}" type="video/webm"/>`));
+      expect(html).toMatch(new RegExp(`<source src="/docs/clips/${slug}\\.mp4\\?v=[0-9a-f]{8}" type="video/mp4"/>`));
       expect(html).not.toContain("<figcaption");
     },
   );
+
+  it.each(SLUGS.filter((slug) => clipOf(slug) !== null))("loads no video byte on %s before the loop is about to play: preload none, the poster alone", async (slug) => {
+    const video = (await renderPage(slug)).match(/<video [^>]*>/)?.[0] ?? "";
+    expect(video).toContain('preload="none"');
+    expect(video).toContain(`poster="${clipOf(slug)!.poster}"`);
+  });
+
+  describe("asking for the poster first", () => {
+    beforeEach(() => preload.mockClear());
+
+    it.each(SLUGS)("%s preloads its clip's poster at high priority, and nothing when it has no clip", async (slug) => {
+      await renderPage(slug);
+      const clip = clipOf(slug);
+      expect(preload.mock.calls).toEqual(clip === null ? [] : [[clip.poster, { as: "image", fetchPriority: "high" }]]);
+    });
+  });
 
   it("is on the first three pages, the ones a newcomer reads (owner, 10-22)", () => {
     for (const slug of ["what-is-saverfi", "pension-key", "saving-from-profit"] as const) expect(clipOf(slug), slug).not.toBeNull();
@@ -288,10 +314,24 @@ describe("a page's clip", () => {
   it("is listed only once all of its files are in public/", () => {
     expect(Object.keys(CLIPS).length).toBeGreaterThan(0);
     for (const [slug, files] of Object.entries(CLIPS)) {
-      for (const path of [files!.webm, files!.mp4, files!.poster]) {
-        expect(existsSync(join(PACKAGE, "public", path)), `${slug}: ${path}`).toBe(true);
+      for (const url of [files!.webm, files!.mp4, files!.poster]) {
+        expect(existsSync(join(PACKAGE, "public", pathOf(url))), `${slug}: ${url}`).toBe(true);
       }
     }
+  });
+
+  it("names every file by its content, so a clip re-rendered under the same name is never served stale", () => {
+    // /docs/clips/* is cached for a year without asking again (next.config.mjs): only a new address reaches a reader.
+    for (const [slug, files] of Object.entries(CLIPS)) {
+      for (const url of [files!.webm, files!.mp4, files!.poster]) {
+        const version = createHash("sha256").update(readFileSync(join(PACKAGE, "public", pathOf(url)))).digest("hex").slice(0, 8);
+        expect(url, `${slug}: ${pathOf(url)} changed since its version was written; run pnpm run docs:clip ${slug}`).toBe(`${pathOf(url)}?v=${version}`);
+      }
+    }
+  });
+
+  it("has a WebP poster of the docs' own for every clip, under the year-long cache", () => {
+    for (const [slug, files] of Object.entries(CLIPS)) expect(pathOf(files!.poster), slug).toBe(`/docs/clips/${slug}.webp`);
   });
 });
 
