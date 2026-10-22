@@ -4,6 +4,7 @@
 // crawl files built from the same list, and the structured data. The page
 // modules themselves are read here too, so a page cannot drift from its entry.
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +30,7 @@ import {
   INDEXED_PATHS,
   NOT_INDEXED,
   SITE_CARD,
+  SITE_CARD_VERSION,
   SITE_LOGO,
   SITE_PAGES,
   googleSiteVerification,
@@ -260,12 +262,15 @@ describe("the landing's structured data", () => {
     expect(JSON.parse(serializeJsonLd(data))).toEqual(data);
   });
 
-  it("is the publisher, the site and the app, pointing at each other", () => {
+  it("is the publisher and the site, pointing at each other", () => {
     expect(data["@context"]).toBe("https://schema.org");
-    expect(nodes.map((node) => node["@type"])).toEqual(["Organization", "WebSite", "WebApplication"]);
+    expect(nodes.map((node) => node["@type"])).toEqual(["Organization", "WebSite"]);
     expect(byType("WebSite")).toMatchObject({ name: "SaverFi", url: "https://saverfi.example/", publisher: { "@id": "https://saverfi.example/#organization" } });
     expect(byType("Organization")).toMatchObject({ "@id": "https://saverfi.example/#organization", name: "SaverFi", url: "https://saverfi.example/" });
-    expect(byType("WebApplication")).toMatchObject({ name: "SaverFi", applicationCategory: "FinanceApplication", offers: { "@type": "Offer", price: "0", priceCurrency: "USD" } });
+  });
+
+  it("declares no software app: Google requires a rating or a review on one, and the site has neither (review, 10-22)", () => {
+    expect(JSON.stringify(data)).not.toMatch(/Application|VideoGame/);
   });
 
   it("uses a logo that exists, at the size it says", () => {
@@ -322,5 +327,18 @@ describe("the social cards", () => {
 
   it("reads the mark from public/, where the build finds it", () => {
     expect(existsSync(join(PACKAGE, "public/logo/sip-mark-white.png"))).toBe(true);
+  });
+
+  it("names the site's card by a version of what draws it, so a redrawn card gets a new address (review, 10-22)", () => {
+    const hash = createHash("sha256");
+    for (const file of ["src/app/opengraph-image.tsx", "src/components/og-card.tsx", "public/logo/sip-mark-white.png"]) {
+      hash.update(`${file}\0`);
+      hash.update(readFileSync(join(PACKAGE, file)));
+      hash.update("\0");
+    }
+    const drawn = hash.digest("hex").slice(0, 16);
+    // A failure here means the card changed: set SITE_CARD_VERSION in src/lib/seo.ts to the "Expected" value.
+    expect(SITE_CARD_VERSION, "SITE_CARD_VERSION in src/lib/seo.ts").toBe(drawn);
+    expect(SITE_CARD.url).toBe(`/opengraph-image?${drawn}`);
   });
 });

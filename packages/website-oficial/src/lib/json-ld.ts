@@ -3,11 +3,16 @@
  * in a form it does not have to guess at (owner, 10-22: found when someone
  * searches "SaverFi").
  *
- * - THE LANDING says who publishes the site (Organization), what the site is
- *   called (WebSite, on the home page, is what Google asks for to name a site
- *   above its results) and what it is (WebApplication, free). Only what the site itself says: no
- *   sameAs until the footer's X and GitHub links are real (they are "#" today),
- *   and no rating, which the site has none of.
+ * - THE LANDING says who publishes the site (Organization, whose logo Google
+ *   may show beside the results) and what the site is called (WebSite, on the
+ *   home page, is what Google asks for to name a site above its results). Only
+ *   what the site itself says: no sameAs until the footer's X and GitHub links
+ *   are real (they are "#" today).
+ * - NO WebApplication (review, 10-22). Google reads it as a Software App, whose
+ *   rich result REQUIRES an aggregateRating or a review: without one, Search
+ *   Console lists the landing as an invalid item, and the site has no rating to
+ *   give — inventing one is out. It earned nothing for a search for "SaverFi"
+ *   either: the site's name comes from WebSite, its logo from Organization.
  * - EVERY DOCS PAGE says where it sits: SaverFi › Docs › (its parent) › the page.
  *
  * Every address is absolute, on the configured site (src/lib/site-url.ts).
@@ -15,13 +20,13 @@
 
 import { BRAND } from "@/lib/live-copy";
 import { DOCS_HOME, docHref, docPage, type DocEntry } from "@/lib/docs/pages";
-import { SITE_CARD, SITE_LOGO, SITE_PAGES } from "@/lib/seo";
+import { SITE_LOGO } from "@/lib/seo";
 import { absoluteUrl } from "@/lib/site-url";
 
 export type JsonLdNode = { readonly "@type": string } & Readonly<Record<string, unknown>>;
 export type JsonLdDocument = { readonly "@context": "https://schema.org"; readonly "@graph": readonly JsonLdNode[] };
 
-/** The landing's three facts, as one graph whose nodes point at each other by @id. */
+/** The landing's publisher and its site, as one graph whose nodes point at each other by @id. */
 export function homeJsonLd(site: URL): JsonLdDocument {
   const home = absoluteUrl("/", site);
   const organization = `${home}#organization`;
@@ -43,27 +48,6 @@ export function homeJsonLd(site: URL): JsonLdDocument {
         alternateName: ["Saver Fi"],
         url: home,
         inLanguage: "en",
-        publisher: { "@id": organization },
-      },
-      {
-        "@type": "WebApplication",
-        "@id": `${home}#app`,
-        name: BRAND,
-        url: home,
-        description: SITE_PAGES.home.description,
-        applicationCategory: "FinanceApplication",
-        operatingSystem: "Any",
-        browserRequirements: "A Solana wallet in your browser, such as Phantom, Backpack or Solflare.",
-        isAccessibleForFree: true,
-        // The docs' Fees page: SaverFi takes no fee; Solana's own network fees and rent are paid to Solana.
-        offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
-        featureList: [
-          "Saves a share of each trade's profit or volume, or a round-up, into a vault on Solana",
-          "Only your own wallet can withdraw your savings",
-          "Savings stay in SOL or buy tokenised stocks: SPYx and ANTHROPIC",
-          `${BRAND} takes no fee`,
-        ],
-        image: absoluteUrl(SITE_CARD.url, site),
         publisher: { "@id": organization },
       },
     ],

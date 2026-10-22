@@ -84,8 +84,9 @@ What Google and other crawlers are told is one list, `SITE_PAGES` in
   says `X-Robots-Tag: noindex`; `/api/` is closed in `robots.txt`.
 - **Built from it:** `/sitemap.xml`, `/robots.txt` (everything closed on a Vercel
   preview), `/llms.txt`, the site's social card (`/opengraph-image`) and one per
-  docs page, and the structured data: WebSite, Organization and WebApplication
-  on the landing, a breadcrumb on every docs page.
+  docs page, and the structured data: WebSite and Organization on the landing,
+  a breadcrumb on every docs page. No WebApplication: Google requires a rating
+  or a review on one, and the site has neither.
 
 ## Stack
 

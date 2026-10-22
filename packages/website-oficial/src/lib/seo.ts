@@ -16,6 +16,14 @@
  *   consolidated — never a noindex, which next to a canonical is a mixed
  *   signal, and on "/?mode=mock" would sit beside the one page a search for
  *   "SaverFi" has to find.
+ * - TO WATCH: "/?mode=mock" IS NOT A COPY (review, 10-22). It is the sample
+ *   app — its own h1 and words, example figures — under the landing's title,
+ *   description and structured data, since metadata cannot read the query
+ *   without leaving <head> (below). A canonical is a hint Google may overrule
+ *   between pages that differ. If Search Console shows it indexed on its own
+ *   ("Google chose different canonical than user"), the remedy is an
+ *   X-Robots-Tag: noindex header from src/proxy.ts on "/" requests carrying
+ *   ?mode=mock — a header, so nothing request-dependent enters the metadata.
  * - NOT INDEXED, LINKS FOLLOWED: /activity and /wallets. For a visitor without
  *   a wallet the first is the landing again and the second is "Loading your
  *   wallets…"; what they show a connected pension is that person's own.
@@ -115,14 +123,25 @@ export const SITE_PAGES = {
 export const NOT_INDEXED = { index: false, follow: true } as const;
 
 /**
+ * THE SITE CARD'S VERSION: a hash of the files that draw it —
+ * src/app/opengraph-image.tsx, src/components/og-card.tsx and
+ * public/logo/sip-mark-white.png — pinned by seo.test.ts, which fails with the
+ * new value when any of them changes (review, 10-22). X, Facebook, LinkedIn,
+ * Telegram and Discord keep a preview picture by its address, so a redrawn card
+ * needs a new one, or links already shared keep the old picture.
+ */
+export const SITE_CARD_VERSION = "d0c829997b4f173f";
+
+/**
  * THE SITE'S SOCIAL CARD (src/app/opengraph-image.tsx), named on every page that
  * has no card of its own. Named, not left to Next's file convention: a page
  * that sets `openGraph` replaces its parent's whole object, and the convention
  * only fills in the level its file sits at — so without this every page with
- * its own card text would share without a picture.
+ * its own card text would share without a picture. The query is the version
+ * above; the image route ignores it.
  */
 export const SITE_CARD = {
-  url: "/opengraph-image",
+  url: `/opengraph-image?${SITE_CARD_VERSION}`,
   width: 1200,
   height: 630,
   type: "image/png",
