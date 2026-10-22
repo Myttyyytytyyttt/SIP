@@ -30,7 +30,9 @@
  * says it while nothing else is being said, and the link is described by it.
  *
  * Dollars by default, SOL on request (owner, 10-22); SOL only, and said, when
- * no price was read. A card with nothing saved has no unit to choose.
+ * no price was read. A card with nothing saved has no unit to choose. The
+ * sample's card (owner, 10-22) is dollars only — the sample has no SOL total —
+ * and says so the same way: SOL off, and a line under it.
  */
 
 import { Check, CircleAlert, Copy, Download, Share } from "lucide-react";
@@ -299,7 +301,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
               <ToggleGroupItem value="usd" disabled={!units.includes("usd")} className="flex-1 px-3 font-mono">
                 USD
               </ToggleGroupItem>
-              <ToggleGroupItem value="sol" className="flex-1 px-3 font-mono">
+              <ToggleGroupItem value="sol" disabled={!units.includes("sol")} className="flex-1 px-3 font-mono">
                 SOL
               </ToggleGroupItem>
             </ToggleGroup>
@@ -307,6 +309,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
         ) : null}
       </div>
       {card.state === "saved" && !units.includes("usd") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.noPrice}</p> : null}
+      {card.state === "saved" && !units.includes("sol") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.example.dollarsOnly}</p> : null}
 
       <DialogFooter className="flex-col sm:flex-row sm:items-center">
         {/*

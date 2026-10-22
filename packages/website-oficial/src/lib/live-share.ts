@@ -31,6 +31,16 @@
  * all (its button is off); a vault that has saved nothing yet gets a card of its
  * rule, never a "$0.00".
  *
+ * THE SAMPLE HAS ONE TOO, OF ITS OWN FIGURES (owner, 10-22: "en el mock también
+ * puede aparecer pero con los datos del mock claro"). exampleShareCardOf builds
+ * it from what the sample's hero shows, and the same card and renderer carry it
+ * with `example` set. That flag is the whole difference, and it is a promise:
+ * the image says "Example" on itself (a pill at the corner, the sample's notice
+ * under the figure — share-canvas.ts), the post is a line about SaverFi rather
+ * than "I've saved", and the file is saverfi-example-<day>.png. A card of a
+ * Live page never sets it. The sample is in dollars only: it has no SOL total,
+ * and a SOL figure made up for the image would be a second invention.
+ *
  * Types from '@/mocks/types' only: no-mock-import.test.ts scans lib/live-*.
  */
 
@@ -66,7 +76,8 @@ export interface ShareCardData {
   /**
    * "11.42", "<0.01" — SOL to two places, like the dollar's cents, never
    * rounded to nothing. Never the four places /leaderboard prints beside the
-   * vault's address: that figure would name the vault. Null when unreadable.
+   * vault's address: that figure would name the vault. Null when unreadable,
+   * and on the sample's card, which has no SOL total.
    */
   readonly solText: string | null;
   readonly solCompact: string | null;
@@ -85,7 +96,34 @@ export interface ShareCardData {
   readonly asOf: string;
   /** "2026-10-22" — for the file name. */
   readonly day: string;
+  /**
+   * The sample's card (exampleShareCardOf): nobody's pension, and the image,
+   * the post, the dialog and the file name all say so. Never set on a Live
+   * page's card.
+   */
+  readonly example: boolean;
 }
+
+type CardInput = { readonly stats: SavingsStats; readonly rule: SavingsRule; readonly now: string };
+
+/** A dollar total as the card prints it — A POSITIVE AMOUNT NEVER READS AS ZERO (amounts.ts formatSolAtMost's rule, for the dollar). */
+const dollarsOf = (dollars: number | null): Pick<ShareCardData, "usdText" | "usdCompact"> => ({
+  usdText: dollars === null ? null : dollars > 0 && dollars < 0.005 ? "<$0.01" : usd(dollars),
+  usdCompact: dollars === null ? null : usdCompact(dollars),
+});
+
+/** What every card takes from the page's rule and stats, whoever's figures they are: the rule, the month, the streak, the basket, the day. */
+const ruleOf = ({ stats, rule, now }: CardInput): Pick<ShareCardData, "rate" | "mode" | "paused" | "since" | "streakDays" | "basket" | "asOf" | "day"> => ({
+  rate: pct(rule.rateBps),
+  mode: rule.mode ?? "volume",
+  paused: rule.paused,
+  since: stats.firstSaveAt ? monthLabel(stats.firstSaveAt) : null,
+  streakDays: stats.currentStreakDays,
+  // A basket the page qualifies (unread, or chosen and not approved yet) is not stated on an image.
+  basket: rule.targetsNote === undefined ? [...rule.targets].sort((a, b) => b.weightBps - a.weightBps).map((target) => target.symbol) : [],
+  asOf: dateLabel(now),
+  day: now.slice(0, 10),
+});
 
 /**
  * THE CARD, FROM THE LIVE PAGE'S OWN FIGURES. `lifetimeSaved` is the vault's raw
@@ -94,41 +132,54 @@ export interface ShareCardData {
  * was saved. Everything else is what the hero and the rule card already show
  * (src/lib/live-mock.ts).
  */
-export function shareCardOf(input: { readonly lifetimeSaved: bigint | null; readonly stats: SavingsStats; readonly rule: SavingsRule; readonly now: string }): ShareCardData {
-  const { lifetimeSaved, stats, rule, now } = input;
+export function shareCardOf(input: CardInput & { readonly lifetimeSaved: bigint | null }): ShareCardData {
+  const { lifetimeSaved, stats } = input;
   const state: ShareState = lifetimeSaved === null ? "unknown" : lifetimeSaved > 0n ? "saved" : "zero";
   const dollars = state === "saved" ? stats.totalSavedUsd : null;
   return {
     state,
-    // A POSITIVE AMOUNT NEVER READS AS ZERO (amounts.ts formatSolAtMost's rule, for the dollar).
-    usdText: dollars === null ? null : dollars > 0 && dollars < 0.005 ? "<$0.01" : usd(dollars),
-    usdCompact: dollars === null ? null : usdCompact(dollars),
+    ...dollarsOf(dollars),
     solText: lifetimeSaved === null ? null : formatSolAtMost(lifetimeSaved, SHARE_SOL_PLACES),
     solCompact: lifetimeSaved === null ? null : compact(Number(lifetimeSaved) / 1e9),
     priced: dollars !== null && stats.pricedToday === true,
-    rate: pct(rule.rateBps),
-    mode: rule.mode ?? "volume",
-    paused: rule.paused,
-    since: stats.firstSaveAt ? monthLabel(stats.firstSaveAt) : null,
-    streakDays: stats.currentStreakDays,
-    // A basket the page qualifies (unread, or chosen and not approved yet) is not stated on an image.
-    basket: rule.targetsNote === undefined ? [...rule.targets].sort((a, b) => b.weightBps - a.weightBps).map((target) => target.symbol) : [],
-    asOf: dateLabel(now),
-    day: now.slice(0, 10),
+    ...ruleOf(input),
+    example: false,
+  };
+}
+
+/**
+ * THE SAMPLE'S CARD, FROM THE SAMPLE'S OWN FIGURES (owner, 10-22): what its hero
+ * and rule card show (MockBody in dashboard-shell.tsx), marked as the example.
+ * Its state is read from the hero's dollars — the sample has no chain counter —
+ * and it has no SOL: no total in SOL and no SOL price, so the image is in
+ * dollars and the dialog says why SOL is off.
+ */
+export function exampleShareCardOf(input: CardInput): ShareCardData {
+  const dollars = input.stats.totalSavedUsd;
+  const state: ShareState = dollars === null ? "unknown" : dollars > 0 ? "saved" : "zero";
+  return {
+    state,
+    ...dollarsOf(state === "saved" ? dollars : null),
+    solText: null,
+    solCompact: null,
+    // Its dollars are dollars, not SOL valued at a price read now: nothing to qualify.
+    priced: false,
+    ...ruleOf(input),
+    example: true,
   };
 }
 
 /** The card's SOL places: two, where the leaderboard's are four (formatSol in lib/leaderboard.ts). */
 export const SHARE_SOL_PLACES = 2;
 
-/** The units this card can show: dollars only with a price. */
-export const unitsOf = (card: ShareCardData): readonly ShareUnit[] => (card.usdText === null ? ["sol"] : ["usd", "sol"]);
+/** The units this card can show: dollars only with a price; SOL only with a SOL total (the sample has none). */
+export const unitsOf = (card: ShareCardData): readonly ShareUnit[] => (card.usdText === null ? ["sol"] : card.solText === null ? ["usd"] : ["usd", "sol"]);
 
 /** Dollars by default (owner, 10-22: "sí usa $ por defecto"); SOL when there is no price to make them. */
-export const defaultUnit = (card: ShareCardData): ShareUnit => (card.usdText === null ? "sol" : "usd");
+export const defaultUnit = (card: ShareCardData): ShareUnit => unitsOf(card)[0]!;
 
-/** What is shown for a unit asked for: dollars that do not exist fall back to SOL. */
-export const unitFor = (card: ShareCardData, wanted: ShareUnit): ShareUnit => (wanted === "usd" && card.usdText === null ? "sol" : wanted);
+/** What is shown for a unit asked for: dollars that do not exist fall back to SOL, and SOL that does not exist to dollars. */
+export const unitFor = (card: ShareCardData, wanted: ShareUnit): ShareUnit => (unitsOf(card).includes(wanted) ? wanted : defaultUnit(card));
 
 /** The hero of a card with savings: the figure, its unit, a shorter form, and the one qualifier under it. */
 export interface ShareHero {
@@ -140,21 +191,24 @@ export interface ShareHero {
 }
 
 export function shareHero(card: ShareCardData, wanted: ShareUnit): ShareHero | null {
-  if (card.state !== "saved" || card.solText === null) return null;
+  if (card.state !== "saved") return null;
   if (unitFor(card, wanted) === "sol") {
+    if (card.solText === null) return null;
     return {
       number: card.solText,
       unit: "SOL",
       compact: card.solCompact ?? card.solText,
-      note: card.priced && card.usdText !== null ? SHARE_COPY.card.usdAtPrice(card.usdText) : null,
+      note: card.example ? SHARE_COPY.example.note : card.priced && card.usdText !== null ? SHARE_COPY.card.usdAtPrice(card.usdText) : null,
     };
   }
+  if (card.usdText === null) return null;
   return {
-    number: card.usdText!,
+    number: card.usdText,
     unit: null,
-    compact: card.usdCompact ?? card.usdText!,
+    compact: card.usdCompact ?? card.usdText,
     // The dollar is SOL at one price read now: said under it, as the hero's own title does — without the SOL figure (a key to the vault).
-    note: SHARE_COPY.card.inSolAtPrice,
+    // The sample's dollars are just dollars, and what goes under them is that they are nobody's.
+    note: card.example ? SHARE_COPY.example.note : SHARE_COPY.card.inSolAtPrice,
   };
 }
 
@@ -247,25 +301,38 @@ export function fitHero(
 
 // ── what leaves the page ─────────────────────────────────────────────────────
 
-/** The post's words. X puts the site's link after them (shareIntentUrl). A paused rule puts nothing aside, so a post with nothing saved claims no rule. */
+/**
+ * The post's words. X puts the site's link after them (shareIntentUrl). A paused rule puts nothing aside, so a post with nothing saved claims no rule.
+ * The sample's post claims nothing at all: its figure is nobody's, so the words are about SaverFi, in either unit.
+ */
 export function sharePostText(card: ShareCardData, wanted: ShareUnit): string {
+  if (card.example) return SHARE_COPY.example.post;
   const hero = shareHero(card, wanted);
   if (hero === null) return card.paused ? SHARE_COPY.postZeroPaused : SHARE_COPY.postZero(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
   return SHARE_COPY.post(hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`);
 }
 
-/** The image described in a sentence, for the preview's alt text. */
+/** The image described in a sentence, for the preview's alt text — the sample's says it is the example. */
 export function shareAlt(card: ShareCardData, wanted: ShareUnit): string {
   const hero = shareHero(card, wanted);
-  if (hero === null) return (card.paused ? SHARE_COPY.altZeroPaused : SHARE_COPY.altZero)(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
-  return SHARE_COPY.alt(hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`);
+  const figure = hero === null ? null : hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`;
+  if (card.example) return SHARE_COPY.example.alt(figure === null ? `${card.rate} ${SHARE_COPY.card.measure[card.mode]}` : `${figure} saved`);
+  if (figure === null) return (card.paused ? SHARE_COPY.altZeroPaused : SHARE_COPY.altZero)(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
+  return SHARE_COPY.alt(figure);
+}
+
+/** The button's and the dialog's words (ShareSavings.tsx): a pension's, or the sample's, which is nobody's — "Share this example". */
+export function shareWords(card: ShareCardData): { readonly trigger: string; readonly triggerTip: string; readonly title: string; readonly description: string } {
+  const { trigger, triggerTip, title } = card.example ? SHARE_COPY.example : SHARE_COPY;
+  const description = card.example ? SHARE_COPY.example.description : card.state === "saved" ? SHARE_COPY.description : SHARE_COPY.descriptionZero;
+  return { trigger, triggerTip, title, description };
 }
 
 /** X's composer, with the words and the site. Opened in a new tab; nothing is posted until the person posts it. */
 export const shareIntentUrl = (text: string): string => `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(SHARE_SITE)}`;
 
-/** "saverfi-pension-2026-10-22.png": the day, and nothing about whose. */
-export const shareFileName = (card: ShareCardData): string => `saverfi-pension-${card.day}.png`;
+/** "saverfi-pension-2026-10-22.png": the day, and nothing about whose. The sample's is "saverfi-example-…": a file found later still says what it is. */
+export const shareFileName = (card: ShareCardData): string => `saverfi-${card.example ? "example" : "pension"}-${card.day}.png`;
 
 // ── what this browser can do with an image ───────────────────────────────────
 

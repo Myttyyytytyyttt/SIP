@@ -1,11 +1,14 @@
 // THE SHARE CARD'S FIGURES (owner, 10-22): what the image of a pension says,
 // from the Live page's own figures, through the REAL model and adapter — and
 // what it must never say: who it belongs to, a figure that names its vault, a
-// zero for an unknown, or the code name.
+// zero for an unknown, or the code name. A Live page's card is never the
+// example; the sample's own card is tested from the sample itself, where the
+// dataset may be imported (src/components/sample-share.test.ts).
 
 import { describe, expect, it } from "vitest";
 
 import { formatSol as leaderboardSol } from "@/lib/leaderboard";
+import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import {
@@ -23,6 +26,7 @@ import {
   shareIntentUrl,
   sharePostText,
   shareRows,
+  shareWords,
   unitFor,
   unitsOf,
   type ShareCardData,
@@ -101,6 +105,56 @@ describe("the card's figures, from the Live page's own", () => {
     const page = toDashboardMock(liveDashboard(), { complete: false });
     expect(shareCardOf({ lifetimeSaved: 1n, stats: page.stats, rule, now: page.now }).basket).toEqual(["ANTHROPIC", "SPYx"]);
     expect(shareCardOf({ lifetimeSaved: 1n, stats: page.stats, rule: { ...rule, targetsNote: "Applies when buying starts" }, now: page.now }).basket).toEqual([]);
+  });
+});
+
+describe("a Live page's card is never the example", () => {
+  const live: Record<string, LiveDashboard> = {
+    saved: liveDashboard(),
+    zero: withSaved("0"),
+    unknown: withSaved(null),
+    noPrice: liveDashboard({ snapshot: liveSnapshot({ prices: null }) }),
+    dust: withSaved("1000"),
+  };
+
+  it("in every state: no flag, the pension's file name, the first person, and none of the example's words", () => {
+    for (const [name, data] of Object.entries(live)) {
+      const shared = cardOf(data);
+      expect(shared.example, name).toBe(false);
+      expect(shareFileName(shared), name).toMatch(/^saverfi-pension-\d{4}-\d{2}-\d{2}\.png$/);
+      expect(shareWords(shared).trigger, name).toBe(SHARE_COPY.trigger);
+      for (const unit of ["usd", "sol"] as const) {
+        const said = [sharePostText(shared, unit), shareAlt(shared, unit), shareHero(shared, unit)?.note ?? "", ...Object.values(shareWords(shared))];
+        for (const sentence of said) {
+          expect(sentence, name).not.toMatch(/example/i);
+          expect(sentence, name).not.toContain(SHARE_COPY.example.note);
+        }
+      }
+    }
+  });
+});
+
+describe("an example card (the flag's own rules; the sample's figures: sample-share.test.ts)", () => {
+  /** What exampleShareCardOf makes of a page with no SOL total: dollars only, flagged. */
+  const example = card({ example: true, solText: null, solCompact: null, priced: false, usdText: "$2,073.42", usdCompact: "$2.1K" });
+
+  it("is dollars only, whichever unit is asked for", () => {
+    expect(unitsOf(example)).toEqual(["usd"]);
+    expect(defaultUnit(example)).toBe("usd");
+    expect(unitFor(example, "sol")).toBe("usd");
+    for (const unit of ["usd", "sol"] as const) {
+      expect(shareHero(example, unit)).toEqual({ number: "$2,073.42", unit: null, compact: "$2.1K", note: SHARE_COPY.example.note });
+    }
+  });
+
+  it("posts a line about SaverFi, never a figure of somebody's, and says what it is everywhere else", () => {
+    for (const unit of ["usd", "sol"] as const) {
+      expect(sharePostText(example, unit)).toBe(SHARE_COPY.example.post);
+      expect(shareAlt(example, unit)).toBe("Example SaverFi image, nobody’s pension: $2,073.42 saved");
+    }
+    expect(shareFileName(example)).toBe("saverfi-example-2026-09-16.png");
+    expect(shareWords(example)).toMatchObject({ trigger: "Share this example", title: "Share the example" });
+    expect(shareWords(example).description).toContain("“Example”");
   });
 });
 

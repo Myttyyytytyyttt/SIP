@@ -83,7 +83,7 @@ import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hoo
 import type { VaultApi, VaultStateJson } from "@/lib/vault-api";
 import { shortAddress } from "@/lib/vault-copy";
 import { usd } from "@/lib/format";
-import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
+import { ACTIVITY_COPY, LIVE_COPY, SHARE_COPY } from "@/lib/live-copy";
 import { mock } from "@/mocks";
 
 const SAMPLE: DashboardLoadJson = { source: "mock", data: mock, notice: null };
@@ -589,19 +589,24 @@ describe("the header's freshness dot", () => {
 });
 
 /**
- * THE SHARE BUTTON IS LIVE ONLY (owner, 10-22): beside a connected pension's
- * figure, and never on the sample — the landing's app-loop video is recorded
- * from /?mode=mock, and the owner wants no new one.
+ * THE SHARE BUTTON (owner, 10-22): beside a connected pension's figure — and,
+ * since the owner's "en el mock también puede aparecer pero con los datos del
+ * mock claro" the same day, beside the sample's, with the sample's own card,
+ * named as the example. The landing's app-loop video, recorded from
+ * /?mode=mock, was not re-recorded for it.
  */
 describe("the share button", () => {
   const BUTTON = /<button[^>]*data-share-savings="([a-z]+)"/g;
 
-  it("is not on the sample", () => {
+  it("is on the sample's pension view: green — the sample has savings — and naming the example", () => {
     mocked.pathname = "/";
     mocked.search = new URLSearchParams("mode=mock");
     const html = render();
     expect(html).toContain(MOCK_FIGURE);
-    expect([...html.matchAll(BUTTON)]).toEqual([]);
+    expect([...html.matchAll(BUTTON)].map((match) => match[1])).toEqual(["saved"]);
+    expect(html.match(/<button[^>]*data-share-savings[^>]*>/)?.[0]).toContain(`aria-label="${SHARE_COPY.example.trigger}"`);
+    mocked.pathname = "/activity";
+    expect([...render(true, "activity").matchAll(BUTTON)]).toEqual([]);
   });
 
   it("is beside a connected pension's figure, green while it has savings, and only on the pension view", () => {
@@ -609,7 +614,9 @@ describe("the share button", () => {
     mocked.search = new URLSearchParams("mode=live");
     mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
     mocked.pathname = "/";
-    expect([...render(true, "pension").matchAll(BUTTON)].map((match) => match[1])).toEqual(["saved"]);
+    const html = render(true, "pension");
+    expect([...html.matchAll(BUTTON)].map((match) => match[1])).toEqual(["saved"]);
+    expect(html.match(/<button[^>]*data-share-savings[^>]*>/)?.[0]).toContain(`aria-label="${SHARE_COPY.trigger}"`);
     mocked.pathname = "/activity";
     expect([...render(true, "activity").matchAll(BUTTON)]).toEqual([]);
   });

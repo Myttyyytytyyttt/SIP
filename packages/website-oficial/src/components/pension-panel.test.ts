@@ -12,6 +12,7 @@ vi.mock("@/components/pension-chart", () => ({ PensionChart: () => null }));
 const { PensionPanel, heroWidth } = await import("@/components/pension-panel");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { mock } = await import("@/mocks");
+const { usd } = await import("@/lib/format");
 
 const render = (mode: "profit" | "volume", rateBps: number): string =>
   renderToStaticMarkup(
@@ -70,10 +71,11 @@ describe("the hero's pill", () => {
 });
 
 /**
- * THE SHARE SLOT (owner, 10-22; live/ShareSavings.tsx): a live page's share
- * button on the figure's own line, to its right. The sample passes nothing, and
- * its hero is byte for byte what it was — sample-golden.test.ts holds the whole
- * panel, and the landing's video is recorded from it.
+ * THE SHARE SLOT (owner, 10-22; live/ShareSavings.tsx): the share button on the
+ * figure's own line, to its right — a live page's, and since the same day the
+ * sample's too, with its own example card (sample-share.test.ts). Without the
+ * slot the figure stands alone, as the sample's did before; sample-golden.test.ts
+ * holds the whole panel as the sample now renders it.
  */
 describe("the share slot", () => {
   const panel = (share?: Parameters<typeof PensionPanel>[0]["share"]): string =>
@@ -91,7 +93,7 @@ describe("the share slot", () => {
     expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3">${FIGURE.source}<button data-share-savings=""></button></div>`));
   });
 
-  it("is not there at all without `share`: the sample's figure stands alone", () => {
+  it("is not there at all without `share`: the figure stands alone", () => {
     const html = panel();
     expect(html).toMatch(FIGURE);
     expect(html).not.toContain("flex-wrap items-center gap-x-3");
@@ -150,7 +152,12 @@ describe("a long figure beside the share button", () => {
     expect(figureOf({ totalSavedUsd: null, totalSavedSol: "0.06", pricedToday: false })).toContain(`class="${SHORT}"`);
   });
 
-  it("never on the sample, which has no button", () => {
+  it("never without a button", () => {
     expect(figureOf({ totalSavedUsd: 123_504.57 }, false)).toContain(`class="${SHORT}"`);
+  });
+
+  it("the sample's own figure keeps its full size beside its button: its hero does not move", () => {
+    expect(figureOf({})).toContain(`class="${SHORT}"`);
+    expect(figureOf({})).toContain(`>${usd(mock.stats.totalSavedUsd)}</p>`);
   });
 });

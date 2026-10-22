@@ -23,6 +23,12 @@
  *
  * THE NUMBER RULE (the app's <Num>): in a line of words, every number is Geist
  * Mono at the same size; words are Geist.
+ *
+ * THE SAMPLE'S CARD SAYS "Example" ON ITSELF (owner, 10-22), twice: the docs
+ * clips' pill at the top-right corner, the day moved beside it, and the
+ * sample's notice under the figure, where a live card says what valued it. A
+ * crop that loses the corner still keeps the line under the number. A card of
+ * a Live page has neither (`example` is false on it).
  */
 
 import { MARK_H, MARK_H_LINES, MARK_PIECES, MARK_V_LINES, MARK_W } from "@/lib/brand-mark";
@@ -477,6 +483,53 @@ function block(ctx: Ctx, scale: number, x: number, y: number, w: number, h: numb
   ctx.restore();
 }
 
+/**
+ * THE "Example" PILL, at the top-right corner of the sample's card: the docs
+ * clips' label — a quiet capsule, an info ring, the word — set larger than
+ * anything else up there. Where a phone's timeline shows the card ~350 px wide
+ * its 28 px word is ~8 px, where the day beside it is ~5 px. Centred on the
+ * lockup's line; returns its left edge, so the day can stand beside it.
+ */
+const PILL = { height: 52, text: 28, icon: 26, padLeft: 15, gap: 10, padRight: 22 } as const;
+
+function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, mid: number): number {
+  font(ctx, 500, PILL.text, fonts.sans, "0px");
+  const word = SHARE_COPY.example.mark;
+  const width = PILL.padLeft + PILL.icon + PILL.gap + ctx.measureText(word).width + PILL.padRight;
+  const x = right - width;
+  const top = mid - PILL.height / 2;
+  // A ground of its own first, so the art behind the corner never shows through the word.
+  ctx.save();
+  ctx.shadowColor = "rgba(0,0,0,0.35)";
+  ctx.shadowBlur = 16 * scale;
+  ctx.fillStyle = "rgba(14,15,21,0.86)";
+  ctx.beginPath();
+  ctx.roundRect(x, top, width, PILL.height, PILL.height / 2);
+  ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // lucide Info, on a 24-unit box.
+  ctx.save();
+  ctx.translate(x + PILL.padLeft, mid - PILL.icon / 2);
+  ctx.scale(PILL.icon / 24, PILL.icon / 24);
+  ctx.strokeStyle = "rgba(255,255,255,0.80)";
+  ctx.lineWidth = 2;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.arc(12, 12, 10, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.stroke(new Path2D("M12 16v-4M12 8h.01"));
+  ctx.restore();
+  ctx.fillStyle = "rgba(255,255,255,0.90)";
+  const cap = ctx.measureText("E").actualBoundingBoxAscent;
+  ctx.fillText(word, x + PILL.padLeft + PILL.icon + PILL.gap, mid + cap / 2);
+  return x;
+}
+
 /** The hero band's middle: a smaller step shrinks the block about it, so the note and the rows never move. */
 const BAND_MID = 293;
 const LABEL_Y = 210;
@@ -488,17 +541,18 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
 
-  // 1. The lockup top-left, the snapshot's day top-right.
+  // 1. The lockup top-left, the snapshot's day top-right — and on the sample's card, the "Example" pill in the corner, the day beside it.
   const markH = 34;
   markPath(ctx, PAD, 52, markH);
   ctx.fillStyle = C.fg;
   ctx.fill();
   font(ctx, 600, 30, fonts.sans, "-0.6px");
   ctx.fillText(SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + 12, 79.5);
+  const dayRight = card.example ? examplePill(ctx, fonts, scale, W - PAD, 52 + markH / 2) - 20 : W - PAD;
   font(ctx, 400, 18, fonts.mono);
   ctx.fillStyle = C.fg55;
   ctx.textAlign = "right";
-  ctx.fillText(card.asOf, W - PAD, 75.5);
+  ctx.fillText(card.asOf, dayRight, 75.5);
   ctx.textAlign = "left";
 
   const hero = shareHero(card, options.unit);
@@ -542,7 +596,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
     ctx.fillText(line1, tx, BAND_MID - 6);
     ctx.fillStyle = C.fg55;
     ctx.fillText(line2, tx, BAND_MID + 34);
-    runs(ctx, fonts, PAD, NOTE_Y, SHARE_COPY.card.zeroNote, 18, 400, C.fg55);
+    runs(ctx, fonts, PAD, NOTE_Y, card.example ? SHARE_COPY.example.note : SHARE_COPY.card.zeroNote, 18, 400, C.fg55);
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, measure);
     const h = Math.round(fit.size * 1.25);

@@ -1075,4 +1075,29 @@ export const SHARE_COPY = {
     site: "saverfi.cash",
     tagline: "A pension that builds itself, on Solana",
   },
+
+  // ── the sample's card (owner, 10-22: "en el mock también puede aparecer pero con los datos del mock claro")
+  /**
+   * THE EXAMPLE'S OWN WORDS. The sample is nobody's pension, so nothing here
+   * says "your pension" or "my pension" of it: the button and the dialog name
+   * the example, the post is a line about SaverFi, and the image carries the
+   * site's "Example" itself (share-canvas.ts) — so a downloaded or posted copy
+   * can never pass for somebody's real pension.
+   */
+  example: {
+    trigger: "Share this example",
+    triggerTip: "Share an image of this example",
+    title: "Share the example",
+    description: "An image of this example, ready to post. It is marked “Example”: nobody’s pension.",
+    /** The sample's figures are dollars: it has no SOL total, and one made up for the image would be a second invention. */
+    dollarsOnly: "The example is in dollars. An image of your own pension can show SOL too.",
+    /** The post: about SaverFi, never "I’ve saved" — the figure is nobody's. X adds saverfi.cash after it. */
+    post: `${BRAND}: a pension that builds itself from your Solana trading.`,
+    /** The preview's description for a screen reader. */
+    alt: (what: string): string => `Example ${BRAND} image, nobody’s pension: ${what}`,
+    /** The pill at the image's top-right corner: the docs clips' label, word for word. */
+    mark: "Example",
+    /** Under the figure, where a live card says what valued it: the sample's own notice (MODE_COPY.sample). */
+    note: "Example numbers. Nobody’s pension.",
+  },
 } as const;

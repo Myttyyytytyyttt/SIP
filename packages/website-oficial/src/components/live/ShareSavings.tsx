@@ -6,10 +6,15 @@
  * with an image of the pension to post — GMGN's and Axiom's PnL cards, in
  * SaverFi's dress (SharePanel.tsx draws it).
  *
- * LIVE ONLY. PensionPanel shows it only when a page passes `share`, and only
- * the Live page does: the sample's hero stands alone, so the landing's app-loop
- * video — recorded from /?mode=mock — and the sample's goldens do not change
- * (owner, 10-22: "no grabes nuevo video para landing").
+ * ON THE LIVE PAGE AND ON THE SAMPLE. PensionPanel shows it where a page passes
+ * `share`. It was Live only at first — the landing's app-loop video is recorded
+ * from /?mode=mock (owner, 10-22: "no grabes nuevo video para landing") — and
+ * then the owner put it on the sample too, the same day: "en el mock también
+ * puede aparecer pero con los datos del mock claro". The sample passes a card of
+ * its own figures (exampleShareCardOf), and that card names itself: the button
+ * and the dialog say "this example", and the image says "Example" on itself
+ * (share-canvas.ts). The video stays as it was recorded; the sample's goldens
+ * changed by this button's markup alone.
  *
  * GREEN WHEN THERE IS SOMETHING TO SHOW, GREY WHEN THERE IS NOT (owner, 10-22:
  * "si está con savings ya el user el botón está verde y con un pulso verde
@@ -51,7 +56,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
-import type { ShareCardData } from "@/lib/live-share";
+import { shareWords, type ShareCardData } from "@/lib/live-share";
 import { cn } from "@/lib/utils";
 
 const loadPanel = () => import("@/components/live/SharePanel");
@@ -104,13 +109,14 @@ export function ShareSavings({ card }: { card: ShareCardData }) {
   const [open, setOpen] = useState(false);
   const saved = card.state === "saved";
   const unknown = card.state === "unknown";
+  const words = shareWords(card);
 
   const button = (
     <Button
       type="button"
       variant="ghost"
       size="icon"
-      aria-label={SHARE_COPY.trigger}
+      aria-label={words.trigger}
       data-share-savings={card.state}
       {...(unknown ? { "aria-disabled": true } : {})}
       className={cn("shrink-0 rounded-full ring-1 ring-inset", saved ? SHARE_TRIGGER.saved : SHARE_TRIGGER.grey, unknown && "cursor-not-allowed opacity-50 hover:bg-muted")}
@@ -141,13 +147,13 @@ export function ShareSavings({ card }: { card: ShareCardData }) {
         <TooltipTrigger asChild>
           <DialogTrigger asChild>{button}</DialogTrigger>
         </TooltipTrigger>
-        <TooltipContent>{SHARE_COPY.triggerTip}</TooltipContent>
+        <TooltipContent>{words.triggerTip}</TooltipContent>
       </Tooltip>
       {/* A 16:9-ish image wants the width: 672 px, scrolling within the screen on a short one. */}
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{SHARE_COPY.title}</DialogTitle>
-          <DialogDescription>{saved ? SHARE_COPY.description : SHARE_COPY.descriptionZero}</DialogDescription>
+          <DialogTitle>{words.title}</DialogTitle>
+          <DialogDescription>{words.description}</DialogDescription>
         </DialogHeader>
         <PanelBoundary fallback={<SharePanelFailed />}>
           <Suspense fallback={<SharePreviewFrame drawing />}>

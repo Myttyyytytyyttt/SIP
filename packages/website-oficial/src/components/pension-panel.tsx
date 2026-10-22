@@ -95,9 +95,10 @@ export function PensionPanel({
   /** A live page's arrivals: the pill beside the label. Absent on the sample, which keeps its bare label. */
   pulse?: HeroPulse;
   /**
-   * A live page's share button (live/ShareSavings.tsx, owner 10-22), to the
-   * right of the figure. Absent on the sample, whose figure stands alone: its
-   * markup — and the landing's video, recorded from it — does not change.
+   * The share button (live/ShareSavings.tsx, owner 10-22), to the right of the
+   * figure: a live page's, and the sample's own (MockBody, the same day: "en el
+   * mock también puede aparecer pero con los datos del mock claro"), whose card
+   * is marked as the example. The figure keeps its size and its line beside it.
    */
   share?: ReactNode;
   className?: string;
@@ -112,7 +113,7 @@ export function PensionPanel({
 
   // No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify.
   const solHero = stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : null;
-  // Beside the share button, a figure too long for the line steps down a size (HERO_FITS); the sample has no button.
+  // Beside the share button, a figure too long for the line steps down a size (HERO_FITS). The sample's fits at full size (pension-panel.test.ts).
   const long = share !== undefined && heroWidth(solHero ?? usd(stats.totalSavedUsd), solHero !== null) > HERO_FITS;
   const figure = (
     <p
