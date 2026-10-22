@@ -60,7 +60,7 @@ export function P({ children }: { readonly children: ReactNode }) {
 /** Bullets. The children are <li>s; a <ul> inside one nests, with a hollow bullet. */
 export function List({ children }: { readonly children: ReactNode }) {
   return (
-    <ul className={cn(BODY, "mt-5 ml-5 list-disc space-y-2 first:mt-0 marker:text-muted-foreground/70 [&_ul]:mt-2 [&_ul]:list-[circle] [&_ul]:space-y-1")}>
+    <ul className={cn(BODY, "mt-5 ml-5 list-disc space-y-2 first:mt-0 marker:text-muted-foreground/70 [&_ul]:mt-2 [&_ul]:ml-5 [&_ul]:list-[circle] [&_ul]:space-y-1")}>
       {children}
     </ul>
   );

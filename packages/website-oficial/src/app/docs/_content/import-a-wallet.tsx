@@ -31,8 +31,8 @@ export default function ImportAWalletBody() {
   return (
     <>
       <P>
-        Yes. If you already trade from a Solana wallet, in Phantom, Solflare, Axiom, GMGN or a trading bot, you can import
-        it, and SaverFi saves from it just like from a <DocLink to="trading-wallets">trading wallet</DocLink> it created.
+        If you already trade from a Solana wallet, in Phantom, Solflare, Axiom, GMGN or a trading bot, you can import it,
+        and SaverFi saves from it just like from a <DocLink to="trading-wallets">trading wallet</DocLink> it created.
       </P>
 
       <H2>Import it</H2>

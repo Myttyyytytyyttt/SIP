@@ -3,11 +3,12 @@
 /**
  * THE CLIP AT THE TOP OF A DOCS PAGE (owner, 10-22): a 16:9 loop, in the films'
  * style, that shows with pictures what the page says with words. So it is
- * hidden from screen readers, like the setup's step motion.
+ * hidden from screen readers, like the setup's step motion. Only some pages
+ * have one: where a clip makes the page easier to understand.
  *
  * THREE WAYS IT CAN LOOK:
- *  * NO CLIP YET (its slug is not in CLIPS, src/lib/docs/clips.ts): a quiet
- *    frame with the mark in it. Never a <video> pointing at a missing file.
+ *  * NO CLIP (its slug is not in CLIPS, src/lib/docs/clips.ts): nothing at all.
+ *    Never a <video> pointing at a missing file.
  *  * A CLIP: the loop, muted, over its poster. It starts by itself unless the
  *    reader asked for less motion; then the poster stays, with a play button.
  *    A pause button sits in the corner while it plays: a loop that never ends
@@ -44,7 +45,8 @@ export function Clip({ slug, className }: { readonly slug: DocSlug; readonly cla
 function PageClip({ slug, className }: { readonly slug: DocSlug; readonly className?: string | undefined }) {
   const files = clipOf(slug);
   const [broken, setBroken] = useState(false);
-  if (files === null || broken) return <ClipFrame className={className} />;
+  if (files === null) return null;
+  if (broken) return <ClipFrame className={className} />;
   return <ClipVideo files={files} onBroken={() => setBroken(true)} className={className} />;
 }
 
@@ -134,10 +136,10 @@ function ClipVideo({ files, onBroken, className }: { readonly files: ClipFiles; 
   );
 }
 
-/** The quiet frame of a page whose clip is not made yet: a dotted ground, a vignette, and the mark, faint. */
+/** The quiet frame of a clip whose file failed to load, so the page below never jumps: a dotted ground, a vignette, and the mark, faint. */
 function ClipFrame({ className }: { readonly className?: string | undefined }) {
   return (
-    <figure data-slot="docs-clip" data-clip="placeholder" aria-hidden className={className}>
+    <figure data-slot="docs-clip" data-clip="fallback" aria-hidden className={className}>
       <div className={cn(FRAME, "bg-muted/40")}>
         <div className="absolute inset-0 bg-[radial-gradient(circle,var(--color-border)_1px,transparent_1px)] [background-size:16px_16px]" />
         <div className="absolute inset-0 bg-[radial-gradient(70%_70%_at_50%_50%,transparent_30%,var(--color-background)_100%)] opacity-80" />

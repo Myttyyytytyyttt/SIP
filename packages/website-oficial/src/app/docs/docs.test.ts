@@ -1,5 +1,5 @@
 // /docs (owner, 10-22): the index on the left, the page from the centre to the
-// right, one clip per page — and, until the owner makes them official, reached
+// right, a clip where one helps — and, until the owner makes them official, reached
 // by their URL alone. These hold the owner's list of pages, what every page
 // renders, and his decisions that a writer could undo without noticing: no
 // status tags, noindex, no link from the header or the footer, never a broken
@@ -130,16 +130,21 @@ describe("the docs' index", () => {
 });
 
 describe("a docs page", () => {
-  it.each(SLUGS)("%s renders its group, its title, its line, its clip and its body", async (slug) => {
+  it.each(SLUGS)("%s renders its group, its title, its line, its clip if it has one, and its body", async (slug) => {
     const page = DOC_PAGES.find((entry) => entry.slug === slug)!;
     const html = await renderPage(slug);
     expect(html.match(/<h1[^>]*>([^<]*)<\/h1>/g)).toEqual([expect.stringContaining(`>${escapeHtml(page.title)}</h1>`)]);
     expect(html).toContain(`>${escapeHtml(page.description)}</p>`);
     expect(html).toContain(`>${escapeHtml(page.group)}</p>`);
-    // Exactly one clip, at the top: after the title, before the body, which says something.
-    expect(html.match(/data-slot="docs-clip"/g)).toHaveLength(1);
-    expect(html.indexOf("</h1>")).toBeLessThan(html.indexOf('data-slot="docs-clip"'));
-    expect(html.indexOf('data-slot="docs-clip"')).toBeLessThan(html.indexOf('data-slot="docs-body"'));
+    if (clipOf(slug) === null) {
+      expect(html).not.toContain('data-slot="docs-clip"');
+    } else {
+      // One clip, at the top: after the title, before the body.
+      expect(html.match(/data-slot="docs-clip"/g)).toHaveLength(1);
+      expect(html.indexOf("</h1>")).toBeLessThan(html.indexOf('data-slot="docs-clip"'));
+      expect(html.indexOf('data-slot="docs-clip"')).toBeLessThan(html.indexOf('data-slot="docs-body"'));
+    }
+    // The body says something.
     const body = html.slice(html.indexOf('data-slot="docs-body"'), html.indexOf('aria-label="Previous and next page"'));
     expect(body.replace(/<[^>]*>/g, "").trim().length).toBeGreaterThan(40);
   });
@@ -249,20 +254,35 @@ describe("a page's clip", () => {
     expect(html).not.toContain("the clip");
   });
 
-  it.each(SLUGS.filter((slug) => clipOf(slug) === null))("is a quiet frame on %s, whose clip is not made yet: never a <video>", async (slug) => {
+  it.each(SLUGS.filter((slug) => clipOf(slug) !== null && slug !== "dashboard"))(
+    "is %s's own loop, from public/docs/clips/, with no caption: its label is inside the picture",
+    async (slug) => {
+      const html = await renderPage(slug);
+      const video = html.match(/<video [^>]*>/)?.[0] ?? "";
+      expect(video).toContain(`poster="/docs/clips/${slug}.jpg"`);
+      expect(video).not.toMatch(/autoplay/i);
+      expect(html).toContain(`<source src="/docs/clips/${slug}.webm" type="video/webm"/>`);
+      expect(html).toContain(`<source src="/docs/clips/${slug}.mp4" type="video/mp4"/>`);
+      expect(html).not.toContain("<figcaption");
+    },
+  );
+
+  it("is on the first three pages, the ones a newcomer reads (owner, 10-22)", () => {
+    for (const slug of ["what-is-saverfi", "pension-key", "saving-from-profit"] as const) expect(clipOf(slug), slug).not.toBeNull();
+  });
+
+  it.each(SLUGS.filter((slug) => clipOf(slug) === null))("is no media at all on %s, which has no clip: never a <video>, never an empty frame", async (slug) => {
     const html = await renderPage(slug);
-    expect(html).toContain('data-clip="placeholder"');
     expect(html).not.toContain("<video");
+    expect(html).not.toContain("<figure");
     expect(html).not.toContain("/docs/clips/");
   });
 
-  // Any page still without a clip; once every clip is made there is none, and the pages above say the rest.
+  // Any page without a clip; if every page ever gets one there is none, and the pages above say the rest.
   const missing = SLUGS.find((slug) => clipOf(slug) === null);
 
-  it.skipIf(missing === undefined)("falls back to the frame for any page missing from the manifest", () => {
-    const html = renderToStaticMarkup(createElement(Clip, { slug: missing! }));
-    expect(html).toMatch(/^<figure data-slot="docs-clip" data-clip="placeholder" aria-hidden="true"/);
-    expect(html).not.toContain("<video");
+  it.skipIf(missing === undefined)("renders nothing for a page missing from the manifest", () => {
+    expect(renderToStaticMarkup(createElement(Clip, { slug: missing! }))).toBe("");
   });
 
   it("is listed only once all of its files are in public/", () => {
