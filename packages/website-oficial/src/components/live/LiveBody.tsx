@@ -116,7 +116,8 @@ import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import { pendingLines, pendingSteps } from "@/lib/live-pending";
-import { shareCardOf } from "@/lib/live-share";
+import { streakProofOf } from "@/lib/live-figures";
+import { shareCardOf, type ShareLinkSource } from "@/lib/live-share";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 import type { WalletsSection } from "@/lib/wallets-sections";
@@ -262,6 +263,11 @@ export function LiveBody({
   // THE SHARE CARD'S FIGURES (owner, 10-22): the hero's and the rule's, and the
   // vault's raw counter for whether anything was saved — with or without a price.
   const shareCard = shareCardOf({ lifetimeSaved: data.vault.lifetimeSaved, stats: page.stats, rule: page.rule, now: page.now });
+  // AND ITS LINK (owner, 10-22: "Enlace con vista previa"): the server reads the
+  // card again from the chain and signs a /c/ link, and the streak is proven
+  // from one settlement a day (live-figures.ts streakProofOf). Asked only once
+  // the dialog opens.
+  const shareLink: ShareLinkSource = { kind: "live", owner: pensionKey, proof: streakProofOf(data) };
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -466,7 +472,7 @@ export function LiveBody({
                     now={page.now}
                     trades={page.trades}
                     pulse={pulse}
-                    share={<ShareSavings card={shareCard} />}
+                    share={<ShareSavings card={shareCard} link={shareLink} />}
                     {...(page.calendar === undefined ? {} : { calendar: page.calendar })}
                     {...(page.vault === undefined ? {} : { vault: page.vault })}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}

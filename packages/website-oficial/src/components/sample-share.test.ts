@@ -117,4 +117,12 @@ describe("the sample's button and dialog", () => {
     const href = new URL(link.match(/href="([^"]+)"/)![1]!.replaceAll("&amp;", "&"));
     expect(href.searchParams.get("text")).toBe(SHARE_COPY.example.post);
   });
+
+  it("Post on X links the sample's own page, marked Example like its image — fixed, signed by nobody (owner, 10-22)", () => {
+    const html = renderToStaticMarkup(createElement(SharePanel, { card, link: { kind: "example" } }));
+    const link = html.match(/<a [^>]*data-share-action="x"[^>]*>/)?.[0] ?? "";
+    const href = new URL(link.match(/href="([^"]+)"/)![1]!.replaceAll("&amp;", "&"));
+    expect(href.searchParams.get("url")).toBe("https://saverfi.cash/c/example");
+    expect(href.searchParams.get("text")).toBe(SHARE_COPY.example.post);
+  });
 });

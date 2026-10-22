@@ -8,7 +8,9 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildCommitOf, privyStubAlias } from "../next.config.mjs";
+import htmlBots from "next/dist/shared/lib/router/utils/html-bots.js";
+
+import { HTML_LIMITED_BOTS, buildCommitOf, privyStubAlias } from "../next.config.mjs";
 import { securityHeaders } from "../security-headers.mjs";
 
 const PRIVY = "@privy-io/react-auth";
@@ -76,6 +78,43 @@ describe("the headers the config adds", () => {
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
     ]);
+  });
+});
+
+/**
+ * A SHARED CARD (owner, 10-22: "Enlace con vista previa"): its page is never
+ * indexed, every link-preview crawler gets its metadata in <head>, and its
+ * picture's fonts and plates reach a standalone build.
+ */
+describe("the shared card's pages", () => {
+  it("say noindex, follow in a header on every /c/ path", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect((await config.headers()).filter((rule) => rule.source.startsWith("/c/"))).toEqual([{ source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] }]);
+  });
+
+  it("give their metadata in <head> to Next's own HTML-limited bots, and to Mastodon's and Bluesky's — not to a browser", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect([config.htmlLimitedBots.source, config.htmlLimitedBots.flags]).toEqual([HTML_LIMITED_BOTS.source, "i"]);
+    expect(HTML_LIMITED_BOTS.source.startsWith(htmlBots.HTML_LIMITED_BOT_UA_RE.source)).toBe(true);
+    for (const agent of [
+      "Twitterbot/1.0",
+      "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+      "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)",
+      "TelegramBot (like TwitterBot)",
+      "WhatsApp/2.23.20.0",
+      "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+      "LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)",
+      "http.rb/5.1.1 (Mastodon/4.2.0; +https://mastodon.social/) Bot",
+      "Mozilla/5.0 (compatible; Bluesky Cardyb/1.1; +mailto:support@bsky.app)",
+    ]) {
+      expect(HTML_LIMITED_BOTS.test(agent), agent).toBe(true);
+    }
+    expect(HTML_LIMITED_BOTS.test("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")).toBe(false);
+  });
+
+  it("carry the picture's fonts and plates into the traced build, for the one route that draws at run time", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect(config.outputFileTracingIncludes).toEqual({ "/c/[token]/card.png": ["./assets/share-og/**/*"] });
   });
 });
 

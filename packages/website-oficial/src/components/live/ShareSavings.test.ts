@@ -15,7 +15,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
-import { shareCardOf, type ShareCardData } from "@/lib/live-share";
+import { EXAMPLE_SHARE_LINKS, SHARE_BACKGROUNDS, shareCardOf, type ShareCardData, type ShareLinks } from "@/lib/live-share";
+import { askShareLink, forgetShareLinks } from "@/lib/share-link-client";
 import { SHARE_PLATES } from "@/lib/share-plates";
 
 import { liveDashboard } from "../../../test/fixtures/live-dashboard";
@@ -106,7 +107,7 @@ describe("the dialog's body", () => {
     vi.stubGlobal("ClipboardItem", class {});
     vi.stubGlobal("navigator", { clipboard: { write: () => Promise.resolve() } });
     const html = panel(card(60_000_000n));
-    const hint = html.match(/<p id="([^"]+)" class="text-muted-foreground">([^<]*)<\/p>/);
+    const hint = html.match(/<p id="([^"]+)" class="text-muted-foreground" data-share-x-hint="none">([^<]*)<\/p>/);
     expect(hint?.[2]).toBe(SHARE_COPY.xHint);
     // The link is described by it, and the live region stays in the tree, empty until an action speaks.
     expect(html.match(/<a [^>]*data-share-action="x"[^>]*>/)?.[0]).toContain(`aria-describedby="${hint?.[1]}"`);
@@ -153,6 +154,64 @@ describe("the dialog's body", () => {
     const html = panel(card(0n));
     expect(html).not.toContain(SHARE_COPY.showIn);
     expect(html).not.toContain(">USD<");
+  });
+});
+
+/**
+ * THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"): Post on X
+ * posts saverfi.cash/c/<token> — or, on the sample, /c/example — and X shows
+ * the card under it. While the link is asked for, Post on X waits.
+ */
+describe("Post on X with the card's own link", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    forgetShareLinks();
+  });
+
+  const OWNER = "PensionKeyP1aceho1der111111111111111111111";
+  const xLink = (html: string): string => html.match(/<a [^>]*data-share-action="x"[^>]*>/)?.[0] ?? "";
+  const hrefOf = (html: string): URL => new URL(xLink(html).match(/href="([^"]+)"/)![1]!.replaceAll("&amp;", "&"));
+  const hintOf = (html: string): string => html.match(/data-share-x-hint="[a-z]+">([^<]*)<\/p>/)?.[1] ?? "";
+  /** Links the server signs: one path per background and unit. */
+  const signed = (): ShareLinks =>
+    Object.fromEntries(SHARE_BACKGROUNDS.map((background) => [background, { usd: `/c/${background}-usd.mac`, sol: `/c/${background}-sol.mac` }])) as unknown as ShareLinks;
+
+  it("the sample's: its fixed page, at once — no asking, nothing signed", () => {
+    const html = renderToStaticMarkup(createElement(SharePanel, { card: card(60_000_000n), link: { kind: "example" } }));
+    expect(hrefOf(html).searchParams.get("url")).toBe(`https://saverfi.cash${EXAMPLE_SHARE_LINKS.grid.usd}`);
+    expect(hintOf(html)).toBe(SHARE_COPY.xHintLinked);
+  });
+
+  it("a Live page's, while it is asked for: Post on X waits, disabled, and says why", () => {
+    const html = renderToStaticMarkup(createElement(SharePanel, { card: card(60_000_000n), link: { kind: "live", owner: OWNER, proof: [] } }));
+    expect(xLink(html)).toBe("");
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*data-share-action="x"[^>]*>/);
+    expect(hintOf(html)).toBe(SHARE_COPY.xHintPending);
+  });
+
+  it("a Live page's, answered: the server's card is the one shown and posted, under its own signed link", async () => {
+    const page = card(60_000_000n);
+    const server = { ...page, usdText: "$6.01", streakDays: 3 };
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ card: server, links: signed(), streak: { claimed: 3, proven: 3 } }), { status: 200 }));
+    await askShareLink({ kind: "live", owner: OWNER, proof: [] }, page, { fetch });
+    vi.stubGlobal("ClipboardItem", class {});
+    vi.stubGlobal("navigator", { clipboard: { write: () => Promise.resolve() } });
+    const html = renderToStaticMarkup(createElement(SharePanel, { card: page, link: { kind: "live", owner: OWNER, proof: [] } }));
+    const href = hrefOf(html);
+    expect(href.searchParams.get("url")).toBe("https://saverfi.cash/c/grid-usd.mac");
+    expect(href.searchParams.get("text")).toBe("I’ve saved $6.01 for my pension with SaverFi so far.");
+    expect(xLink(html)).toContain('target="_blank"');
+    expect(hintOf(html)).toBe(SHARE_COPY.xHintLinked);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Live page's, refused or off: the site and the image to paste, as before", async () => {
+    const page = card(60_000_000n);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { code: "share_links_off" } }), { status: 404 }));
+    await askShareLink({ kind: "live", owner: OWNER, proof: [] }, page, { fetch });
+    const html = renderToStaticMarkup(createElement(SharePanel, { card: page, link: { kind: "live", owner: OWNER, proof: [] } }));
+    expect(hrefOf(html).searchParams.get("url")).toBe("https://saverfi.cash");
+    expect(hintOf(html)).toBe(SHARE_COPY.xHintNoCopy);
   });
 });
 

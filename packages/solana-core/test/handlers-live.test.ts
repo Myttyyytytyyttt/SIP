@@ -16,7 +16,10 @@ import {
   MAX_BUILD_REQUEST_BYTES,
   MAX_LIVE_ACTIVITY_PAGE,
   createSolanaLiveHandler,
+  createSolanaReadRoute,
   createSolanaVaultHandler,
+  liveSnapshotJsonText,
+  type BuildRefusalEvent,
   type SolanaVaultHandlerOptions,
 } from "../src/server/build-handler";
 import { loadSolanaServerSettings } from "../src/server/config";
@@ -24,6 +27,8 @@ import { POOL_DEPTH } from "./fixtures/keeper-policy";
 import type { SolanaGate } from "../src/server/handlers";
 import { deriveConfigPda, deriveInvestPda, deriveLinkPda, deriveVaultPda } from "../src/server/pda";
 import { createWeightedLimiter, type WeightedLimiter } from "../src/server/rate-limit";
+import { readLiveSnapshot } from "../src/server/readers";
+import { createRpcPool } from "../src/server/rpc-pool";
 import {
   LEG_POOLS,
   SOL_POOL_USDC_RESERVE,
@@ -807,5 +812,59 @@ describe("its buckets are its own, and its reads are everyone's", () => {
     const refused = await live({ action: "snapshot", owner: key(), wallets: [], discover: false });
     expect([refused.status, refused.json.error?.code]).toEqual([429, "rate_limited"]);
     expect(upstream.calls).toHaveLength(calls);
+  });
+});
+
+describe("a read route that lives outside this package (the web's /api/share, 10-22)", () => {
+  it("liveSnapshotJsonText is the snapshot action's body, byte for byte: the share route parses what Live is sent", async () => {
+    const owner = key();
+    const wallet = key();
+    const chain = fullChain(owner, wallet);
+    const { live } = setup(chain);
+    const answer = await live({ action: "snapshot", owner, wallets: [wallet], discover: false });
+    const upstream = fakeFetch(answerLive(chain));
+    const pool = createRpcPool(load.settings.rpcEndpoints, { fetch: upstream.fetch, redactor: load.settings.redactor });
+    const snapshot = await readLiveSnapshot(pool, { owner, wallets: [wallet], discover: false });
+    expect(liveSnapshotJsonText(owner, snapshot, 1_789_500_000_000)).toBe(answer.text);
+  });
+
+  it("runs the same pipeline — gate, cross-site, buckets, body, action — and names its own route in a refusal", async () => {
+    const events: BuildRefusalEvent[] = [];
+    const seen: Record<string, unknown>[] = [];
+    const route = createSolanaReadRoute("share", { gate: () => OK_GATE, onRefusal: (event) => events.push(event), now: () => 1_789_500_000_000 }, async (action, fields, served) => {
+      seen.push({ action, ...fields });
+      return served.refuse(400, "bad_request", "no such action");
+    });
+    const share = async (body: unknown, headers?: Record<string, string>) => read(await route.POST(post("live", body, headers)));
+    expect((await share({ action: "link" }, { "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await share({ action: "link" }, { "content-type": "text/plain" })).status).toBe(415);
+    expect((await share({ action: "link", owner: "x" })).status).toBe(400);
+    expect(seen).toEqual([{ action: "link", owner: "x" }]);
+    expect(events.map((event) => [event.route, event.status])).toEqual([
+      ["share", 403],
+      ["share", 415],
+      ["share", 400],
+    ]);
+    expect(route.GET().status).toBe(405);
+  });
+
+  it("reads a body up to its own cap, and refuses one over it before parsing", async () => {
+    const route = createSolanaReadRoute("share", { gate: () => OK_GATE, onRefusal: () => undefined, maxBodyBytes: 6_144 }, async (_action, fields) =>
+      new Response(JSON.stringify({ length: String(fields.pad).length }), { status: 200 }),
+    );
+    const roomy = await read(await route.POST(post("live", { action: "link", pad: "x".repeat(MAX_BUILD_REQUEST_BYTES * 2) })));
+    expect([roomy.status, roomy.json.length]).toEqual([200, MAX_BUILD_REQUEST_BYTES * 2]);
+    const large = await read(await route.POST(post("live", { action: "link", pad: "x".repeat(6_144) })));
+    expect([large.status, large.json.error?.code, large.json.error?.message]).toEqual([413, "payload_too_large", "Request body exceeds 6144 bytes."]);
+  });
+
+  it("charges what it reads from the client and from the reads budget every route shares", async () => {
+    const reads = counting(1_000);
+    const route = createSolanaReadRoute("share", { gate: () => OK_GATE, onRefusal: () => undefined, readsBudget: reads.limiter }, async (_action, _fields, served) => {
+      const spent = served.spendReads(LIVE_READS_WEIGHT.snapshot) ?? served.spendMore(7);
+      return spent ?? new Response("{}", { status: 200 });
+    });
+    expect((await route.POST(post("live", { action: "link" }))).status).toBe(200);
+    expect(reads.spent()).toBe(LIVE_READS_WEIGHT.snapshot + 7);
   });
 });

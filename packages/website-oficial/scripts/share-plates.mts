@@ -3,7 +3,7 @@
  * backgrounds in public/share/, each with its still and its thumb, and every
  * file's version written into src/lib/share-plates.ts.
  *
- * Run from packages/website-oficial (needs cwebp: `brew install webp`):
+ * Run from packages/website-oficial (needs cwebp and ffmpeg: `brew install webp ffmpeg`):
  *
  *   pnpm run share:plates --from <checkout>/launch-video/out/share
  *
@@ -16,6 +16,10 @@
  *     generation of quality and could break the plates' one-keyframe rule;
  *   * makes the still (<name>.webp, 2400×1260) and the thumb (<name>-thumb.webp,
  *     600×315) from the PNG, in WebP at q88 (src/lib/share-plates.ts says why);
+ *   * makes the link preview's frame 0 (assets/share-og/plates/<name>.jpg,
+ *     1200×630, JPEG at -q:v 2 in 4:4:4: 54–56 dB from the PNG at ~40 KB), which
+ *     the server draws the card on (components/share-og.tsx) — then
+ *     SHARE_RENDER_VERSION changes, and share-og.test.ts says to what;
  *   * reads the MP4 back (src/lib/share-mp4.ts) for its frame count and codec;
  *   * rewrites its plateFiles(...) line with the four versions.
  * Then `pnpm run check:plates` says whether they can ship.
@@ -27,11 +31,12 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parseMp4 } from "../src/lib/share-mp4.ts";
-import { STILL_SIZE, THUMB_SIZE } from "../src/lib/share-plates.ts";
+import { PLATE_SIZE, STILL_SIZE, THUMB_SIZE } from "../src/lib/share-plates.ts";
 import { versionOf } from "./check-clips.mts";
 
 const PACKAGE = fileURLToPath(new URL("../", import.meta.url));
 const PUBLIC = join(PACKAGE, "public");
+const OG_PLATES = join(PACKAGE, "assets/share-og/plates");
 const PLATES_TS = join(PACKAGE, "src/lib/share-plates.ts");
 const NAMES = ["grid", "streaks", "vault"] as const;
 
@@ -45,7 +50,7 @@ function fail(message: string): never {
 
 function run(command: string, args: readonly string[]): void {
   const result = spawnSync(command, args, { stdio: ["ignore", "ignore", "inherit"] });
-  if (result.error !== undefined) fail(`${command} did not run (${result.error.message}); brew install webp`);
+  if (result.error !== undefined) fail(`${command} did not run (${result.error.message}); brew install webp ffmpeg`);
   if (result.status !== 0) fail(`${command} ${args.join(" ")} exited ${result.status}`);
 }
 
@@ -62,6 +67,7 @@ const from = fromAt === -1 ? null : (args[fromAt + 1] ?? "");
 if (from === null || !existsSync(from)) fail("--from needs the films' output folder: pnpm run share:plates --from <checkout>/launch-video/out/share");
 
 mkdirSync(join(PUBLIC, "share"), { recursive: true });
+mkdirSync(OG_PLATES, { recursive: true });
 let source = readFileSync(PLATES_TS, "utf8");
 
 for (const name of NAMES) {
@@ -75,6 +81,7 @@ for (const name of NAMES) {
   copyFileSync(join(from, `${name}.webm`), join(PUBLIC, files.webm));
   run("cwebp", [...CWEBP, png, "-o", join(PUBLIC, files.still)]);
   run("cwebp", [...CWEBP, "-resize", String(THUMB_SIZE.width), String(THUMB_SIZE.height), png, "-o", join(PUBLIC, files.thumb)]);
+  run("ffmpeg", ["-v", "error", "-y", "-i", png, "-vf", `scale=${PLATE_SIZE.width}:${PLATE_SIZE.height}:flags=lanczos,format=yuvj444p`, "-q:v", "2", join(OG_PLATES, `${name}.jpg`)]);
 
   const mp4 = parseMp4(readFileSync(join(PUBLIC, files.mp4)));
   const v = { mp4: versionOf(files.mp4), webm: versionOf(files.webm), still: versionOf(files.still), thumb: versionOf(files.thumb) };

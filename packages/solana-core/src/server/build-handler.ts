@@ -113,6 +113,7 @@ import {
   vaultTokenAccountTargets,
   type AccountSnapshot,
   type ChainRead,
+  type LiveSnapshot,
   type PoolPrices,
   type PoolReserves,
   type PythRead,
@@ -171,7 +172,8 @@ export type SolanaBuildErrorCode =
   | "internal_error";
 
 export interface BuildRefusalEvent {
-  readonly route: "solana-build" | "solana-vault" | "solana-live";
+  /** "share" is the web's /api/share (createSolanaReadRoute): the share card's signed link, read from the same chain. */
+  readonly route: "solana-build" | "solana-vault" | "solana-live" | "share";
   readonly status: number;
   readonly code: string;
   readonly action: string | null;
@@ -193,6 +195,12 @@ export interface SolanaBuildHandlerOptions {
   readonly onRefusal?: (event: BuildRefusalEvent) => void;
   /** Whether mode 1 (VOLUME) is built. Default VOLUME_MODE_OFFERED. */
   readonly volumeOffered?: boolean;
+  /**
+   * The largest body this route reads. Default MAX_BUILD_REQUEST_BYTES. Only
+   * the web's /api/share asks for more: its body carries up to 45 settlement
+   * signatures, about 4 KB, and the bytes are still capped before any is parsed.
+   */
+  readonly maxBodyBytes?: number;
 }
 
 export type SolanaVaultHandlerOptions = Omit<SolanaBuildHandlerOptions, "volumeOffered">;
@@ -317,7 +325,13 @@ function memoBySettings<T>(build: (settings: SolanaServerSettings) => T): (setti
   };
 }
 
-interface Served {
+/**
+ * What a route's dispatch is handed: the pool, the refusal, and the two ways to
+ * pay for upstream calls. Exported for createSolanaReadRoute, so a route that
+ * lives in the web app (the share card's /api/share) is charged exactly as the
+ * Solana routes are.
+ */
+export interface SolanaRouteServed {
   readonly pool: RpcPool;
   readonly volumeOffered: boolean;
   refuse(status: number, code: SolanaBuildErrorCode, message: string, more?: Record<string, unknown>): Response;
@@ -332,10 +346,27 @@ interface Served {
   spendMore(calls: number): Response | null;
 }
 
-type Dispatch = (action: string, fields: Readonly<Record<string, unknown>>, served: Served) => Promise<Response>;
+type Served = SolanaRouteServed;
+
+/** A route's actions, after the pipeline has checked, charged and parsed the request. */
+export type SolanaRouteDispatch = (action: string, fields: Readonly<Record<string, unknown>>, served: SolanaRouteServed) => Promise<Response>;
+type Dispatch = SolanaRouteDispatch;
+
+/**
+ * THE PIPELINE EVERY READ ROUTE SHARES, for a route whose actions live outside
+ * this package (owner, 10-22: the share card's signed link). The same refusals in
+ * the same order — the gate, cross-site, the content type, the client's buckets
+ * before its body is read, the body's cap, a JSON object with an action — and
+ * the same `served`, so its upstream calls come out of the one reads budget the
+ * Solana routes share. Its per-client buckets are its own, like every route's.
+ */
+export function createSolanaReadRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHandlerOptions, dispatch: SolanaRouteDispatch): SolanaRouteHandler {
+  return createRoute(route, options, dispatch);
+}
 
 function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHandlerOptions, dispatch: Dispatch): SolanaRouteHandler {
   const now = options.now ?? Date.now;
+  const maxBodyBytes = options.maxBodyBytes ?? MAX_BUILD_REQUEST_BYTES;
   const onRefusal = options.onRefusal ?? sampledWarn();
   const volumeOffered = options.volumeOffered ?? VOLUME_MODE_OFFERED;
   const state = memoBySettings((settings) => ({
@@ -372,10 +403,10 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
       const clientWait = ownWait > 0 ? ownWait : aggregate.take(identity.aggregate, BUILD_REQUEST_WEIGHT, at);
       if (clientWait > 0) return limited(clientWait, "Too many requests from this client.");
 
-      const body = await readBodyCapped(request, MAX_BUILD_REQUEST_BYTES);
+      const body = await readBodyCapped(request, maxBodyBytes);
       if (!body.ok) {
         return body.reason === "too_large"
-          ? refuse(413, "payload_too_large", `Request body exceeds ${MAX_BUILD_REQUEST_BYTES} bytes.`)
+          ? refuse(413, "payload_too_large", `Request body exceeds ${maxBodyBytes} bytes.`)
           : refuse(400, "bad_request", "The request body could not be read.");
       }
       const fields = parseObject(body.bytes);
@@ -1468,11 +1499,25 @@ async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: S
   if (spent !== null) return spent;
   const snapshot = await readLiveSnapshot(served.pool, { owner, wallets: wallets as string[], discover });
 
-  return json(200, {
+  return json(200, liveSnapshotBody(owner, snapshot, now()));
+}
+
+/**
+ * THE SNAPSHOT'S ANSWER, AS TEXT: exactly the body /api/solana-live sends for
+ * it, bigints as decimal strings. The web's share route reads the same snapshot
+ * and parses this, so the figures it signs go through the very model the Live
+ * page draws from, field for field — never a second, hand-kept mapping.
+ */
+export function liveSnapshotJsonText(owner: string, snapshot: LiveSnapshot, readAtMs: number): string {
+  return JSON.stringify(liveSnapshotBody(owner, snapshot, readAtMs), bigintSafe);
+}
+
+function liveSnapshotBody(owner: string, snapshot: LiveSnapshot, readAtMs: number): Record<string, unknown> {
+  return {
     owner,
     programId: SIP_PROGRAM_ID,
     slot: snapshot.slot,
-    readAtMs: now(),
+    readAtMs,
     vault: readView(snapshot.vaultAddress, snapshot.vault, (vault) => ({
       lamports: vault.lamports,
       rentFloor: vault.rentFloor,
@@ -1524,7 +1569,7 @@ async function liveSnapshot(fields: Readonly<Record<string, unknown>>, served: S
               })),
             }
           : { status: "unreadable", items: [] },
-  });
+  };
 }
 
 /**

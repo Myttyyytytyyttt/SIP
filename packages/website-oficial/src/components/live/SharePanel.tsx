@@ -25,11 +25,24 @@
  *   Copy image      a PNG on the clipboard, to paste into any post. Only where a
  *                   browser takes an image there.
  *   Download        always.
- *   Post on X       always: copies the image first where it can, then opens X's
- *                   composer in a new tab with a short line and saverfi.cash. A
+ *   Post on X       always: opens X's composer in a new tab with a short line
+ *                   and a link — the card's own when there is one (below), the
+ *                   site's otherwise — and copies the image where it can. A
  *                   plain link, so no popup blocker can swallow it.
  * A refusal says so in words (copy-button.tsx's rule: silence reads as success).
  * A download says nothing: the browser shows its own.
+ *
+ * THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"). A Live page's
+ * dialog asks the server once, on open (lib/share-link-client.ts), for the card
+ * as the server reads it from the chain and a signed link per background and
+ * unit: saverfi.cash/c/<token>, whose preview on X is this card — nothing to
+ * paste. The dialog ADOPTS the server's card, so the preview, Copy, Download
+ * and the link all show the same figures. While it asks, Post on X waits,
+ * disabled, a few seconds at most (SHARE_LINK_WAIT_MS); refused, off, or too
+ * slow, Post on X shares the site and the image is pasted, as before. The
+ * sample's dialog needs no asking: its links are fixed pages of the sample's
+ * own card (/c/example). The selected picture is asked for once as soon as its
+ * link is known, so X's crawler finds it drawn.
  *
  * THE VIDEO (owner, 10-22: "Vídeo corto MP4"), in its own row, offered only
  * where this browser can make one (share-video.ts videoCaps). Made on request,
@@ -66,6 +79,7 @@ import { useFlash } from "@/hooks/use-flash";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
 import {
+  EXAMPLE_SHARE_LINKS,
   SHARE_BACKGROUNDS,
   SHARE_CARD,
   SHARE_SITE,
@@ -73,25 +87,31 @@ import {
   shareAlt,
   shareCaps,
   shareFileName,
+  shareImagePath,
   shareIntentUrl,
+  shareLinkFor,
   sharePostText,
   unitFor,
   unitsOf,
   type ShareBackground,
   type ShareCardData,
+  type ShareLinkSource,
   type ShareScope,
   type ShareUnit,
 } from "@/lib/live-share";
+import { SHARE_LINK_WAIT_MS, askShareLink, keptShareLink, shareLinkKey, shareLinkUrl, warmShareImage, type ShareLinkState } from "@/lib/share-link-client";
 import { SHARE_PLATES, videoSeconds, type SharePlate } from "@/lib/share-plates";
+import { SHARE_RENDER_VERSION } from "@/lib/share-render-version";
 import { cn } from "@/lib/utils";
 
 /** How long a line under the actions stays. */
 const SAID_MS = 6_000;
 
-type Said = "copied" | "copiedForX" | "copyFailed" | "noCopyForX" | "shareFailed" | "videoShareFailed";
+type Said = "copied" | "copiedForX" | "copiedLinked" | "copyFailed" | "noCopyForX" | "shareFailed" | "videoShareFailed";
 const SAID: Readonly<Record<Said, { readonly good: boolean; readonly words: string }>> = {
   copied: { good: true, words: SHARE_COPY.copied },
   copiedForX: { good: true, words: SHARE_COPY.copiedForX },
+  copiedLinked: { good: true, words: SHARE_COPY.copiedLinked },
   copyFailed: { good: false, words: SHARE_COPY.copyFailed },
   noCopyForX: { good: false, words: SHARE_COPY.noCopyForX },
   shareFailed: { good: false, words: SHARE_COPY.shareFailed },
@@ -421,7 +441,59 @@ export function VideoRow({
   );
 }
 
-export function SharePanel({ card }: { card: ShareCardData }) {
+/**
+ * THE CARD'S LINK FOR THIS DIALOG (lib/share-link-client.ts): the sample's at
+ * once, a Live page's from one POST — taken from what was already asked for
+ * the same figures when there is an answer. Keyed by what the PAGE shows, so
+ * adopting the server's card never asks again.
+ */
+function useShareLink(card: ShareCardData, source: ShareLinkSource | undefined): ShareLinkState {
+  const live = source?.kind === "live" ? source : null;
+  const key = live === null ? (source?.kind ?? "none") : shareLinkKey(live, card);
+  const initial = (): ShareLinkState => {
+    if (source === undefined) return { status: "none" };
+    if (source.kind === "example") return { status: "ready", card: null, links: EXAMPLE_SHARE_LINKS };
+    const kept = keptShareLink(source, card);
+    return kept === undefined ? { status: "pending" } : kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links };
+  };
+  const [state, setState] = useState<ShareLinkState>(initial);
+
+  // Runs again only when the key does: this render's source and card are then exactly the ones the key names.
+  useEffect(() => {
+    const asking = live;
+    if (asking === null) {
+      setState(initial());
+      return;
+    }
+    let current = true;
+    const kept = keptShareLink(asking, card);
+    if (kept !== undefined) {
+      setState(kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links });
+      return;
+    }
+    setState({ status: "pending" });
+    // Never more than a few seconds of a disabled button: then the site's link, and a late answer is still taken.
+    const timer = window.setTimeout(() => {
+      if (current) setState((prev) => (prev.status === "pending" ? { status: "failed" } : prev));
+    }, SHARE_LINK_WAIT_MS);
+    void askShareLink(asking, card).then((answer) => {
+      if (!current) return;
+      window.clearTimeout(timer);
+      setState(answer === null ? { status: "failed" } : { status: "ready", card: answer.card, links: answer.links });
+    });
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps -- the key is the source's and the card's identity
+
+  return state;
+}
+
+export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link?: ShareLinkSource }) {
+  // THE CARD SHOWN IS THE SERVER'S ONCE IT ANSWERS: the figures the link was signed for.
+  const linked = useShareLink(pageCard, link);
+  const card = linked.status === "ready" && linked.card !== null ? linked.card : pageCard;
   const ids = { background: useId(), unit: useId(), xHint: useId() };
   const [background, setBackground] = useState<ShareBackground>(SHARE_BACKGROUNDS[0]);
   const [picked, setPicked] = useState<ShareUnit>(() => defaultUnit(card));
@@ -478,8 +550,14 @@ export function SharePanel({ card }: { card: ShareCardData }) {
   const fileName = shareFileName(card);
   const text = sharePostText(card, unit);
   const plate = SHARE_PLATES[background];
+  // The page this card's link names, for what is shown: its background and unit.
+  const linkPath = linked.status === "ready" ? shareLinkFor(linked.links, background, unit) : null;
+  const postUrl = linkPath === null ? SHARE_SITE : shareLinkUrl(linkPath);
+  useEffect(() => {
+    if (linkPath !== null) warmShareImage(shareImagePath(linkPath, SHARE_RENDER_VERSION));
+  }, [linkPath]);
 
-  function copy(then: "copied" | "copiedForX"): void {
+  function copy(then: "copied" | "copiedForX" | "copiedLinked"): void {
     try {
       // BUILT IN THE CLICK, WITH A PROMISE: Safari takes a ClipboardItem only
       // inside the gesture, and lets its data arrive after it.
@@ -500,7 +578,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
   function shareFile(blob: Blob, name: string, failed: Said): void {
     const file = new File([blob], name, { type: blob.type });
     // The site inside the text: with a file attached, most targets drop a separate `url`.
-    navigator.share({ files: [file], text: `${text} ${SHARE_SITE}` }).then(
+    navigator.share({ files: [file], text: `${text} ${postUrl}` }).then(
       () => undefined,
       (error: unknown) => {
         // Closing the sheet is a choice, not a failure.
@@ -511,10 +589,16 @@ export function SharePanel({ card }: { card: ShareCardData }) {
 
   // The link opens X whatever happens here; this only puts the image where a paste can find it —
   // even while it is still being drawn: the clipboard takes the picture's promise (copy()).
+  // With the card's own link there is nothing to paste: the image is copied as a bonus, and nothing is said where it cannot be.
   function postOnX(): void {
+    if (linkPath !== null) {
+      if (caps.copy) copy("copiedLinked");
+      return;
+    }
     if (caps.copy) copy("copiedForX");
     else say("noCopyForX");
   }
+  const xHint = linkPath !== null ? SHARE_COPY.xHintLinked : linked.status === "pending" ? SHARE_COPY.xHintPending : caps.copy ? SHARE_COPY.xHint : SHARE_COPY.xHintNoCopy;
 
   const drawFailed = main === "failed" || wordsDrawn === "failed";
 
@@ -606,8 +690,8 @@ export function SharePanel({ card }: { card: ShareCardData }) {
               </>
             ) : null}
           </p>
-          <p id={ids.xHint} className="text-muted-foreground" hidden={saying}>
-            {caps.copy ? SHARE_COPY.xHint : SHARE_COPY.xHintNoCopy}
+          <p id={ids.xHint} className="text-muted-foreground" hidden={saying} data-share-x-hint={linkPath !== null ? "linked" : linked.status}>
+            {xHint}
           </p>
         </div>
         {caps.share ? (
@@ -628,12 +712,20 @@ export function SharePanel({ card }: { card: ShareCardData }) {
             <Download aria-hidden />
             {SHARE_COPY.download}
           </Button>
-          <Button asChild className={caps.share ? OUTLINE_UNDER_SM : undefined}>
-            <a href={shareIntentUrl(text)} target="_blank" rel="noopener noreferrer" onClick={postOnX} aria-describedby={ids.xHint} data-share-action="x">
+          {linked.status === "pending" ? (
+            // Waiting for the card's link: a button that says so, not a link to the site that would be posted instead.
+            <Button type="button" disabled className={caps.share ? OUTLINE_UNDER_SM : undefined} aria-describedby={ids.xHint} data-share-action="x">
               <XMark />
               {SHARE_COPY.postOnX}
-            </a>
-          </Button>
+            </Button>
+          ) : (
+            <Button asChild className={caps.share ? OUTLINE_UNDER_SM : undefined}>
+              <a href={shareIntentUrl(text, postUrl)} target="_blank" rel="noopener noreferrer" onClick={postOnX} aria-describedby={ids.xHint} data-share-action="x">
+                <XMark />
+                {SHARE_COPY.postOnX}
+              </a>
+            </Button>
+          )}
         </div>
       </DialogFooter>
     </>

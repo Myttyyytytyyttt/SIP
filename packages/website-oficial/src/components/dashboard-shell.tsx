@@ -539,6 +539,9 @@ function Body({
 
 // ── the view each page renders ───────────────────────────────────────────────
 
+/** The sample's Post on X links to its fixed pages (/c/example), built from the same sample: nobody's pension, nothing signed. */
+const EXAMPLE_LINK = { kind: "example" } as const;
+
 /**
  * The sample: today's components, today's data, one notice over it.
  *
@@ -616,7 +619,7 @@ function MockBody({ load, control, account, current }: { readonly load: Dashboar
                   rule={rule}
                   now={now}
                   trades={trades}
-                  share={<ShareSavings card={exampleShareCardOf({ stats, rule, now })} />}
+                  share={<ShareSavings card={exampleShareCardOf({ stats, rule, now })} link={EXAMPLE_LINK} />}
                   className={PENSION_SLOT}
                 />
               </>

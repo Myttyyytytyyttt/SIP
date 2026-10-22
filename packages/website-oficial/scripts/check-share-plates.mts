@@ -21,7 +21,9 @@
  *   * the MP4: one avc1 track, 1200×630, the registry's codec and frame count,
  *     every frame 1/30 s, and exactly one sync sample — the first, frame 0;
  *   * the WebM is a WebM (its EBML header);
- *   * the still is 2400×1260 and the thumb 600×315 (read from the WebP's header).
+ *   * the still is 2400×1260 and the thumb 600×315 (read from the WebP's header);
+ *   * the link preview's copy of frame 0 (assets/share-og/plates/<name>.jpg,
+ *     components/share-og.tsx) is a JPEG at the card's 1200×630.
  *
  * TO FIX A FAILURE: `pnpm run share:plates --from <checkout>/launch-video/out/share`.
  */
@@ -35,6 +37,22 @@ import { PLATE_SIZE, SHARE_FPS, SHARE_PLATES, STILL_SIZE, THUMB_SIZE } from "../
 import { versionOf } from "./check-clips.mts";
 
 const PUBLIC = fileURLToPath(new URL("../public/", import.meta.url));
+/** The link preview's plates: frame 0 at 1200×630, read at run time by the server (components/share-og.tsx). */
+const OG_PLATES = fileURLToPath(new URL("../assets/share-og/plates/", import.meta.url));
+
+/** A JPEG's size, from its first start-of-frame marker. */
+export function jpegSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 9 < bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    const marker = bytes[at + 1]!;
+    const length = (bytes[at + 2]! << 8) | bytes[at + 3]!;
+    if (marker >= 0xc0 && marker <= 0xc3) return { width: (bytes[at + 7]! << 8) | bytes[at + 8]!, height: (bytes[at + 5]! << 8) | bytes[at + 6]! };
+    at += 2 + length;
+  }
+  return null;
+}
 
 /** A WebP's canvas size, from its RIFF header: lossy (VP8), lossless (VP8L) or extended (VP8X). */
 export function webpSize(bytes: Uint8Array): { width: number; height: number } | null {
@@ -103,6 +121,13 @@ export function plateProblems(): string[] {
       if (got === null) say(`the ${kind} is not a WebP`);
       else if (got.width !== size.width || got.height !== size.height) say(`the ${kind} is ${got.width}×${got.height}, not ${size.width}×${size.height}`);
     }
+    const og = join(OG_PLATES, `${name}.jpg`);
+    if (!existsSync(og)) say(`assets/share-og/plates/${name}.jpg is missing: the link preview has no background`);
+    else {
+      const got = jpegSize(readFileSync(og));
+      if (got === null) say(`assets/share-og/plates/${name}.jpg is not a JPEG`);
+      else if (got.width !== PLATE_SIZE.width || got.height !== PLATE_SIZE.height) say(`assets/share-og/plates/${name}.jpg is ${got.width}×${got.height}, not ${PLATE_SIZE.width}×${PLATE_SIZE.height}`);
+    }
   }
   return problems;
 }
@@ -111,7 +136,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   console.log("[web] the share card's plates");
   const problems = plateProblems();
   for (const problem of problems) console.log(`  FAIL  ${problem}`);
-  if (problems.length === 0) console.log(`  ok    ${Object.keys(SHARE_PLATES).length} plates: every file in public/ at its version, one keyframe a loop, the registry's frame counts`);
+  if (problems.length === 0) console.log(`  ok    ${Object.keys(SHARE_PLATES).length} plates: every file in public/ at its version, one keyframe a loop, the registry's frame counts, and the link preview's frame 0`);
   console.log(problems.length === 0 ? "[web] plates check passed\n" : `[web] plates check: ${problems.length} FAILED\n`);
   if (problems.length > 0) process.exit(1);
 }

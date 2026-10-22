@@ -9,15 +9,21 @@
  * is in, which unit it can show, how a long figure fits, what the rows say,
  * what the post says — is here, and is tested in node.
  *
- * DRAWN IN THE BROWSER, NEVER BY A ROUTE. No server endpoint renders a card from
- * figures in a URL: one would let anybody mint a "SaverFi" card with any number
- * on our own domain. The person's browser draws the image from the figures it
- * was shown, and the image goes nowhere until they post it.
+ * DRAWN IN THE BROWSER — AND BY ONE ROUTE, ONLY FROM FIGURES THE SERVER SIGNED
+ * (owner, 10-22: Post on X posts a link, and X shows the card under it). The
+ * dialog's image is still drawn by the person's browser (share-canvas.ts). The
+ * link's preview is drawn by /c/<token>/card.png (components/share-og.tsx), and
+ * the token is the reason that is safe: the route that makes it (/api/share,
+ * lib/share-server.ts) reads the figures from the chain itself and signs them,
+ * and the image route draws nothing it cannot verify. No endpoint draws a figure
+ * a URL merely states — that would let anybody mint a "SaverFi" card with any
+ * number on our own domain.
  *
  * NO ADDRESS, WALLET OR NAME (owner, 10-22): ShareCardData has no field for a
- * vault, a wallet, an owner or a handle, so no layout can print one. Image only
- * for now — no referral and no personal link yet; the footer's right side is
- * left empty for that.
+ * vault, a wallet, an owner or a handle, so no layout can print one. And the
+ * link carries none either: its token holds what the card prints and nothing
+ * else (lib/share-token.ts). No referral yet; the footer's right side is left
+ * empty for that.
  *
  * AND NO FIGURE THAT IS A KEY TO THE VAULT (review, 10-22). /leaderboard prints
  * each vault's lifetime SOL to four places beside its address, and the first
@@ -115,7 +121,30 @@ export interface ShareCardData {
   readonly example: boolean;
 }
 
-type CardInput = { readonly stats: SavingsStats; readonly rule: SavingsRule; readonly now: string };
+/**
+ * WHAT A CARD IS MADE FROM: just the fields it reads — the hero's dollars, the
+ * month, the streak, the rule and its basket, the day. Narrow on purpose, so
+ * the share route can hand over its own figures (live-figures.ts shareInputOf)
+ * without inventing a whole SavingsStats.
+ */
+export interface ShareCardInput {
+  readonly stats: Pick<SavingsStats, "totalSavedUsd" | "firstSaveAt" | "currentStreakDays">;
+  readonly rule: Pick<SavingsRule, "rateBps" | "mode" | "paused" | "targetsNote"> & { readonly targets: readonly Pick<SavingsRule["targets"][number], "symbol" | "weightBps">[] };
+  readonly now: string;
+}
+type CardInput = ShareCardInput;
+
+/**
+ * THE LONGEST STREAK A CARD STATES EXACTLY: 45 days, then "45+". The server
+ * proves a streak one settlement per day (live-figures.ts), and reading 45
+ * transactions is what one client's bucket can pay for in a request (3 + 1 +
+ * 45 of its 60 a minute). So both cards stop counting there, the browser's and
+ * the server's, and say "45+" — true of any longer run.
+ */
+export const SHARE_STREAK_CAP = 45;
+
+/** "13", or "45+" at the cap (SHARE_STREAK_CAP). */
+export const streakText = (days: number): string => (days >= SHARE_STREAK_CAP ? `${SHARE_STREAK_CAP}+` : String(days));
 
 /** A dollar total as the card prints it — A POSITIVE AMOUNT NEVER READS AS ZERO (amounts.ts formatSolAtMost's rule, for the dollar). */
 const dollarsOf = (dollars: number | null): Pick<ShareCardData, "usdText" | "usdCompact"> => ({
@@ -129,7 +158,7 @@ const ruleOf = ({ stats, rule, now }: CardInput): Pick<ShareCardData, "rate" | "
   mode: rule.mode ?? "volume",
   paused: rule.paused,
   since: stats.firstSaveAt ? monthLabel(stats.firstSaveAt) : null,
-  streakDays: stats.currentStreakDays,
+  streakDays: stats.currentStreakDays === null ? null : Math.min(stats.currentStreakDays, SHARE_STREAK_CAP),
   // A basket the page qualifies (unread, or chosen and not approved yet) is not stated on an image.
   basket: rule.targetsNote === undefined ? [...rule.targets].sort((a, b) => b.weightBps - a.weightBps).map((target) => target.symbol) : [],
   asOf: dateLabel(now),
@@ -236,11 +265,111 @@ export function shareRows(card: ShareCardData): readonly ShareRow[] {
   const rows: ShareRow[] = [];
   if (card.state === "saved") {
     rows.push(card.paused ? { label: SHARE_COPY.card.rule, value: ruleLine(card), after: ` · ${SHARE_COPY.card.paused}` } : { label: SHARE_COPY.card.savingNow, value: ruleLine(card) });
-    if (card.streakDays !== null && card.streakDays >= 2) rows.push({ label: SHARE_COPY.card.streak, value: SHARE_COPY.card.streakDays(card.streakDays) });
+    if (card.streakDays !== null && card.streakDays >= 2) rows.push({ label: SHARE_COPY.card.streak, value: SHARE_COPY.card.streakDays(streakText(card.streakDays)) });
   }
   if (card.basket.length > 0) rows.push({ label: SHARE_COPY.card.investsIn, value: basketLine(card.basket) });
   return rows;
 }
+
+// ── the layout both renderers draw ───────────────────────────────────────────
+
+/**
+ * THE CARD'S INKS. The quietest text is 55 % white (about 6:1 on the ground):
+ * 40 % was about 3.8:1, and at a phone's timeline width — the card ~300 px wide
+ * — the date all but went (review, 10-22).
+ */
+export const SHARE_INK = {
+  ground: "#0A0B11",
+  fg: "#FAFAFA",
+  fg55: "rgba(255,255,255,0.55)",
+  fg10: "rgba(255,255,255,0.10)",
+  /** emerald-400: the app's "saved". */
+  emerald: "#34d399",
+  /** emerald-950: the figure on the block, ~11:1 on emerald-400. */
+  ink: "#022c22",
+  /** The unit beside a SOL figure, on the block. */
+  unitInk: "rgba(2,44,34,0.72)",
+  /** The block: a gradient corner to corner, its glow, and the light on its top half. */
+  blockFrom: "#3fe0a8",
+  blockTo: "#10b981",
+  glow: "rgba(16,185,129,0.45)",
+  lit: "rgba(255,255,255,0.22)",
+} as const;
+
+/**
+ * THE CARD'S GEOMETRY, IN ITS LOGICAL 1200×630 — ONE COPY FOR TWO RENDERERS:
+ * the browser's canvas (live/share-canvas.ts) and the link's preview
+ * (components/share-og.tsx). Every y is a text BASELINE, as a canvas draws it;
+ * the preview turns each into a box from the font's own metrics.
+ *
+ * TOP TO BOTTOM (owner, 10-22: no label over the figure, no note under it).
+ * The lockup at the top — the S and the name on the left, the day on the right,
+ * and on the sample the "Example" pill in the corner with the day beside it.
+ * The title and the figure are one group — the title is the figure's label
+ * now — centred between the lockup (bottom at 86) and the tallest stack of rows
+ * (three, their top at ~443): the title's baseline at 186, the block's middle
+ * at 300. A smaller step shrinks the block about that middle, so nothing else
+ * moves. The rows are anchored to the footer: the last one's baseline is
+ * always 534. The footer's right side is left empty on purpose — a referral
+ * link goes there later.
+ */
+export const SHARE_LAYOUT = {
+  pad: 64,
+  lockup: { markTop: 52, markHeight: 34, markGap: 12, brandSize: 30, brandTracking: -0.6, brandBaseline: 79.5, daySize: 18, dayBaseline: 75.5, dayGap: 20 },
+  /**
+   * THE "Example" PILL, at the top-right corner of the sample's card: the docs
+   * clips' label — a quiet capsule, an info ring, the word — set larger than
+   * anything else up there. Where a phone's timeline shows the card ~350 px
+   * wide its 28 px word is ~8 px, where the day beside it is ~5 px.
+   */
+  pill: { height: 52, text: 28, icon: 26, padLeft: 15, gap: 10, padRight: 22, ground: "rgba(14,15,21,0.86)", wash: "rgba(255,255,255,0.06)", ring: "rgba(255,255,255,0.18)", shadow: "rgba(0,0,0,0.35)" },
+  title: { baseline: 186, size: 44, tracking: -0.9, sinceGap: 16, sinceSize: 26 },
+  band: { mid: 300, radius: 18, height: 1.25, glowBlur: 28 },
+  /** A card with nothing saved: the rate on the block, and two lines beside it — the first 6 above the middle, the second 34 below. */
+  zero: { size: 32, tracking: -0.5, gap: 28, line1: -6, line2: 34 },
+  rows: { last: 534, step: 38, size: 21, valueX: 150 },
+  footer: { ruleY: 562, baseline: 594, size: 19, gap: 20 },
+} as const;
+
+/**
+ * THE ZERO CARD'S TWO LINES, MEASURED: Geist 500 at 32 px, -0.5 px tracking,
+ * the larger of two measures (10-22), rounded up — Chrome's canvas, which
+ * kerns ("of every buy and sell," 304.7 px), and the font's own advances,
+ * which is how the preview sets them (Satori does not kern: 311). Pinned
+ * rather than measured at draw time so the browser and the preview choose the
+ * SAME step for the rate (fitHero), and the larger so the lines end inside the
+ * plates' still zone in both. live-share.test.ts fails when a line is added or
+ * reworded without its width here.
+ */
+export const ZERO_LINE_WIDTHS: Readonly<Record<string, number>> = {
+  "of my trading gains,": 290,
+  "of every buy and sell,": 311,
+  "of trading gains,": 238,
+  "put aside for later.": 269,
+  "paused for now.": 236,
+};
+
+/** The two lines beside a zero card's rate: what the rule measures, and whether anything is put aside. */
+export function zeroLines(card: ShareCardData): readonly [string, string] {
+  const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
+  return [own.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
+}
+
+/** What stands beside a zero card's block: the gap and the longer line (ZERO_LINE_WIDTHS). */
+export function zeroBeside(card: ShareCardData): number {
+  const widths = zeroLines(card).map((line) => ZERO_LINE_WIDTHS[line]);
+  if (widths.some((width) => width === undefined)) throw new Error("a zero card's line has no measured width (ZERO_LINE_WIDTHS)");
+  return SHARE_LAYOUT.zero.gap + Math.max(...(widths as number[]));
+}
+
+/** The block's height and top at a step: 1.25 × the figure, centred on the band's middle. */
+export const blockBox = (size: number): { readonly top: number; readonly height: number } => {
+  const height = Math.round(size * SHARE_LAYOUT.band.height);
+  return { top: SHARE_LAYOUT.band.mid - height / 2, height };
+};
+
+/** Each row's baseline: the last one's is always SHARE_LAYOUT.rows.last. */
+export const rowBaseline = (index: number, count: number): number => SHARE_LAYOUT.rows.last - SHARE_LAYOUT.rows.step * (count - 1 - index);
 
 // ── the hero's fit ───────────────────────────────────────────────────────────
 
@@ -324,8 +453,47 @@ export function shareWords(card: ShareCardData): { readonly trigger: string; rea
   return { trigger, triggerTip, title, description };
 }
 
-/** X's composer, with the words and the site. Opened in a new tab; nothing is posted until the person posts it. */
-export const shareIntentUrl = (text: string): string => `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(SHARE_SITE)}`;
+/**
+ * X's composer, with the words and a link: the card's own (/c/<token>, whose
+ * preview X shows as the card) when the server signed one, the site's
+ * otherwise. Opened in a new tab; nothing is posted until the person posts it.
+ */
+export const shareIntentUrl = (text: string, url: string = SHARE_SITE): string => `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(url)}`;
+
+// ── the card's link (owner, 10-22: "Enlace con vista previa") ───────────────
+
+/**
+ * THE LINKS OF ONE CARD, by background and unit: paths on this site, "/c/<token>".
+ * A unit the card cannot show has none; a card with nothing saved has no unit,
+ * and both name its one link.
+ */
+export type ShareLinks = Readonly<Record<ShareBackground, Readonly<Partial<Record<ShareUnit, string>>>>>;
+
+/**
+ * WHERE A DIALOG'S LINKS COME FROM. A Live page's: the server, asked once per
+ * open with the pension key and the streak's proof (live-figures.ts
+ * streakProofOf) — the key names whose figures to read and goes nowhere else.
+ * The sample's: fixed pages, signed by nobody, because the sample's figures are
+ * nobody's (/c/example, marked Example like its image). No source, no link:
+ * Post on X shares the site and the image is pasted, as before.
+ */
+export type ShareLinkSource = { readonly kind: "live"; readonly owner: string; readonly proof: readonly string[] } | { readonly kind: "example" };
+
+/** The sample's pages, one per background, dollars only — the image the dialog shows. Built at build time from the sample (app/c/example). */
+export const EXAMPLE_SHARE_LINKS: ShareLinks = {
+  grid: { usd: "/c/example" },
+  streaks: { usd: "/c/example/streaks" },
+  vault: { usd: "/c/example/vault" },
+};
+
+/** The link for what the dialog shows: its background, its unit — or, with nothing saved, whichever unit names it. */
+export function shareLinkFor(links: ShareLinks, background: ShareBackground, unit: ShareUnit): string | null {
+  const each = links[background];
+  return each[unit] ?? each.usd ?? each.sol ?? null;
+}
+
+/** A card page's own picture: its path, then card.png at the renderer's version (lib/share-render-version.ts). */
+export const shareImagePath = (page: string, version: string): string => `${page}/card.png?v=${version}`;
 
 /**
  * "saverfi-pension-2026-10-22.png", or ".mp4" for the video: the day, and

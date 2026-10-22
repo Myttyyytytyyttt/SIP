@@ -1019,6 +1019,19 @@ export const SHARE_COPY = {
    */
   xHint: "Post on X copies the image first: paste it into your post.",
   xHintNoCopy: "To post on X, download the image, then attach it to your post.",
+  /**
+   * WITH THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"): the post
+   * carries a link to this card, and X shows the card under it — nothing to
+   * paste. Said before the click, like the hints above. Where the clipboard
+   * takes an image it is copied too, and that is said after the click
+   * (copiedLinked): the hint sits beside four buttons at 1440 and wrapped to
+   * three lines with one clause more (measured 10-22). What the link does not
+   * carry is the token's rule (lib/share-token.ts), and the dialog's
+   * description already says the card has no address.
+   */
+  xHintLinked: "Post on X adds a link that shows this card.",
+  /** While the server signs the link: Post on X waits for it — a second or two, never more than a few. */
+  xHintPending: "Getting this card’s link for X…",
   /** The dialog's own code did not arrive (a dropped connection, a new deploy): said in the frame. Only a reload fetches it again. */
   loadFailed: "This did not load. Reload the page to try again.",
   reload: "Reload",
@@ -1026,6 +1039,8 @@ export const SHARE_COPY = {
   // ── what an action says it did — a refusal says so, silence reads as success
   copied: "Image copied. Paste it into your post.",
   copiedForX: "Image copied. Paste it into your post on X.",
+  /** Post on X with the card's link, where the image was copied as well. */
+  copiedLinked: "Image copied too. X shows the card from the link.",
   copyFailed: "This browser would not copy the image. Download it instead.",
   /** Post on X where nothing can be copied: X opens, and the image has to be attached by hand. */
   noCopyForX: "Download the image, then attach it to your post on X.",
@@ -1081,10 +1096,40 @@ export const SHARE_COPY = {
     measureMine: { profit: "of my trading gains", volume: "of every buy and sell" },
     paused: "paused",
     streak: "Streak",
-    streakDays: (days: number): string => `${days} days in a row`,
+    /** "13 days in a row", "45+ days in a row" — the count as live-share.ts streakText writes it. */
+    streakDays: (days: string): string => `${days} days in a row`,
     investsIn: "Invests in",
     site: "saverfi.cash",
     tagline: "A pension that builds itself, on Solana",
+  },
+
+  // ── the card's own page, /c/<token>, and its preview (owner, 10-22) ──────
+  /**
+   * WHAT THE LINK'S PAGE AND ITS PREVIEW SAY, around the card: in the third
+   * person — whoever opens it is not the person who saved — and only what the
+   * card already prints. The page is not indexed (it is one person's moment,
+   * and its figures are dated); its links are followed.
+   */
+  page: {
+    /** "$2,073.42 saved for a pension — SaverFi": the preview's headline. */
+    title: (figure: string): string => `${figure} saved for a pension — ${BRAND}`,
+    /** A card with nothing saved yet: the rule is its news — or, paused, nothing is put aside and the title claims no rule. */
+    titleZero: (rule: string): string => `${rule}, put aside for a pension — ${BRAND}`,
+    titleZeroPaused: `Building a pension — ${BRAND}`,
+    description: `${BRAND} builds you a pension from your Solana trading: a slice of every trade, put aside for later in a vault only your wallet can open.`,
+    /** Under the card: where the figures came from, and when. */
+    readOn: (day: string): string => `Read from Solana by ${BRAND} on ${day}.`,
+    start: "Start your pension",
+    docs: "How it works",
+    /** The image's description, for a screen reader and for a preview that shows none. */
+    alt: (figure: string): string => `A ${BRAND} pension: ${figure} saved`,
+    altZero: (rule: string): string => `A ${BRAND} pension: ${rule}, put aside for later`,
+    /** The sample's page: nobody's pension, and it says so wherever the card's figures appear. */
+    example: {
+      title: `Example pension — ${BRAND}`,
+      readOn: `An example made from ${BRAND}’s sample: nobody’s pension.`,
+      alt: (figure: string): string => `Example ${BRAND} image, nobody’s pension: ${figure} saved`,
+    },
   },
 
   // ── the sample's card (owner, 10-22: "en el mock también puede aparecer pero con los datos del mock claro")

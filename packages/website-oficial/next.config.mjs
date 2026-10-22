@@ -1,6 +1,19 @@
 import path from "node:path";
 
+import htmlBots from "next/dist/shared/lib/router/utils/html-bots.js";
+
 import { securityHeaders } from "./security-headers.mjs";
+
+/**
+ * THE CRAWLERS THAT GET A SHARED CARD'S METADATA IN <head> (10-22). Next 16
+ * streams the metadata of a page rendered per request — /c/<token> is one —
+ * into <body> for any client outside its list of "HTML-limited" bots, and a
+ * link preview reads <head> only. X, Facebook, LinkedIn, Slack, Discord and
+ * WhatsApp are on Next's list, and Telegram matches it by its "(like
+ * TwitterBot)"; Mastodon's fetcher and Bluesky's (Cardyb) are not. So the list
+ * is Next's own, read from Next, plus those two: a setting here replaces it.
+ */
+export const HTML_LIMITED_BOTS = new RegExp(`${htmlBots.HTML_LIMITED_BOT_UA_RE.source}|Mastodon|Bluesky|Cardyb`, "i");
 
 /**
  * THE DEV-ONLY PRIVY STUB, and the two conditions that gate it.
@@ -70,7 +83,21 @@ const nextConfig = {
         has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
+      // A SHARED CARD'S PAGE IS NOT FOR A SEARCH RESULT (10-22): one person's
+      // dated moment. Its metadata says so too, but metadata streamed into
+      // <body> is not read by every crawler; a header always is. Links followed.
+      { source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] },
     ];
+  },
+
+  htmlLimitedBots: HTML_LIMITED_BOTS,
+
+  // A SHARED CARD'S PICTURE IS DRAWN AT RUN TIME (/c/<token>/card.png) from
+  // files outside public/ — the fonts and the plates' first frames
+  // (components/share-og.tsx). A standalone build carries only what is traced,
+  // and a path read through process.cwd() is not, so the folder is named here.
+  outputFileTracingIncludes: {
+    "/c/[token]/card.png": ["./assets/share-og/**/*"],
   },
 
   // Emits .next/standalone with a self-contained server.js, which is what

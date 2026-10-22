@@ -47,32 +47,40 @@
  * neither (`example` is false on it). The line that used to say "Example
  * numbers. Nobody's pension." under the figure went with every card's note
  * (owner, 10-22: nothing under the money).
+ *
+ * ONE LAYOUT, TWO RENDERERS (10-22). The link's preview draws the same card on
+ * the server (components/share-og.tsx), so every position, size and ink is
+ * SHARE_LAYOUT's and SHARE_INK's (lib/live-share.ts), and the zero card's
+ * lines are measured once (ZERO_LINE_WIDTHS) rather than here: the two pick
+ * the same step for the same figures.
  */
 
 import { MARK_H, MARK_PIECES, MARK_W } from "@/lib/brand-mark";
 import { SHARE_COPY } from "@/lib/live-copy";
-import { SHARE_CARD, SHARE_SCALE, fitHero, heroPadX, heroUnitGap, heroUnitSize, shareHero, shareRows, type ShareBackground, type ShareCardData, type ShareUnit } from "@/lib/live-share";
+import {
+  SHARE_CARD,
+  SHARE_INK as C,
+  SHARE_LAYOUT as L,
+  SHARE_SCALE,
+  blockBox,
+  fitHero,
+  heroPadX,
+  heroUnitGap,
+  heroUnitSize,
+  rowBaseline,
+  shareHero,
+  shareRows,
+  zeroBeside,
+  zeroLines,
+  type ShareBackground,
+  type ShareCardData,
+  type ShareUnit,
+} from "@/lib/live-share";
 import { SHARE_PLATES } from "@/lib/share-plates";
 
 const W = SHARE_CARD.width;
 const H = SHARE_CARD.height;
-const PAD = 64;
-
-/**
- * The card's inks. The quietest text is 55 % white (about 6:1 on the ground):
- * 40 % was about 3.8:1, and at a phone's timeline width — the card ~300 px wide
- * — the date all but went (review, 10-22).
- */
-const C = {
-  ground: "#0A0B11",
-  fg: "#FAFAFA",
-  fg55: "rgba(255,255,255,0.55)",
-  fg10: "rgba(255,255,255,0.10)",
-  /** emerald-400: the app's "saved". */
-  emerald: "#34d399",
-  /** emerald-950: the figure on the block, ~11:1 on emerald-400. */
-  ink: "#022c22",
-} as const;
+const PAD = L.pad;
 
 export interface CardFonts {
   readonly sans: string;
@@ -224,36 +232,30 @@ function markPath(ctx: Ctx, x: number, y: number, height: number): void {
 /** The emerald block the figure sits on: a gradient, a glow, and a lit top edge. */
 function block(ctx: Ctx, scale: number, x: number, y: number, w: number, h: number): void {
   ctx.save();
-  ctx.shadowColor = "rgba(16,185,129,0.45)";
-  ctx.shadowBlur = 28 * scale;
+  ctx.shadowColor = C.glow;
+  ctx.shadowBlur = L.band.glowBlur * scale;
   const fill = ctx.createLinearGradient(x, y, x + w, y + h);
-  fill.addColorStop(0, "#3fe0a8");
-  fill.addColorStop(1, "#10b981");
+  fill.addColorStop(0, C.blockFrom);
+  fill.addColorStop(1, C.blockTo);
   ctx.fillStyle = fill;
   ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 18);
+  ctx.roundRect(x, y, w, h, L.band.radius);
   ctx.fill();
   ctx.restore();
   ctx.save();
   ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 18);
+  ctx.roundRect(x, y, w, h, L.band.radius);
   ctx.clip();
   const lit = ctx.createLinearGradient(0, y, 0, y + h * 0.5);
-  lit.addColorStop(0, "rgba(255,255,255,0.22)");
+  lit.addColorStop(0, C.lit);
   lit.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = lit;
   ctx.fillRect(x, y, w, h * 0.5);
   ctx.restore();
 }
 
-/**
- * THE "Example" PILL, at the top-right corner of the sample's card: the docs
- * clips' label — a quiet capsule, an info ring, the word — set larger than
- * anything else up there. Where a phone's timeline shows the card ~350 px wide
- * its 28 px word is ~8 px, where the day beside it is ~5 px. Centred on the
- * lockup's line; returns its left edge, so the day can stand beside it.
- */
-const PILL = { height: 52, text: 28, icon: 26, padLeft: 15, gap: 10, padRight: 22 } as const;
+/** THE "Example" PILL (SHARE_LAYOUT.pill), centred on the lockup's line; returns its left edge, so the day can stand beside it. */
+const PILL = L.pill;
 
 function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, mid: number): number {
   font(ctx, 500, PILL.text, fonts.sans, "0px");
@@ -263,16 +265,16 @@ function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, m
   const top = mid - PILL.height / 2;
   // A ground of its own first, so the art behind the corner never shows through the word.
   ctx.save();
-  ctx.shadowColor = "rgba(0,0,0,0.35)";
+  ctx.shadowColor = PILL.shadow;
   ctx.shadowBlur = 16 * scale;
-  ctx.fillStyle = "rgba(14,15,21,0.86)";
+  ctx.fillStyle = PILL.ground;
   ctx.beginPath();
   ctx.roundRect(x, top, width, PILL.height, PILL.height / 2);
   ctx.fill();
   ctx.restore();
-  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.fillStyle = PILL.wash;
   ctx.fill();
-  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+  ctx.strokeStyle = PILL.ring;
   ctx.lineWidth = 1.5;
   ctx.stroke();
   // lucide Info, on a 24-unit box.
@@ -293,19 +295,11 @@ function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, m
   return x;
 }
 
-/**
- * THE LAYOUT, TOP TO BOTTOM (owner, 10-22: no label over the figure, no note
- * under it). The title and the figure are one group — the title is the
- * figure's label now — centred between the lockup (bottom at 86) and the
- * tallest stack of rows (three, their top at ~443): the title's baseline at
- * 186, the block's middle at 300. A smaller step shrinks the block about that
- * middle, so nothing else moves. The rows stay anchored to the footer.
- */
-export const TITLE_Y = 186;
-export const BAND_MID = 300;
-/** The rows' last baseline, and the step between rows. */
-export const ROWS_Y = 534;
-const ROW_STEP = 38;
+/** THE LAYOUT, TOP TO BOTTOM: SHARE_LAYOUT (lib/live-share.ts) says why each line is where it is. */
+export const TITLE_Y = L.title.baseline;
+export const BAND_MID = L.band.mid;
+/** The rows' last baseline. */
+export const ROWS_Y = L.rows.last;
 
 export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts): void {
   const { scale } = options;
@@ -315,17 +309,18 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   ctx.textAlign = "left";
 
   // 1. The lockup top-left, the snapshot's day top-right — and on the sample's card, the "Example" pill in the corner, the day beside it.
-  const markH = 34;
-  markPath(ctx, PAD, 52, markH);
+  const { lockup } = L;
+  const markH = lockup.markHeight;
+  markPath(ctx, PAD, lockup.markTop, markH);
   ctx.fillStyle = C.fg;
   ctx.fill();
-  font(ctx, 600, 30, fonts.sans, "-0.6px");
-  ctx.fillText(SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + 12, 79.5);
-  const dayRight = card.example ? examplePill(ctx, fonts, scale, W - PAD, 52 + markH / 2) - 20 : W - PAD;
-  font(ctx, 400, 18, fonts.mono);
+  font(ctx, 600, lockup.brandSize, fonts.sans, `${lockup.brandTracking}px`);
+  ctx.fillText(SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + lockup.markGap, lockup.brandBaseline);
+  const dayRight = card.example ? examplePill(ctx, fonts, scale, W - PAD, lockup.markTop + markH / 2) - lockup.dayGap : W - PAD;
+  font(ctx, 400, lockup.daySize, fonts.mono);
   ctx.fillStyle = C.fg55;
   ctx.textAlign = "right";
-  ctx.fillText(card.asOf, dayRight, 75.5);
+  ctx.fillText(card.asOf, dayRight, lockup.dayBaseline);
   ctx.textAlign = "left";
 
   const hero = shareHero(card, options.unit);
@@ -333,13 +328,13 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
 
   // 2. The title: the figure's label.
-  font(ctx, 500, 44, fonts.sans, "-0.9px");
+  font(ctx, 500, L.title.size, fonts.sans, `${L.title.tracking}px`);
   ctx.fillStyle = C.fg;
   const title = hero === null ? own.titleZero : own.titleSaved;
   ctx.fillText(title, PAD, TITLE_Y);
   if (hero !== null && card.since !== null) {
     const titleWidth = ctx.measureText(title).width;
-    runs(ctx, fonts, PAD + titleWidth + 16, TITLE_Y, SHARE_COPY.card.since(card.since), 26, 400, C.fg55);
+    runs(ctx, fonts, PAD + titleWidth + L.title.sinceGap, TITLE_Y, SHARE_COPY.card.since(card.since), L.title.sinceSize, 400, C.fg55);
   }
 
   // 3. The figure on its block, and nothing under it.
@@ -350,27 +345,23 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
 
   if (hero === null) {
     // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it — and, paused, no claim that anything is put aside.
-    const [line1, line2] = [own.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
-    font(ctx, 500, 32, fonts.sans, "-0.5px");
-    const beside = 28 + Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width);
-    const fit = fitHero([card.rate], null, beside, measure);
-    const h = Math.round(fit.size * 1.25);
-    const top = BAND_MID - h / 2;
+    const [line1, line2] = zeroLines(card);
+    const fit = fitHero([card.rate], null, zeroBeside(card), measure);
+    const { top, height: h } = blockBox(fit.size);
     block(ctx, scale, PAD, top, fit.blockWidth, h);
     font(ctx, 600, fit.size, fonts.mono, `${-0.02 * fit.size}px`);
     ctx.fillStyle = C.ink;
     const cap = ctx.measureText("0").actualBoundingBoxAscent;
     ctx.fillText(fit.text, PAD + heroPadX(fit.size), top + h / 2 + cap / 2);
-    font(ctx, 500, 32, fonts.sans, "-0.5px");
-    const tx = PAD + fit.blockWidth + 28;
+    font(ctx, 500, L.zero.size, fonts.sans, `${L.zero.tracking}px`);
+    const tx = PAD + fit.blockWidth + L.zero.gap;
     ctx.fillStyle = C.fg;
-    ctx.fillText(line1, tx, BAND_MID - 6);
+    ctx.fillText(line1, tx, BAND_MID + L.zero.line1);
     ctx.fillStyle = C.fg55;
-    ctx.fillText(line2, tx, BAND_MID + 34);
+    ctx.fillText(line2, tx, BAND_MID + L.zero.line2);
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, measure);
-    const h = Math.round(fit.size * 1.25);
-    const top = BAND_MID - h / 2;
+    const { top, height: h } = blockBox(fit.size);
     block(ctx, scale, PAD, top, fit.blockWidth, h);
     font(ctx, 600, fit.size, fonts.mono, `${-0.02 * fit.size}px`);
     ctx.fillStyle = C.ink;
@@ -380,31 +371,33 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
     ctx.fillText(fit.text, x, baseline);
     if (hero.unit !== null) {
       font(ctx, 600, heroUnitSize(fit.size), fonts.mono);
-      ctx.fillStyle = "rgba(2,44,34,0.72)";
+      ctx.fillStyle = C.unitInk;
       ctx.fillText(hero.unit, x + fit.numberWidth + heroUnitGap(fit.size), baseline);
     }
   }
 
   // 4. The rows, anchored at the bottom: the last one's baseline is always ROWS_Y.
   const rows = shareRows(card);
+  const { size: rowSize, valueX } = L.rows;
   rows.forEach((row, index) => {
-    const y = ROWS_Y - ROW_STEP * (rows.length - 1 - index);
-    font(ctx, 400, 21, fonts.sans);
+    const y = rowBaseline(index, rows.length);
+    font(ctx, 400, rowSize, fonts.sans);
     ctx.fillStyle = C.fg55;
     ctx.fillText(row.label, PAD, y);
-    const width = runs(ctx, fonts, PAD + 150, y, row.value, 21, 500, C.fg);
-    if (row.after !== undefined) runs(ctx, fonts, PAD + 150 + width, y, row.after, 21, 500, C.fg55);
+    const width = runs(ctx, fonts, PAD + valueX, y, row.value, rowSize, 500, C.fg);
+    if (row.after !== undefined) runs(ctx, fonts, PAD + valueX + width, y, row.after, rowSize, 500, C.fg55);
   });
 
   // 5. The footer: the site and the eyebrow. Its right side is left empty on purpose — a referral link goes there later.
+  const { footer } = L;
   ctx.fillStyle = C.fg10;
-  ctx.fillRect(PAD, 562, W - PAD * 2, 1);
-  font(ctx, 500, 19, fonts.mono);
+  ctx.fillRect(PAD, footer.ruleY, W - PAD * 2, 1);
+  font(ctx, 500, footer.size, fonts.mono);
   ctx.fillStyle = C.emerald;
-  ctx.fillText(SHARE_COPY.card.site, PAD, 594);
+  ctx.fillText(SHARE_COPY.card.site, PAD, footer.baseline);
   const siteWidth = ctx.measureText(SHARE_COPY.card.site).width;
-  font(ctx, 400, 19, fonts.sans);
+  font(ctx, 400, footer.size, fonts.sans);
   ctx.fillStyle = C.fg55;
-  ctx.fillText(SHARE_COPY.card.tagline, PAD + siteWidth + 20, 594);
+  ctx.fillText(SHARE_COPY.card.tagline, PAD + siteWidth + footer.gap, footer.baseline);
   ctx.restore();
 }

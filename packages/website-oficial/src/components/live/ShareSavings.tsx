@@ -59,7 +59,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
-import { shareWords, type ShareCardData } from "@/lib/live-share";
+import { shareWords, type ShareCardData, type ShareLinkSource } from "@/lib/live-share";
 import { cn } from "@/lib/utils";
 
 const loadPanel = () => import("@/components/live/SharePanel");
@@ -108,7 +108,13 @@ export const SHARE_TRIGGER = {
   grey: "bg-muted text-muted-foreground ring-foreground/10",
 } as const;
 
-export function ShareSavings({ card }: { card: ShareCardData }) {
+/**
+ * `link` is where the dialog's Post on X link comes from (owner, 10-22): the
+ * Live page passes its pension key and its streak's proof, the sample passes
+ * "example". It changes nothing on the button — the hero and the sample's
+ * goldens stay as they are — and is only read once the dialog opens.
+ */
+export function ShareSavings({ card, link }: { card: ShareCardData; link?: ShareLinkSource }) {
   const [open, setOpen] = useState(false);
   const saved = card.state === "saved";
   const unknown = card.state === "unknown";
@@ -160,7 +166,7 @@ export function ShareSavings({ card }: { card: ShareCardData }) {
         </DialogHeader>
         <PanelBoundary fallback={<SharePanelFailed />}>
           <Suspense fallback={<SharePreviewFrame drawing />}>
-            <SharePanel card={card} />
+            <SharePanel card={card} {...(link === undefined ? {} : { link })} />
           </Suspense>
         </PanelBoundary>
       </DialogContent>

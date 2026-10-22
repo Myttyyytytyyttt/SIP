@@ -12,10 +12,17 @@ import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import {
+  EXAMPLE_SHARE_LINKS,
   HERO_ROOM,
   HERO_STEPS,
   SHARE_BACKGROUNDS,
   SHARE_SITE,
+  SHARE_STREAK_CAP,
+  ZERO_LINE_WIDTHS,
+  shareLinkFor,
+  streakText,
+  zeroBeside,
+  zeroLines,
   basketLine,
   defaultUnit,
   fitHero,
@@ -263,6 +270,20 @@ describe("a figure fits the card's room", () => {
   });
 });
 
+describe("the zero card's lines are measured once, for both renderers", () => {
+  it("every line a zero card can print has its width — a reworded line fails here until it is measured", () => {
+    for (const example of [false, true]) {
+      for (const mode of ["profit", "volume"] as const) {
+        for (const paused of [false, true]) {
+          const shown = card({ state: "zero", example, mode, paused });
+          for (const line of zeroLines(shown)) expect(ZERO_LINE_WIDTHS[line], line).toBeGreaterThan(100);
+          expect(zeroBeside(shown)).toBe(28 + Math.max(...zeroLines(shown).map((line) => ZERO_LINE_WIDTHS[line]!)));
+        }
+      }
+    }
+  });
+});
+
 describe("the rows", () => {
   it("say the rule as today's, a streak only when it is one, and the basket", () => {
     expect(shareRows(card({ streakDays: 13, basket: ["SPYx", "ANTHROPIC"] }))).toEqual([
@@ -272,6 +293,12 @@ describe("the rows", () => {
     ]);
     expect(shareRows(card({ streakDays: 1 })).map((row) => row.label)).toEqual(["Saving now", "Invests in"]);
     expect(shareRows(card({ streakDays: null, basket: [] })).map((row) => row.label)).toEqual(["Saving now"]);
+  });
+
+  it(`a streak past ${SHARE_STREAK_CAP} days is "${SHARE_STREAK_CAP}+": what the server can prove in one request (live-figures.ts)`, () => {
+    expect(streakText(13)).toBe("13");
+    expect(streakText(SHARE_STREAK_CAP)).toBe(`${SHARE_STREAK_CAP}+`);
+    expect(shareRows(card({ streakDays: SHARE_STREAK_CAP })).find((row) => row.label === "Streak")?.value).toBe(`${SHARE_STREAK_CAP}+ days in a row`);
   });
 
   it("word a volume rule as the vault does, and a paused one as a paused rule — not as saving now", () => {
@@ -304,6 +331,20 @@ describe("what leaves the page", () => {
     expect(url.searchParams.get("text")).toBe(sharePostText(shared, "usd"));
     expect(url.searchParams.get("url")).toBe(SHARE_SITE);
     expect(SHARE_SITE).toBe("https://saverfi.cash");
+  });
+
+  it("with the card's own link, X's composer carries that link instead of the site's (owner, 10-22)", () => {
+    const shared = card({ usdText: "$2,073.42" });
+    const url = new URL(shareIntentUrl(sharePostText(shared, "usd"), "https://saverfi.cash/c/abc.def"));
+    expect(url.searchParams.get("url")).toBe("https://saverfi.cash/c/abc.def");
+    expect(url.searchParams.get("text")).toBe(sharePostText(shared, "usd"));
+  });
+
+  it("the link for what is shown: its background and unit — and a card with nothing saved has one, whatever the unit", () => {
+    const links = { grid: { usd: "/c/g-u", sol: "/c/g-s" }, streaks: { sol: "/c/s-s" }, vault: { usd: "/c/v", sol: "/c/v" } };
+    expect(shareLinkFor(links, "grid", "sol")).toBe("/c/g-s");
+    expect(shareLinkFor(links, "streaks", "usd")).toBe("/c/s-s");
+    expect(shareLinkFor(EXAMPLE_SHARE_LINKS, "vault", "sol")).toBe("/c/example/vault");
   });
 
   it("a paused rule with nothing saved puts nothing aside, and the post and the description say no more", () => {
