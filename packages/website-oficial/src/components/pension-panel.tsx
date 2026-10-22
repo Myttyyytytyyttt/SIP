@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import { CopyButton } from "@/components/copy-button";
 import { Num } from "@/components/num";
 import { PensionChart } from "@/components/pension-chart";
@@ -40,6 +42,7 @@ export function PensionPanel({
   vault,
   trades,
   pulse,
+  share,
   className,
 }: {
   stats: SavingsStats;
@@ -58,6 +61,12 @@ export function PensionPanel({
   unit?: "SOL";
   /** A live page's arrivals: the pill beside the label. Absent on the sample, which keeps its bare label. */
   pulse?: HeroPulse;
+  /**
+   * A live page's share button (live/ShareSavings.tsx, owner 10-22), to the
+   * right of the figure. Absent on the sample, whose figure stands alone: its
+   * markup — and the landing's video, recorded from it — does not change.
+   */
+  share?: ReactNode;
   className?: string;
 }) {
   const savedToday = stats.savedTodayUsd !== null && stats.savedTodayUsd > 0;
@@ -67,6 +76,17 @@ export function PensionPanel({
   // A dollar here is SOL at the one price this page read. Said on the figure,
   // where the question arises, rather than on a line of its own.
   const priced = stats.pricedToday === true ? ACTIVITY_COPY.atTodaysPrice : undefined;
+
+  const figure = (
+    <p
+      className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"
+      // The chain's own figure, in full, and that the dollar is it at one price read now.
+      {...(stats.totalSavedSol === undefined || stats.totalSavedSol === null || priced === undefined ? {} : { title: LIVE_COPY.heroSolAtPrice(stats.totalSavedSol) })}
+    >
+      {/* No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify. */}
+      {stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : usd(stats.totalSavedUsd)}
+    </p>
+  );
 
   // The hero row switches on the card's width, not the viewport's: at lg the page
   // grid can hand this card ~312px while the row needs ~344px. Named, because the
@@ -101,14 +121,20 @@ export function PensionPanel({
               </span>
             </div>
           )}
-          <p
-            className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"
-            // The chain's own figure, in full, and that the dollar is it at one price read now.
-            {...(stats.totalSavedSol === undefined || stats.totalSavedSol === null || priced === undefined ? {} : { title: LIVE_COPY.heroSolAtPrice(stats.totalSavedSol) })}
-          >
-            {/* No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify. */}
-            {stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : usd(stats.totalSavedUsd)}
-          </p>
+          {share === undefined ? (
+            figure
+          ) : (
+            /*
+             * THE SHARE BUTTON ON THE FIGURE'S OWN LINE (owner, 10-22: right of
+             * the number, above the chart). 32 px centred on a 40/48 px line,
+             * so the hero keeps its height; only a figure too wide for a phone
+             * beside it wraps the button under it rather than off the card.
+             */
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3">
+              {figure}
+              {share}
+            </div>
+          )}
           {/*
             THE RULE IS TODAY'S; THE TOTAL IS SINCE THE FIRST SAVE. A vault that
             switched mode (09-25: profit, then volume at 1 %) saved under both,

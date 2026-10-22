@@ -7,7 +7,7 @@
 import { DEFAULT_VAULT_POLICY, VOLUME_MODE_OFFERED } from "@sip/solana-core/client";
 import { describe, expect, it } from "vitest";
 
-import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, START_BUYING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
+import { ACTIVITY_COPY, BRAND, LIVE_COPY, MODE_COPY, ONBOARDING_COPY, SHARE_COPY, START_BUYING_COPY, STATS_COPY, stripTooltip } from "@/lib/live-copy";
 import { SETTINGS_COPY } from "@/lib/settings-copy";
 import { LOSS_DROPPED_AFTER_TXS, OVERVIEW_COPY, VAULT_COPY, ratePercent } from "@/lib/vault-copy";
 
@@ -47,7 +47,8 @@ function everySentence(): string[] {
   };
   // OVERVIEW_COPY lives in vault-copy.ts, but it is the first thing a connected person reads in the
   // Manage wallets modal: it answers to the same name check (WalletsOverview.test.ts holds its jargon).
-  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip, ONBOARDING_COPY, START_BUYING_COPY, OVERVIEW_COPY });
+  // SHARE_COPY is what an image posted to X says: the name check matters most there (10-22).
+  walk({ BRAND, LIVE_COPY, MODE_COPY, ACTIVITY_COPY, STATS_COPY, stripTooltip, ONBOARDING_COPY, START_BUYING_COPY, OVERVIEW_COPY, SHARE_COPY });
   return out;
 }
 

@@ -587,3 +587,39 @@ describe("the header's freshness dot", () => {
     }
   });
 });
+
+/**
+ * THE SHARE BUTTON IS LIVE ONLY (owner, 10-22): beside a connected pension's
+ * figure, and never on the sample — the landing's app-loop video is recorded
+ * from /?mode=mock, and the owner wants no new one.
+ */
+describe("the share button", () => {
+  const BUTTON = /<button[^>]*data-share-savings="([a-z]+)"/g;
+
+  it("is not on the sample", () => {
+    mocked.pathname = "/";
+    mocked.search = new URLSearchParams("mode=mock");
+    const html = render();
+    expect(html).toContain(MOCK_FIGURE);
+    expect([...html.matchAll(BUTTON)]).toEqual([]);
+  });
+
+  it("is beside a connected pension's figure, green while it has savings, and only on the pension view", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    mocked.live = { kind: "ready", data: liveDashboard(), stale: null };
+    mocked.pathname = "/";
+    expect([...render(true, "pension").matchAll(BUTTON)].map((match) => match[1])).toEqual(["saved"]);
+    mocked.pathname = "/activity";
+    expect([...render(true, "activity").matchAll(BUTTON)]).toEqual([]);
+  });
+
+  it("is grey on a pension that has saved nothing yet", () => {
+    mocked.privy = { ready: true, authenticated: true, user: userWith([phantom(), embedded(TRADING_0, 0, true)]) };
+    mocked.search = new URLSearchParams("mode=live");
+    const snapshot = liveSnapshot();
+    mocked.live = { kind: "ready", data: liveDashboard({ snapshot: { ...snapshot, vault: { ...snapshot.vault, state: { ...snapshot.vault.state!, lifetimeSaved: "0" } } } }), stale: null };
+    mocked.pathname = "/";
+    expect([...render().matchAll(BUTTON)].map((match) => match[1])).toEqual(["zero"]);
+  });
+});

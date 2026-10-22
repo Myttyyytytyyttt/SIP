@@ -1,0 +1,120 @@
+"use client";
+
+/**
+ * THE SHARE BUTTON BESIDE THE HERO'S FIGURE (owner, 10-22): "arriba de lo que
+ * es el gráfico, a lado derecho del número de saved so far". It opens a dialog
+ * with an image of the pension to post — GMGN's and Axiom's PnL cards, in
+ * SaverFi's dress (SharePanel.tsx draws it).
+ *
+ * LIVE ONLY. PensionPanel shows it only when a page passes `share`, and only
+ * the Live page does: the sample's hero stands alone, so the landing's app-loop
+ * video — recorded from /?mode=mock — and the sample's goldens do not change
+ * (owner, 10-22: "no grabes nuevo video para landing").
+ *
+ * GREEN WHEN THERE IS SOMETHING TO SHOW, GREY WHEN THERE IS NOT (owner, 10-22:
+ * "si está con savings ya el user el botón está verde y con un pulso verde
+ * disimulado; si no tiene nada dentro, que se ponga gris"):
+ *   saved    emerald, with the page's own halo (.live-halo) breathing out of
+ *            the icon — 20 px growing to 52 px in half its colour, so what
+ *            clears the 32 px button is a faint ring fading out. Under reduced
+ *            motion the halo is not drawn at all (globals.css): a still green
+ *            button.
+ *   zero     grey, no halo, and it still opens: the card then states the rule.
+ *   unknown  grey and off: the total could not be read, and a card of it would
+ *            be a guess. Off by aria-disabled rather than `disabled`, so its
+ *            tooltip can still say why.
+ *
+ * THE BUTTON DOES NOT MOVE THE HERO: 32 px, centred on the figure's 40/48 px
+ * line (measured at 375, 768, 1024 and 1440: the line keeps the figure's height).
+ *
+ * THE DIALOG'S CODE ARRIVES ON FIRST OPEN (SharePanel.tsx, with the canvas):
+ * the Live page's first load does not carry it, and a pointer resting on the
+ * button starts fetching it.
+ */
+
+import { Share } from "lucide-react";
+import { Suspense, lazy, useState } from "react";
+
+import { SharePreviewFrame } from "@/components/live/share-frame";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { SAVED } from "@/lib/classes";
+import { SHARE_COPY } from "@/lib/live-copy";
+import type { ShareCardData } from "@/lib/live-share";
+import { cn } from "@/lib/utils";
+
+const loadPanel = () => import("@/components/live/SharePanel");
+const SharePanel = lazy(() => loadPanel().then((module) => ({ default: module.SharePanel })));
+
+/** Fetch the dialog's code ahead of the click. A failure here is retried by the click itself. */
+const prefetch = (): void => {
+  loadPanel().catch(() => undefined);
+};
+
+/** The trigger's look in each state: the round button, and the icon's own colour. */
+export const SHARE_TRIGGER = {
+  saved: cn(
+    "bg-emerald-500/12 ring-emerald-500/35 hover:bg-emerald-500/20 aria-expanded:bg-emerald-500/20 dark:hover:bg-emerald-500/20",
+    SAVED,
+    "hover:text-emerald-700 aria-expanded:text-emerald-700 dark:hover:text-emerald-400 dark:aria-expanded:text-emerald-400",
+  ),
+  grey: "bg-muted text-muted-foreground ring-foreground/10",
+} as const;
+
+export function ShareSavings({ card }: { card: ShareCardData }) {
+  const [open, setOpen] = useState(false);
+  const saved = card.state === "saved";
+  const unknown = card.state === "unknown";
+
+  const button = (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      aria-label={SHARE_COPY.trigger}
+      data-share-savings={card.state}
+      {...(unknown ? { "aria-disabled": true } : {})}
+      className={cn("shrink-0 rounded-full ring-1 ring-inset", saved ? SHARE_TRIGGER.saved : SHARE_TRIGGER.grey, unknown && "cursor-not-allowed opacity-50 hover:bg-muted")}
+      onPointerEnter={unknown ? undefined : prefetch}
+      onFocus={unknown ? undefined : prefetch}
+    >
+      {/* The halo's box: .live-halo fills its parent (inset 0, unlayered, so no utility can shrink it), and 20 px × 2.6 is the pulse's reach. */}
+      <span aria-hidden className="relative flex size-5 items-center justify-center">
+        {/* The page's own halo, in half its colour: the "pulso verde disimulado". Not a class on the button (globals.test.ts). */}
+        {saved ? <span className="live-halo pointer-events-none text-emerald-500/50" data-share-halo="" /> : null}
+        <Share className="relative size-4" />
+      </span>
+    </Button>
+  );
+
+  if (unknown) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipContent>{SHARE_COPY.triggerUnknown}</TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DialogTrigger asChild>{button}</DialogTrigger>
+        </TooltipTrigger>
+        <TooltipContent>{SHARE_COPY.triggerTip}</TooltipContent>
+      </Tooltip>
+      {/* A 16:9-ish image wants the width: 672 px, scrolling within the screen on a short one. */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{SHARE_COPY.title}</DialogTitle>
+          <DialogDescription>{saved ? SHARE_COPY.description : SHARE_COPY.descriptionZero}</DialogDescription>
+        </DialogHeader>
+        <Suspense fallback={<SharePreviewFrame drawing />}>
+          <SharePanel card={card} />
+        </Suspense>
+      </DialogContent>
+    </Dialog>
+  );
+}

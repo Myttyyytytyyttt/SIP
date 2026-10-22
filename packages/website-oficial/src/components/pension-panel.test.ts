@@ -68,3 +68,33 @@ describe("the hero's pill", () => {
     expect(html).not.toContain("h-4 min-w-0");
   });
 });
+
+/**
+ * THE SHARE SLOT (owner, 10-22; live/ShareSavings.tsx): a live page's share
+ * button on the figure's own line, to its right. The sample passes nothing, and
+ * its hero is byte for byte what it was — sample-golden.test.ts holds the whole
+ * panel, and the landing's video is recorded from it.
+ */
+describe("the share slot", () => {
+  const panel = (share?: Parameters<typeof PensionPanel>[0]["share"]): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(PensionPanel, { stats: mock.stats, curve: mock.curve, holdings: mock.holdings, days: mock.days, rule: mock.rule, now: mock.now, ...(share === undefined ? {} : { share }) }),
+      ),
+    );
+  const FIGURE = /<p class="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"[^>]*>[^<]*<\/p>/;
+
+  it("puts the button right after the figure, on its line", () => {
+    const html = panel(createElement("button", { "data-share-savings": "" }));
+    expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3">${FIGURE.source}<button data-share-savings=""></button></div>`));
+  });
+
+  it("is not there at all without `share`: the sample's figure stands alone", () => {
+    const html = panel();
+    expect(html).toMatch(FIGURE);
+    expect(html).not.toContain("flex-wrap items-center gap-x-3");
+    expect(html).not.toContain("data-share-savings");
+  });
+});

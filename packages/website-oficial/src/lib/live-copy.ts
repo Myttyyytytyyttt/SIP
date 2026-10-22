@@ -963,3 +963,88 @@ export const PENDING_COPY = {
     unknown: `${BRAND} checks about once a minute`,
   },
 } as const;
+
+/**
+ * THE SHARE CARD (owner, 10-22): "Saved $X", an image for X and anywhere else,
+ * from the button beside the hero's figure (live/ShareSavings.tsx), drawn in
+ * the browser (live/share-canvas.ts) from the figures the page already holds.
+ *
+ * AN IMAGE AND NOTHING ELSE, FOR NOW (owner, 10-22): no referral and no link of
+ * the person's own on it yet — that comes later. Dollars by default, SOL on
+ * request. Nothing on it, in its file name or in the post identifies anyone: no
+ * vault, no wallet, no handle. The only address is the site's own.
+ *
+ * IN THE FIRST PERSON ON THE CARD — "My pension" — because it is the owner
+ * who posts it; in the second person in the dialog, which speaks to him.
+ */
+export const SHARE_COPY = {
+  // ── the button beside the figure ─────────────────────────────────────────
+  trigger: "Share your pension",
+  triggerTip: "Share an image of your pension",
+  /** The vault's total could not be read: nothing to draw, and the button says why it is off. */
+  triggerUnknown: "Your savings could not be read yet, so there is nothing to share",
+
+  // ── the dialog ───────────────────────────────────────────────────────────
+  title: "Share your pension",
+  description: "An image of what you’ve saved, ready to post. Nothing on it identifies you or your vault.",
+  /** Nothing saved yet: the card states the rule instead of a zero. */
+  descriptionZero: "An image of your savings rule, ready to post. Nothing on it identifies you or your vault.",
+  background: "Background",
+  backgrounds: { vault: "Vault", streaks: "Streaks", grid: "Grid" },
+  showIn: "Show in",
+  /** No price read: the dollar figure does not exist, and the card shows the chain's SOL. */
+  noPrice: "No SOL price right now, so the image shows SOL.",
+  drawing: "Drawing your image",
+  share: "Share image",
+  copy: "Copy image",
+  copyShort: "Copy",
+  download: "Download",
+  postOnX: "Post on X",
+
+  // ── what an action says it did — a refusal says so, silence reads as success
+  copied: "Image copied. Paste it into your post.",
+  copiedForX: "Image copied. Paste it into your post on X.",
+  copyFailed: "This browser would not copy the image. Download it instead.",
+  /** Post on X where nothing can be copied: X opens, and the image has to be attached by hand. */
+  noCopyForX: "Download the image, then attach it to your post on X.",
+  shareFailed: "That did not share. Download the image instead.",
+  drawFailed: "This browser could not draw the image.",
+
+  // ── the post's text: X adds the site's link after it ─────────────────────
+  post: (figure: string): string => `I’ve saved ${figure} for my pension with ${BRAND} so far.`,
+  postZero: (rule: string): string => `I’m building my pension with ${BRAND}: ${rule}, put aside for later.`,
+  /** The preview's description for a screen reader: what the image says, in a sentence. */
+  alt: (figure: string): string => `Your ${BRAND} image: ${figure} saved for your pension`,
+  altZero: (rule: string): string => `Your ${BRAND} image: ${rule}, put aside for your pension`,
+
+  // ── the card's own words ─────────────────────────────────────────────────
+  card: {
+    brand: BRAND,
+    titleSaved: "My pension",
+    titleZero: "Building my pension",
+    since: (date: string): string => `since ${date}`,
+    labelSaved: "Saved so far",
+    labelZero: "My savings rule",
+    /** Under a dollar figure: the chain's own SOL and what turned it into dollars. */
+    solAtPrice: (sol: string): string => `${sol} SOL, valued at today’s SOL price`,
+    /** Under a SOL figure: the dollars it is worth at the one price read. */
+    usdAtPrice: (usd: string): string => `${usd} at today’s SOL price`,
+    /** Beside the rate on a card with nothing saved yet, the landing's words in the first person. */
+    zeroMeasure: { profit: "of my trading gains,", volume: "of every buy and sell," },
+    zeroAside: "put aside for later.",
+    zeroNote: "Into a pension only I control.",
+    savingNow: "Saving now",
+    /** "20% of trading gains" — the rule is today's, the total is lifetime (pension-panel.tsx, 09-25). */
+    measure: { profit: "of trading gains", volume: "of every buy and sell" },
+    /** The same, in the first person, for the post. */
+    measureMine: { profit: "of my trading gains", volume: "of every buy and sell" },
+    paused: "paused",
+    streak: "Streak",
+    streakDays: (days: number): string => `${days} days in a row`,
+    investsIn: "Invests in",
+    savedSoFar: "Saved so far",
+    nothingYet: "Nothing yet",
+    site: "saverfi.cash",
+    tagline: "A pension that builds itself, on Solana",
+  },
+} as const;

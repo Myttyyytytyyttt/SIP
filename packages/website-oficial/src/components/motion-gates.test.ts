@@ -31,6 +31,8 @@ const GATED = [
   "live/WorkMark.tsx",
   // The first read's glyph (10-09); its blocks are Skeleton's, gated above.
   "live/LiveFirstRead.tsx",
+  // The share image's spinner while it is drawn (10-22).
+  "live/share-frame.tsx",
 ] as const;
 
 /** A class that moves something: a spin, a pulse, an entrance's zoom or slide. */

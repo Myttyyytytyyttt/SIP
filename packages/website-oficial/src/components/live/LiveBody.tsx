@@ -94,6 +94,7 @@ import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, toldBy, usePendingView } from "@/components/live/LivePending";
 import { Reveal } from "@/components/live/Reveal";
+import { ShareSavings } from "@/components/live/ShareSavings";
 import { heardLinesOf } from "@/components/live/heard-lines";
 import { useWriteJudge } from "@/components/live/last-write-context";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
@@ -115,6 +116,7 @@ import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import { pendingLines, pendingSteps } from "@/lib/live-pending";
+import { shareCardOf } from "@/lib/live-share";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 import type { WalletsSection } from "@/lib/wallets-sections";
@@ -257,6 +259,9 @@ export function LiveBody({
   const pulse = { pill: heroPillOf(arrivals.saving, page.trades, data.nowMs), shown: pillShown(arrivals.saving, data.nowMs) };
   // The rule card's: the steps as the rows draw them, and the same arrivals.
   const rulePulse = rulePulseOf({ rows: pending.rows, history: data.rows, arrived: arrivals.arrived });
+  // THE SHARE CARD'S FIGURES (owner, 10-22): the hero's and the rule's, and the
+  // vault's raw counter for whether anything was saved — with or without a price.
+  const shareCard = shareCardOf({ lifetimeSaved: data.vault.lifetimeSaved, stats: page.stats, rule: page.rule, now: page.now });
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -461,6 +466,7 @@ export function LiveBody({
                     now={page.now}
                     trades={page.trades}
                     pulse={pulse}
+                    share={<ShareSavings card={shareCard} />}
                     {...(page.calendar === undefined ? {} : { calendar: page.calendar })}
                     {...(page.vault === undefined ? {} : { vault: page.vault })}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}
