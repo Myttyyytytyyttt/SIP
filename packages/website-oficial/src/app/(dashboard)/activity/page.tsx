@@ -8,9 +8,19 @@
  * own history here too, and ?mode=mock cannot force the sample onto it.
  */
 
+import type { Metadata } from "next";
+
 import { DashboardView } from "@/components/dashboard-shell";
+import { SITE_PAGES, pageMetadata } from "@/lib/seo";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * NOT INDEXED, LINKS FOLLOWED (10-22): a visitor without a wallet is sent on to
+ * the landing, and a connected pension sees its own history. Its own title, so
+ * a tab of it no longer reads as the landing.
+ */
+export const metadata: Metadata = pageMetadata(SITE_PAGES.activity);
 
 export default function ActivityPage() {
   return <DashboardView view="activity" />;

@@ -34,12 +34,11 @@ import { decideGlobalStatsMode } from "@/lib/global-stats-mode";
 import { readSolPriceCached } from "@/lib/global-stats-price";
 import { SAMPLE_USDC_RAW_PER_SOL, sampleGlobalStatsBody } from "@/lib/global-stats-sample";
 import { loadConfig } from "@/lib/load-config";
+import { SITE_PAGES, pageMetadata } from "@/lib/seo";
 import { SESSION_HINT_COOKIE } from "@/lib/session-hint";
 
-export const metadata: Metadata = {
-  title: GLOBAL_STATS_COPY.metaTitle,
-  description: GLOBAL_STATS_COPY.metaDescription,
-};
+/** Indexed (10-22), under GLOBAL_STATS_COPY's title; the sample (?mode=mock) points at the bare address. */
+export const metadata: Metadata = pageMetadata(SITE_PAGES.dashboard);
 
 // Read at request time. The keeper read has its own shared cache (60 s), and so
 // does the SOL price, so a visitor costs a cached read, not an upstream request.

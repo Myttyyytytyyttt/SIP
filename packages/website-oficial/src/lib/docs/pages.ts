@@ -10,49 +10,108 @@
  * renames the other.
  *
  * NO STATUS TAGS (owner, 10-22). Nothing here, and nothing in a page, is marked
- * as live, on the way or an idea: every page is written in the present tense,
- * and /docs goes official only once all of it is true. Until then it is reached
- * by its URL alone: noindex, and the header's and footer's "Docs" links stay "#".
+ * as live, on the way or an idea: every page is written in the present tense.
+ * The docs are public: linked from the header, the footer and the landing, and
+ * indexed by search engines (owner, 10-22, both).
  *
  * EACH PAGE'S BODY IS ITS OWN MODULE, src/app/docs/_content/<slug>.tsx, so the
- * pages can be written independently. The title and the one-line description
- * live here because the sidebar and the metadata need them without the body.
+ * pages can be written independently. The title, the one-line description and
+ * the search engines' description live here because the sidebar and the
+ * metadata need them without the body.
+ *
+ * TWO DESCRIPTIONS, ON PURPOSE. `description` is the line under the title, on
+ * the page. `metaDescription` is only what a search result shows under the
+ * link: whole sentences that name SaverFi and say what the page answers, up to
+ * 160 characters — the page's line is too short for that, and changing it would
+ * change the page. Each one says only what its page says.
  */
 
-type PageInput = { readonly slug: string; readonly title: string; readonly description: string; readonly parent?: string };
+type PageInput = {
+  readonly slug: string;
+  readonly title: string;
+  readonly description: string;
+  readonly metaDescription: string;
+  readonly parent?: string;
+};
 type GroupInput = { readonly title: string; readonly pages: readonly PageInput[] };
 
 const GROUPS = [
   {
     title: "Start here",
     pages: [
-      { slug: "what-is-saverfi", title: "What is SaverFi?", description: "What SaverFi does for you, in one minute." },
-      { slug: "pension-key", title: "Your pension key", description: "The wallet you connect, and why it matters." },
+      {
+        slug: "what-is-saverfi",
+        title: "What is SaverFi?",
+        description: "What SaverFi does for you, in one minute.",
+        metaDescription:
+          "SaverFi builds you a pension from your Solana trading: a slice of each trade, from profit, volume or round-ups, goes to a vault only your wallet can open.",
+      },
+      {
+        slug: "pension-key",
+        title: "Your pension key",
+        description: "The wallet you connect, and why it matters.",
+        metaDescription:
+          "Your pension key is the Solana wallet you connect to SaverFi, such as Phantom. It owns your vault: only it can withdraw or change how you save.",
+      },
     ],
   },
   {
     title: "How saving works",
     pages: [
-      { slug: "saving-from-profit", title: "Saving from your profit", description: "In Profit mode, what exactly is saved." },
-      { slug: "saving-from-volume", title: "Saving from your volume", description: "In Volume mode, what exactly is saved." },
-      { slug: "round-ups", title: "Saving with round-ups", description: "Each trade rounded up, and the difference saved." },
+      {
+        slug: "saving-from-profit",
+        title: "Saving from your profit",
+        description: "In Profit mode, what exactly is saved.",
+        metaDescription:
+          "In Profit mode, SaverFi saves a share of each SOL gain your trading wallet makes, 20 % to start. A loss saves nothing and comes off your next gain.",
+      },
+      {
+        slug: "saving-from-volume",
+        title: "Saving from your volume",
+        description: "In Volume mode, what exactly is saved.",
+        metaDescription:
+          "In Volume mode, SaverFi saves a small share of every buy and every sell your trading wallet makes, win or lose: 2 % to start, measured on the SOL side.",
+      },
+      {
+        slug: "round-ups",
+        title: "Saving with round-ups",
+        description: "Each trade rounded up, and the difference saved.",
+        metaDescription:
+          "With round-ups, SaverFi rounds each trade\u2019s dollar value up to a unit you choose and saves the difference in SOL, up to a daily cap.",
+      },
       {
         slug: "timing-and-limits",
         title: "When savings happen, and their limits",
         description: "How often SaverFi acts, and how much one saving can move.",
+        metaDescription:
+          "SaverFi checks your trading wallets about once a minute. The most one saving moves (0.06 SOL by default), the 0.05 SOL your wallet keeps, and the fee.",
       },
     ],
   },
   {
     title: "Set up",
     pages: [
-      { slug: "create-your-vault", title: "Create your vault", description: "What you need, what you choose, and what it costs." },
-      { slug: "trading-wallets", title: "Trading wallets", description: "Where you trade from, and how to use it in Axiom or GMGN." },
+      {
+        slug: "create-your-vault",
+        title: "Create your vault",
+        description: "What you need, what you choose, and what it costs.",
+        metaDescription:
+          "Create your SaverFi vault in one approval: connect your Solana wallet, choose how you save and your rate, and see the one-off rent before you sign.",
+      },
+      {
+        slug: "trading-wallets",
+        title: "Trading wallets",
+        description: "Where you trade from, and how to use it in Axiom or GMGN.",
+        metaDescription:
+          "SaverFi creates a trading wallet linked to your vault. It watches the wallet, not the app, so trades save wherever you use it: Axiom, GMGN or any app.",
+      },
       // THE ONE SUB-PAGE: indented under its parent in the sidebar, and read straight after it.
       {
         slug: "import-a-wallet",
         title: "Import a wallet you already use",
         description: "Save from a wallet you already trade with.",
+        metaDescription:
+          "Import a Solana wallet you already trade from, in Phantom, Solflare, Axiom, GMGN or a bot, and SaverFi saves from it like a trading wallet it created.",
         parent: "trading-wallets",
       },
     ],
@@ -64,29 +123,75 @@ const GROUPS = [
         slug: "investing",
         title: "Investing your savings",
         description: "What your savings can buy, when, at what price, and what stops it.",
+        metaDescription:
+          "Keep your SaverFi savings in SOL, or buy tokenised stocks: SPYx, which follows an S&P 500 fund, and the ANTHROPIC PreStock, at the live market price.",
       },
     ],
   },
   {
     title: "Day to day",
     pages: [
-      { slug: "dashboard", title: "Reading your dashboard", description: "What the numbers and signals mean." },
-      { slug: "change-settings", title: "Change your settings", description: "Change your rate, your mode or your basket, or pause saving." },
-      { slug: "take-money-out", title: "Take money out", description: "How to withdraw your savings to your own wallet." },
-      { slug: "not-saving", title: "Why isn\u2019t it saving?", description: "What to check when nothing arrives." },
+      {
+        slug: "dashboard",
+        title: "Reading your dashboard",
+        description: "What the numbers and signals mean.",
+        metaDescription:
+          "How to read your SaverFi dashboard: saved so far, pension value, your savings rule, the next investment, and what SaverFi is doing with your savings now.",
+      },
+      {
+        slug: "change-settings",
+        title: "Change your settings",
+        description: "Change your rate, your mode or your basket, or pause saving.",
+        metaDescription:
+          "Change how SaverFi saves for you: Profit, Volume or Round-ups, your rate, what your savings buy, the investment threshold, or pause saving.",
+      },
+      {
+        slug: "take-money-out",
+        title: "Take money out",
+        description: "How to withdraw your savings to your own wallet.",
+        metaDescription:
+          "Withdraw your SaverFi savings at any time: SOL, USDC or your stock tokens go only to your pension key, in one approval. SaverFi never sells your stocks.",
+      },
+      {
+        slug: "not-saving",
+        title: "Why isn\u2019t it saving?",
+        description: "What to check when nothing arrives.",
+        metaDescription:
+          "SaverFi not saving? Usually nothing is owed yet. Check, in order: your mode\u2019s rules, a trading wallet at its 0.05 SOL reserve, or a wallet that needs you.",
+      },
       {
         slug: "public-pages",
         title: "Public pages: leaderboard, stats and prices",
         description: "How SaverFi is doing, and where its prices come from.",
+        metaDescription:
+          "SaverFi\u2019s public pages, no wallet needed: the leaderboard ranking pensions by points, every pension added up, and where each price comes from.",
       },
     ],
   },
   {
     title: "Trust and safety",
     pages: [
-      { slug: "fees", title: "Fees", description: "What SaverFi costs you." },
-      { slug: "who-controls-what", title: "Who controls what", description: "Who can move your money, and what SaverFi\u2019s team can do." },
-      { slug: "risks-and-beta", title: "Risks and beta status", description: "What can go wrong, and how far SaverFi has been proven." },
+      {
+        slug: "fees",
+        title: "Fees",
+        description: "What SaverFi costs you.",
+        metaDescription:
+          "SaverFi takes no fee: all of each saving reaches your vault. What you do pay: Solana network fees, one-off rent, and for some PreStocks their issuer\u2019s fee.",
+      },
+      {
+        slug: "who-controls-what",
+        title: "Who controls what",
+        description: "Who can move your money, and what SaverFi\u2019s team can do.",
+        metaDescription:
+          "Only your pension key can withdraw from your SaverFi vault. What the keeper can and cannot do, and how the team can pause saving but never a withdrawal.",
+      },
+      {
+        slug: "risks-and-beta",
+        title: "Risks and beta status",
+        description: "What can go wrong, and how far SaverFi has been proven.",
+        metaDescription:
+          "SaverFi is in beta. The risks: prices can fall, stock issuers hold power over their tokens, and SaverFi is young. What has been proven on mainnet so far.",
+      },
     ],
   },
 ] as const satisfies readonly GroupInput[];
@@ -97,8 +202,10 @@ export type DocSlug = (typeof GROUPS)[number]["pages"][number]["slug"];
 export type DocPage = {
   readonly slug: DocSlug;
   readonly title: string;
-  /** One sentence: under the title on the page, and the page's meta description. */
+  /** One sentence, under the title on the page. */
   readonly description: string;
+  /** What a search result shows under the link (see the top of this file). Never on the page. */
+  readonly metaDescription: string;
   /** A sub-page names its parent, which must be in the same group, just before it. */
   readonly parent?: DocSlug;
 };
@@ -154,15 +261,18 @@ export function docNeighbours(slug: DocSlug): { readonly previous: DocEntry | nu
   return { previous: DOC_PAGES[at - 1] ?? null, next: at === -1 ? null : (DOC_PAGES[at + 1] ?? null) };
 }
 
-/** "<Page> · SaverFi Docs": the browser tab's title for every page. */
+/**
+ * "<Page> — SaverFi Docs": the browser tab's title and the search result's
+ * headline. The same " — " as every other page of the site (src/lib/seo.ts).
+ */
 export function docTitle(page: DocPage): string {
-  return `${page.title} · SaverFi Docs`;
+  return `${page.title} — SaverFi Docs`;
 }
 
 /**
- * NOT INDEXED, NOT FOLLOWED (owner, 10-22): the docs describe the product as it
- * will be once everything in them is true, and the owner makes them official
- * then. Set on the docs' layout and again on every page, so no page can drop it
- * by setting metadata of its own.
+ * INDEXED AND FOLLOWED (owner, 10-22: "quita el noindex para que salga en
+ * Google"): the docs are public, and they hold most of what the site says
+ * about how SaverFi works. Said on the docs' layout and again on every page, so
+ * a page that sets metadata of its own still says it.
  */
-export const DOCS_ROBOTS = { index: false, follow: false } as const;
+export const DOCS_ROBOTS = { index: true, follow: true } as const;

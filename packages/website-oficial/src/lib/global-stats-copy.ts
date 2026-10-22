@@ -19,8 +19,9 @@ import { BRAND } from "@/lib/live-copy";
 
 export const GLOBAL_STATS_COPY = {
   title: "Dashboard",
-  metaTitle: `Dashboard — ${BRAND}`,
-  metaDescription: `Every ${BRAND} pension added up: what settlements put aside, how often, and what pensions bought. Days are UTC.`,
+  // What a search result shows (10-22): the title says what the page is, the description what it holds.
+  metaTitle: `Dashboard: every pension added up — ${BRAND}`,
+  metaDescription: `Every ${BRAND} pension added up: what settlements put aside on Solana, how often, and which tokenised stocks pensions bought. Figures by UTC day.`,
   subtitle: `Every ${BRAND} pension, added up. Check the numbers and how the protocol is running.`,
   sheet: `Figures for every ${BRAND} pension, added up. Days are UTC.`,
 

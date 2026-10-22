@@ -12,10 +12,9 @@
  * provider for every visitor, and reading the docs needs no wallet. Nothing here
  * imports wallet code.
  *
- * NOT LINKED AND NOT INDEXED YET (owner, 10-22). The docs are written as if
- * everything in them were live, and they go official once it is: until then the
- * header's and footer's "Docs" links stay "#", and every page says noindex,
- * nofollow (DOCS_ROBOTS, set here and again on each page).
+ * LINKED AND INDEXED (owner, 10-22): the header, the footer and the landing
+ * link the first page, and every page says index, follow (DOCS_ROBOTS, set here
+ * and again on each page, with its own canonical address and social card).
  */
 
 import type { Metadata } from "next";

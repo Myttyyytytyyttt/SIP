@@ -24,12 +24,11 @@ import { readUrlMode } from "@/lib/dashboard-mode";
 import { fetchLeaderboard } from "@/lib/leaderboard";
 import { loadConfig } from "@/lib/load-config";
 import { SAMPLE_LEADERBOARD } from "@/lib/leaderboard-sample";
+import { SITE_PAGES, pageMetadata } from "@/lib/seo";
 import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
 
-export const metadata: Metadata = {
-  title: "Leaderboard — SaverFi",
-  description: "Who saves most often on SaverFi. Ranked on use, not on size.",
-};
+/** Indexed (10-22); ?demo=1 and every ?mode= point at the bare address. */
+export const metadata: Metadata = pageMetadata(SITE_PAGES.leaderboard);
 
 // Read at request time. The upstream fetch has its own shared cache, so this
 // costs a cached read rather than a keeper request per visitor.

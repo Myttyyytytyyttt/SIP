@@ -39,6 +39,9 @@ export async function GET(): Promise<Response> {
     headers: {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
+      // NOT A SEARCH RESULT (10-22): /prices/view is the page for that. Said in the header, not in
+      // robots.txt: "Disallow: /prices" would also block /prices/view.
+      "x-robots-tag": "noindex",
     },
   });
 }

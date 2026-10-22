@@ -24,14 +24,13 @@ import { SetupChecklist } from "@/components/wallets/SetupChecklist";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { toSolanaPublicConfig, type ConfigProblem, type SolanaPublicConfig } from "@/lib/config";
 import { loadConfig } from "@/lib/load-config";
+import { SITE_PAGES, pageMetadata } from "@/lib/seo";
 import { isWalletsSection, type WalletsSection } from "@/lib/wallets-sections";
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: "Wallets — SaverFi",
-  description: "Your pension key, your vault, and the trading wallets linked to it.",
-};
+/** NOT INDEXED, LINKS FOLLOWED (10-22): without a wallet the page is "Loading your wallets…" and a way to connect. */
+export const metadata: Metadata = pageMetadata(SITE_PAGES.wallets);
 
 export default async function WalletsPage({
   searchParams,

@@ -48,6 +48,12 @@ variable, and how to obtain it, is described in [`.env.example`](.env.example).
   budgets `SIP_SOLANA_RELAY_PER_MIN`, `SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN`,
   `SIP_SOLANA_RELAY_READS_GLOBAL_PER_MIN`, `SIP_SOLANA_SEND_PER_MIN` and
   `SIP_SOLANA_SEND_GLOBAL_PER_MIN`.
+- **Optional, for search engines:** `SIP_SITE_URL` (the custom domain, an https
+  origin; unset, Vercel's own production domain) and
+  `SIP_GOOGLE_SITE_VERIFICATION` (Search Console's token). Unlike the variables
+  above, both are also baked into the pages built ahead — the docs,
+  `/sitemap.xml`, `/robots.txt`, `/llms.txt` and the social cards — so a change
+  needs a new deployment. [Search engines](#search-engines) says what they feed.
 - **Refused:** every `NUVEM_SOLANA_*` name and the program id SaverFi never talks to;
   `SIP_SOLANA_RELAY_GLOBAL_PER_MIN`; the keeper's secrets
   `SIP_SOLANA_SETTLE_KEY`, `SIP_SOLANA_PRIVY_APP_SECRET` and
@@ -64,6 +70,22 @@ variable, and how to obtain it, is described in [`.env.example`](.env.example).
 A problem never breaks a page. Connect and `/wallets` show the setup checklist,
 which names each variable and never its value, and `/api/solana-rpc` and
 `/api/solana-tx` answer 503 with no detail. `/api/health` stays 200.
+
+## Search engines
+
+What Google and other crawlers are told is one list, `SITE_PAGES` in
+[`src/lib/seo.ts`](src/lib/seo.ts), plus the docs' own index
+([`src/lib/docs/pages.ts`](src/lib/docs/pages.ts)):
+
+- **Indexed**, each under its own canonical address: `/`, `/leaderboard`,
+  `/dashboard`, `/prices/view` and every `/docs/<slug>`. A `?mode=` or `?demo=`
+  variant points at the bare address; `/welcome` points at `/`.
+- **Not indexed, links followed:** `/activity` and `/wallets`. The `/prices` JSON
+  says `X-Robots-Tag: noindex`; `/api/` is closed in `robots.txt`.
+- **Built from it:** `/sitemap.xml`, `/robots.txt` (everything closed on a Vercel
+  preview), `/llms.txt`, the site's social card (`/opengraph-image`) and one per
+  docs page, and the structured data: WebSite, Organization and WebApplication
+  on the landing, a breadcrumb on every docs page.
 
 ## Stack
 

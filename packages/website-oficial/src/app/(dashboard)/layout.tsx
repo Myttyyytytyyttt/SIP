@@ -18,12 +18,16 @@
  */
 
 import { DashboardFrame, type DashboardLoadJson } from "@/components/dashboard-shell";
+import { JsonLd } from "@/components/json-ld";
+import { OnlyAtPath } from "@/components/only-at-path";
 import { WalletsHost } from "@/components/wallets-host";
 import { cookies } from "next/headers";
 
 import { toSolanaPublicConfig } from "@/lib/config";
+import { homeJsonLd } from "@/lib/json-ld";
 import { loadConfig } from "@/lib/load-config";
 import { SESSION_HINT_COOKIE, hasSessionHint } from "@/lib/session-hint";
+import { siteUrl } from "@/lib/site-url";
 import { mock } from "@/mocks";
 
 // The configuration is read at request time, never at build time.
@@ -48,10 +52,18 @@ export default async function DashboardLayout({ children }: { children: React.Re
   const walletsProblems = loaded.ok ? [] : loaded.problems;
 
   return (
-    <WalletsHost config={walletsConfig} problems={walletsProblems}>
-      <DashboardFrame mock={sample} walletsConfigured={walletsConfig !== null} knownSession={knownSession}>
-        {children}
-      </DashboardFrame>
-    </WalletsHost>
+    <>
+      <WalletsHost config={walletsConfig} problems={walletsProblems}>
+        <DashboardFrame mock={sample} walletsConfigured={walletsConfig !== null} knownSession={knownSession}>
+          {children}
+        </DashboardFrame>
+      </WalletsHost>
+      {/* THE LANDING'S STRUCTURED DATA (owner, 10-22: found when someone searches "SaverFi"). Here, beside
+          the frame, because for a visitor the frame draws the landing instead of the page: the page's own
+          output never reaches the HTML. On "/" only — /welcome points at "/" and /activity is not indexed. */}
+      <OnlyAtPath path="/">
+        <JsonLd data={homeJsonLd(siteUrl())} />
+      </OnlyAtPath>
+    </>
   );
 }

@@ -2,7 +2,9 @@
 // right, a clip where one helps — linked from the header, the footer and the
 // landing since 10-22. These hold the owner's list of pages, what every page
 // renders, and his decisions that a writer could undo without noticing: no
-// status tags, noindex, never a broken video. And what makes a page load fast (10-22, measured): the poster asked for
+// status tags, never a broken video, and — since 10-22 ("quita el noindex para
+// que salga en Google") — indexed, each page under its own address, card and
+// search description. And what makes a page load fast (10-22, measured): the poster asked for
 // first, no video byte before the loop plays, every clip's URL versioned by its
 // content so it can be cached for a year.
 
@@ -163,8 +165,8 @@ describe("a docs page", () => {
     }
   });
 
-  it("/docs itself sends the reader to the first page", async () => {
-    expect(await digestOf(() => DocsIndex())).toMatch(/^NEXT_REDIRECT;replace;\/docs\/what-is-saverfi;307;/);
+  it("/docs itself sends the reader to the first page, for good: a 308, so a search engine keeps the page and not /docs", async () => {
+    expect(await digestOf(() => DocsIndex())).toMatch(/^NEXT_REDIRECT;replace;\/docs\/what-is-saverfi;308;/);
   });
 
   it("leads on in reading order: no Previous on the first page, no Next on the last", async () => {
@@ -181,17 +183,51 @@ describe("a docs page", () => {
   });
 });
 
-describe("the docs' metadata", () => {
-  it("keeps the whole tree out of search engines: noindex, nofollow on the layout", () => {
-    expect(layoutMetadata.robots).toEqual({ index: false, follow: false });
+describe("the docs' metadata (owner, 10-22: the docs are public and indexed)", () => {
+  it("lets search engines in on the whole tree: index, follow on the layout", () => {
+    expect(layoutMetadata.robots).toEqual({ index: true, follow: true });
   });
 
-  it.each(SLUGS)("%s is titled '<Page> · SaverFi Docs', described by its line, and noindex too", async (slug) => {
+  it.each(SLUGS)("%s is titled '<Page> — SaverFi Docs', indexed, under its own address, with its search description", async (slug) => {
     const page = DOC_PAGES.find((entry) => entry.slug === slug)!;
     const meta = await generateMetadata(params(slug));
-    expect(meta.title).toBe(`${page.title} · SaverFi Docs`);
-    expect(meta.description).toBe(page.description);
-    expect(meta.robots).toEqual({ index: false, follow: false });
+    expect(meta.title).toBe(`${page.title} — SaverFi Docs`);
+    expect(meta.description).toBe(page.metaDescription);
+    expect(meta.robots).toEqual({ index: true, follow: true });
+    expect(meta.alternates).toEqual({ canonical: `/docs/${slug}` });
+    expect(meta.openGraph).toMatchObject({ title: `${page.title} — SaverFi Docs`, description: page.metaDescription, url: `/docs/${slug}`, siteName: "SaverFi" });
+    expect(meta.twitter).toMatchObject({ card: "summary_large_image", title: `${page.title} — SaverFi Docs` });
+    // NO images key on either: the page's own card (./[slug]/opengraph-image.tsx) is filled in by Next only then.
+    expect(meta.openGraph).not.toHaveProperty("images");
+    expect(meta.twitter).not.toHaveProperty("images");
+  });
+
+  it("gives every page a search description of its own: whole sentences that name SaverFi, short enough not to be cut", () => {
+    for (const page of DOC_PAGES) {
+      expect(page.metaDescription, page.slug).toMatch(/^[A-Z].*[.!?]$/);
+      expect(page.metaDescription, page.slug).toContain("SaverFi");
+      expect(page.metaDescription.length, page.slug).toBeGreaterThanOrEqual(110);
+      expect(page.metaDescription.length, page.slug).toBeLessThanOrEqual(160);
+      // Never the line under the title: that one stays the page's own, and changing it would change the page.
+      expect(page.metaDescription, page.slug).not.toBe(page.description);
+    }
+    expect(new Set(DOC_PAGES.map((page) => page.metaDescription)).size).toBe(DOC_PAGES.length);
+  });
+
+  it("keeps every title within what a search result shows", () => {
+    for (const page of DOC_PAGES) expect(`${page.title} — SaverFi Docs`.length, page.slug).toBeLessThanOrEqual(60);
+  });
+
+  it.each(SLUGS)("%s says where it sits, as structured data in its own HTML: SaverFi › Docs › … › the page", async (slug) => {
+    const page = DOC_PAGES.find((entry) => entry.slug === slug)!;
+    const blocks = [...(await renderPage(slug)).matchAll(/<script type="application\/ld\+json">([^<]*)<\/script>/g)].map((match) => JSON.parse(match[1]!));
+    expect(blocks).toHaveLength(1);
+    const [list] = blocks[0]["@graph"];
+    expect(list["@type"]).toBe("BreadcrumbList");
+    const names = list.itemListElement.map((item: { name: string }) => item.name);
+    const parent = page.parent === undefined ? [] : [DOC_PAGES.find((entry) => entry.slug === page.parent)!.title];
+    expect(names).toEqual(slug === "what-is-saverfi" ? ["SaverFi", "Docs"] : ["SaverFi", "Docs", ...parent, page.title]);
+    expect(list.itemListElement.at(-1).item).toMatch(new RegExp(`^https?://[^/]+/docs/${slug}$`));
   });
 });
 
