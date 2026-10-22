@@ -31,7 +31,10 @@
  *
  * THE BUTTON DOES NOT MOVE THE HERO: 32 px, centred on the figure's 40/48 px
  * line, and a figure too long to share its line with it is set one step
- * smaller on a line of the same height (pension-panel.tsx).
+ * smaller on a line of the same height (pension-panel.tsx) — or, in the
+ * header's tight bands, drawn a step smaller where it stands, the button beside
+ * it out of the flow (review, 10-22: the sample's hero grew 32 px at 1424 wide;
+ * HERO_ROW_TIGHT, globals.css).
  *
  * THE DIALOG'S CODE ARRIVES ON FIRST OPEN (SharePanel.tsx, with the canvas):
  * the Live page's first load does not carry it, and a pointer resting on the

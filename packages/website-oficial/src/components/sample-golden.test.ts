@@ -18,7 +18,9 @@
 // (exampleShareCardOf). pension-panel and dashboard-main were re-taken for it,
 // on purpose, and changed by the button's markup alone — the figure's row
 // around it and the button itself; nothing else in the sample moved. The
-// landing's app-loop video was not re-recorded (owner: no new video).
+// landing's app-loop video was not re-recorded (owner: no new video). The row
+// was re-taken once more the same day for its `data-hero-row="tight"` (review:
+// the button wrapped under the figure at some widths; pension-panel.tsx).
 //
 // renderToString, NOT renderToStaticMarkup: the static renderer glues adjacent
 // text nodes together, so splitting one text run into two nodes — which once

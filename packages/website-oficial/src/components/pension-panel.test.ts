@@ -90,7 +90,8 @@ describe("the share slot", () => {
 
   it("puts the button right after the figure, on its line", () => {
     const html = panel(createElement("button", { "data-share-savings": "" }));
-    expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3">${FIGURE.source}<button data-share-savings=""></button></div>`));
+    // The sample's figure: marked for the header's tight bands (below).
+    expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3" data-hero-row="tight">${FIGURE.source}<button data-share-savings=""></button></div>`));
   });
 
   it("is not there at all without `share`: the figure stands alone", () => {
@@ -159,5 +160,59 @@ describe("a long figure beside the share button", () => {
   it("the sample's own figure keeps its full size beside its button: its hero does not move", () => {
     expect(figureOf({})).toContain(`class="${SHORT}"`);
     expect(figureOf({})).toContain(`>${usd(mock.stats.totalSavedUsd)}</p>`);
+  });
+});
+
+/**
+ * THE HEADER'S TIGHT BANDS (review, 10-22; the rule is in globals.css): where
+ * the header's row squeezes the figure's column, a figure that would wrap its
+ * button there is drawn a step smaller by scale and the button stands beside it
+ * out of the flow — so the row says which figures may be. Measured: beside the
+ * sample's stats, with their gain, nine characters wrapped and seven never did;
+ * beside a live page's, which have none, nine never did and ten did.
+ */
+describe("the header's tight bands", () => {
+  const rowOf = (stats: Partial<typeof mock.stats>, share = true): string | null => {
+    const html = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(PensionPanel, {
+          stats: { ...mock.stats, ...stats },
+          curve: mock.curve,
+          holdings: mock.holdings,
+          days: mock.days,
+          rule: mock.rule,
+          now: mock.now,
+          ...(share ? { share: createElement("button", { "data-share-savings": "" }) } : {}),
+        }),
+      ),
+    );
+    return html.match(/<div class="flex min-w-0 flex-wrap items-center gap-x-3"[^>]*>/)?.[0] ?? null;
+  };
+  const TIGHT = '<div class="flex min-w-0 flex-wrap items-center gap-x-3" data-hero-row="tight">';
+  const PLAIN = '<div class="flex min-w-0 flex-wrap items-center gap-x-3">';
+
+  it("marks the sample's own figure, beside stats that carry a gain", () => {
+    expect(mock.stats.unrealizedUsd).not.toBeNull();
+    expect(rowOf({})).toBe(TIGHT);
+  });
+
+  it("leaves a figure that fits beside the button even there: seven characters and fewer beside a gain", () => {
+    expect(rowOf({ totalSavedUsd: 415.7 })).toBe(PLAIN);
+    expect(rowOf({ totalSavedUsd: 4.15 })).toBe(PLAIN);
+  });
+
+  it("beside a live page's stats, with no gain: nine characters fit, ten are marked", () => {
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: 1_142.51 })).toBe(PLAIN);
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: 12_345.67 })).toBe(TIGHT);
+  });
+
+  it("leaves a long figure as it was: it is a step down already", () => {
+    expect(rowOf({ totalSavedUsd: 123_504.57 })).toBe(PLAIN);
+  });
+
+  it("has no row to mark without a button", () => {
+    expect(rowOf({}, false)).toBeNull();
   });
 });

@@ -41,14 +41,36 @@ const HERO_FIGURE_LONG = "font-mono text-3xl leading-10 font-semibold tracking-t
 const HERO_TAIL = { em: 0.6, className: "text-[0.6em] leading-none" } as const;
 /**
  * HOW MANY CHARACTERS SHARE THE FIGURE'S LINE WITH THE SHARE BUTTON (review,
- * 10-22). Measured beside the 32 px button and its 12 px gap: 10 at 1440 —
- * the tightest, the save-days squares beside a 48 px figure — 11 at 768, 12 at
- * 375 and 360. One step down, 14 fit at all of them: every dollar figure under
- * $10M, and — under 100 SOL — the chain's nine-decimal SOL shown when no price
- * was read, which at full size wrapped the button under the figure (and at 1440
- * wrapped itself).
+ * 10-22). Measured on a live page beside the 32 px button and its 12 px gap: 10
+ * at 1440, 11 at 768, 12 at 375 and 360. One step down, 14 fit at all of them:
+ * every dollar figure under $10M, and — under 100 SOL — the chain's nine-decimal
+ * SOL shown when no price was read, which at full size wrapped the button under
+ * the figure (and at 1440 wrapped itself).
+ *
+ * 1440 WAS NOT THE TIGHTEST (review, 10-22): a sweep every 8 px found the
+ * header's tight bands — HERO_ROW_TIGHT — where not even the sample's nine fit.
  */
 const HERO_FITS = 10;
+/**
+ * THE HEADER'S TIGHT BANDS (review, 10-22; the rule is in globals.css). Right
+ * after the panel's header takes one more thing into its row — the stats on
+ * the right at @md, the save-days squares at @2xl — the column on the left is
+ * squeezed to within a button of the figure's own width, and the button wrapped
+ * under a 48 px figure: the hero grew 32 px and the page under it moved, on the
+ * sample at 704–752, 816–848, 1040–1088 and (taller than 860) 1392–1432 px
+ * wide. There the figure is drawn a step smaller by scale — its box, and so the
+ * header, the description and everything below, stays exactly where it was —
+ * and the button stands beside it, out of the flow.
+ *
+ * ONLY A FIGURE THAT WOULD WRAP. Measured at the narrowest a band leaves the
+ * column: 239.7 px beside the sample's stats, whose value carries its gain
+ * ("+$54.03"), where seven characters fit beside the button at full size and
+ * eight do not; 302.5 px beside a live page's, which has no gain to show, where
+ * nine fit and ten do not. A long figure is a step down already, and is left
+ * as it was.
+ */
+const BAND_FITS = { gain: 7, noGain: 9 } as const;
+const HERO_ROW_TIGHT = { "data-hero-row": "tight" } as const;
 
 /** A figure's width in characters of its own size: a Figure tail counts at its step. */
 export function heroWidth(text: string, tailed: boolean): number {
@@ -98,7 +120,10 @@ export function PensionPanel({
    * The share button (live/ShareSavings.tsx, owner 10-22), to the right of the
    * figure: a live page's, and the sample's own (MockBody, the same day: "en el
    * mock también puede aparecer pero con los datos del mock claro"), whose card
-   * is marked as the example. The figure keeps its size and its line beside it.
+   * is marked as the example. The figure keeps its line beside it (HERO_FITS,
+   * HERO_ROW_TIGHT): on the sample, every 4 px from 320 to 1680 wide at 900 and
+   * 800 tall, the hero and everything under it stand where they stood without
+   * the button (measured, 10-22).
    */
   share?: ReactNode;
   className?: string;
@@ -113,8 +138,10 @@ export function PensionPanel({
 
   // No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify.
   const solHero = stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : null;
-  // Beside the share button, a figure too long for the line steps down a size (HERO_FITS). The sample's fits at full size (pension-panel.test.ts).
-  const long = share !== undefined && heroWidth(solHero ?? usd(stats.totalSavedUsd), solHero !== null) > HERO_FITS;
+  // Beside the share button, a figure too long for the line steps down a size (HERO_FITS). The sample's fits at full size — but for the header's tight bands (BAND_FITS).
+  const width = heroWidth(solHero ?? usd(stats.totalSavedUsd), solHero !== null);
+  const long = share !== undefined && width > HERO_FITS;
+  const tight = share !== undefined && !long && width > (stats.unrealizedUsd === null ? BAND_FITS.noGain : BAND_FITS.gain);
   const figure = (
     <p
       className={long ? HERO_FIGURE_LONG : HERO_FIGURE}
@@ -166,11 +193,13 @@ export function PensionPanel({
              * THE SHARE BUTTON ON THE FIGURE'S OWN LINE (owner, 10-22: right of
              * the number, above the chart). 32 px centred on a 40/48 px line,
              * so the hero keeps its height, and a long figure steps down a size
-             * to keep it there (HERO_FITS). Only a figure past even that — 100
-             * SOL or more with no price read, at 1440 or 360 — wraps the button
-             * under it rather than off the card.
+             * to keep it there (HERO_FITS) — in the header's tight bands, a
+             * figure past BAND_FITS too, by scale (HERO_ROW_TIGHT). A figure
+             * past all that — 100 SOL or more with no price read, at 1440 or
+             * 360, and a long one may in a tight band — wraps the button under
+             * it rather than off the card.
              */
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3" {...(tight ? HERO_ROW_TIGHT : {})}>
               {figure}
               {share}
             </div>

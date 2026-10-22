@@ -24,11 +24,13 @@
  * THE NUMBER RULE (the app's <Num>): in a line of words, every number is Geist
  * Mono at the same size; words are Geist.
  *
- * THE SAMPLE'S CARD SAYS "Example" ON ITSELF (owner, 10-22), twice: the docs
- * clips' pill at the top-right corner, the day moved beside it, and the
- * sample's notice under the figure, where a live card says what valued it. A
- * crop that loses the corner still keeps the line under the number. A card of
- * a Live page has neither (`example` is false on it).
+ * THE SAMPLE'S CARD SAYS "Example" ON ITSELF (owner, 10-22), three times: the
+ * docs clips' pill at the top-right corner, the day moved beside it; the title
+ * above the figure, "Example pension" where a pension's card says "My pension"
+ * (review, 10-22: a crop of the title and the figure lost both other marks);
+ * and the sample's notice under the figure, where a live card says what valued
+ * it. Nothing on it says "my" (SHARE_COPY.example.card). A card of a Live page
+ * has none of these (`example` is false on it).
  */
 
 import { MARK_H, MARK_H_LINES, MARK_PIECES, MARK_V_LINES, MARK_W } from "@/lib/brand-mark";
@@ -556,11 +558,13 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   ctx.textAlign = "left";
 
   const hero = shareHero(card, options.unit);
+  // A pension's own words, or — on the sample's card — the example's, which are nobody's.
+  const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
 
   // 2. The title.
   font(ctx, 500, 44, fonts.sans, "-0.9px");
   ctx.fillStyle = C.fg;
-  const title = hero === null ? SHARE_COPY.card.titleZero : SHARE_COPY.card.titleSaved;
+  const title = hero === null ? own.titleZero : own.titleSaved;
   ctx.fillText(title, PAD, TITLE_Y);
   if (hero !== null && card.since !== null) {
     const titleWidth = ctx.measureText(title).width;
@@ -570,7 +574,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   // 3. The hero.
   font(ctx, 600, 15, fonts.sans, "1.8px");
   ctx.fillStyle = C.fg55;
-  ctx.fillText((hero === null ? SHARE_COPY.card.labelZero : SHARE_COPY.card.labelSaved).toUpperCase(), PAD, LABEL_Y);
+  ctx.fillText((hero === null ? own.labelZero : SHARE_COPY.card.labelSaved).toUpperCase(), PAD, LABEL_Y);
 
   const measure = (text: string, size: number, part: "number" | "unit"): number => {
     font(ctx, 600, size, fonts.mono, part === "number" ? `${-0.02 * size}px` : "0px");
@@ -579,7 +583,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
 
   if (hero === null) {
     // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it — and, paused, no claim that anything is put aside.
-    const [line1, line2] = [SHARE_COPY.card.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
+    const [line1, line2] = [own.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
     font(ctx, 500, 32, fonts.sans, "-0.5px");
     const beside = 28 + Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width);
     const fit = fitHero([card.rate], null, beside, measure);

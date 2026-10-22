@@ -1099,5 +1099,18 @@ export const SHARE_COPY = {
     mark: "Example",
     /** Under the figure, where a live card says what valued it: the sample's own notice (MODE_COPY.sample). */
     note: "Example numbers. Nobody’s pension.",
+    /**
+     * THE IMAGE'S OWN WORDS, where a pension's card says "My pension", "My
+     * savings rule" and "of my trading gains" (review, 10-22: the example's
+     * card said "My pension since Jun 2026" right above "Nobody's pension").
+     * The title is the card's largest line and the one a crop keeps with the
+     * figure, so it carries the mark itself; and nothing on it says "my".
+     */
+    card: {
+      titleSaved: "Example pension",
+      titleZero: "Example pension",
+      labelZero: "Savings rule",
+      zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
+    },
   },
 } as const;

@@ -102,3 +102,47 @@ describe("the Example mark", () => {
     }
   });
 });
+
+/**
+ * NOBODY'S PENSION SAYS NO "MY" (review, 10-22): the example's card was titled
+ * "My pension since Jun 2026" right above "Nobody's pension", and a crop of the
+ * title and the figure — the brag, as people post it — kept neither the corner's
+ * pill nor the line under the number. The title now carries the mark itself.
+ */
+describe("the example's own words", () => {
+  const FIRST_PERSON = /\bmy\b|\bI\b|\bI’|\bI'/i;
+  const saved = exampleShareCardOf({ stats: page.stats, rule: page.rule, now: page.now });
+  // Nothing yet: the sample never is, but its card would say so in the same voice.
+  const zero = exampleShareCardOf({ stats: { ...page.stats, totalSavedUsd: 0 }, rule: page.rule, now: page.now });
+  const zeroPaused = exampleShareCardOf({ stats: { ...page.stats, totalSavedUsd: 0 }, rule: { ...page.rule, paused: true }, now: page.now });
+
+  it("says nothing in the first person — saved, nothing yet, paused — every background, both units, in either mode", () => {
+    for (const card of [saved, zero, zeroPaused, { ...saved, mode: "profit" as const }, { ...zero, mode: "profit" as const }]) {
+      const words = paintedOf(card).map((each) => each.text);
+      expect(words.length).toBeGreaterThan(10);
+      expect(words.join("\n")).not.toMatch(FIRST_PERSON);
+    }
+  });
+
+  it("titles the figure as the example's, between the corner and the figure — where a crop of the brag keeps it", () => {
+    for (const background of SHARE_BACKGROUNDS) {
+      const { ctx, painted } = recording();
+      drawShareCard(ctx, saved, { background, unit: "usd", scale: 1 }, FONTS);
+      const title = painted.find((each) => each.text === SHARE_COPY.example.card.titleSaved);
+      const figure = painted.find((each) => each.text === saved.usdText);
+      expect(title?.text).toMatch(/^Example\b/);
+      expect(title!.y).toBeGreaterThan(100);
+      expect(title!.y).toBeLessThan(figure!.y);
+    }
+    const { ctx, painted } = recording();
+    drawShareCard(ctx, zero, { background: "vault", unit: "usd", scale: 1 }, FONTS);
+    expect(painted.map((each) => each.text)).toContain(SHARE_COPY.example.card.titleZero);
+    expect(SHARE_COPY.example.card.titleZero).toMatch(/^Example\b/);
+  });
+
+  it("leaves a pension's card in its own voice", () => {
+    const words = paintedOf(liveCard(60_000_000n)).map((each) => each.text);
+    expect(words).toContain(SHARE_COPY.card.titleSaved);
+    expect(paintedOf(liveCard(0n)).map((each) => each.text)).toContain(SHARE_COPY.card.titleZero);
+  });
+});

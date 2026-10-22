@@ -114,6 +114,44 @@ describe("the sample's entrance", () => {
   });
 });
 
+/**
+ * THE HERO'S TIGHT BANDS (review, 10-22; HERO_ROW_TIGHT in pension-panel.tsx):
+ * where the header squeezes the figure's column to the figure itself, the
+ * figure is drawn smaller by scale and the share button leaves the flow — so
+ * nothing around the figure moves, at any width — and only inside the bands.
+ */
+describe("the hero's tight bands", () => {
+  const TIGHT = ALL.filter((rule) => rule.selector.startsWith('[data-hero-row="tight"]'));
+
+  it("are only ever inside a viewport band and a band of the panel's own width", () => {
+    expect(TIGHT.length).toBeGreaterThan(0);
+    for (const rule of TIGHT) {
+      expect(rule.within.some((at) => at.startsWith("@media")), rule.selector).toBe(true);
+      expect(rule.within.some((at) => at.startsWith("@container panel")), rule.selector).toBe(true);
+    }
+  });
+
+  it("never resize the figure's box — a scale, no font or line height — and take the button out of the flow", () => {
+    const figure = TIGHT.filter((rule) => rule.selector.endsWith("> p"));
+    const button = TIGHT.filter((rule) => rule.selector.endsWith("> button"));
+    expect(figure.length).toBeGreaterThan(0);
+    expect(button.length).toBe(figure.length);
+    for (const rule of figure) {
+      expect(sets(rule.body, "scale")).toBe(true);
+      for (const property of ["font", "font-size", "line-height", "width", "margin"]) expect(sets(rule.body, property), property).toBe(false);
+    }
+    for (const rule of button) expect(rule.body).toMatch(/position\s*:\s*absolute/);
+  });
+
+  it("leave the 36 px figure alone: below sm, and at xl on a short screen (the `short` variant)", () => {
+    for (const rule of TIGHT) {
+      const media = rule.within.find((at) => at.startsWith("@media")) ?? "";
+      if (/width >= 80rem/.test(media)) expect(media).toMatch(/height > 860px/);
+      else expect(media).toMatch(/width >= 40rem\) and \(width < 80rem/);
+    }
+  });
+});
+
 /** globals.css's rise-in block and its reduced-motion block at 4ab56ae, before the live marks arrived. */
 const RISE_IN = `/* THE ENTRANCE: each block rises a few pixels into place as it fades in — a
    slow, small movement, and staggered, so a page arrives rather than appears.
