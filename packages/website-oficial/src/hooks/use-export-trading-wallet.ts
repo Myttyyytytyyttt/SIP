@@ -9,8 +9,9 @@ import { exportTradingWallet, failureText } from "@/lib/trading-wallets";
 
 /**
  * Hand one trading wallet's key to its owner, through Privy's dialog and never this
- * page's DOM: Privy shows the key in an iframe on auth.privy.io, so the page never
- * holds it. Only the owner can export — a signer cannot — and the keeper's policy
+ * page's DOM: Privy's iframe on auth.privy.io copies the key to the clipboard with
+ * its one "Copy key" button, without showing it (its code, read 2026-10-22), so
+ * the page never holds it. Only the owner can export — a signer cannot — and the keeper's policy
  * binds only its signer, so taking the key to Axiom leaves the seat as it was.
  *
  * Ported from the EVM web's ExportWalletButton (968e06c), for Solana.

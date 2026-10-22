@@ -72,6 +72,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { LinkControl } from "@/components/wallets/LinkControl";
+import { TerminalShortcuts } from "@/components/wallets/TerminalShortcuts";
 import { WalletName } from "@/components/wallets/WalletName";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
@@ -208,6 +209,10 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
             {exporter.busy ? <LoaderCircle className="motion-safe:animate-spin" aria-hidden /> : <KeyRound aria-hidden />}
             {exporter.busy ? "Privy dialog open…" : "Export key"}
           </Button>
+        ) : null}
+        {/* The main terminals beside the export: each opens SaverFi's guide to take this wallet there (owner, 10-22). */}
+        {row.listed ? (
+          <TerminalShortcuts address={row.address} walletLabel={row.label} saving={statusKey === "linked"} wsUrl={config.solanaWsUrl} copy={exporter} />
         ) : null}
         {removable && !confirmingRemove && keeper.busy !== "removing" ? (
           <Button type="button" size="sm" variant="ghost" disabled={keeper.busy !== null || keeper.removeBlocked !== null} onClick={() => setConfirmingRemove(true)}>
