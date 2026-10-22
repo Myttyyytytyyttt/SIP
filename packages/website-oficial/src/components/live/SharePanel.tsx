@@ -24,6 +24,11 @@
  * A refusal says so in words (copy-button.tsx's rule: silence reads as success).
  * A download says nothing: the browser shows its own.
  *
+ * WHAT POST ON X DOES IS SAID BEFORE THE CLICK (review, 10-22). X opens in
+ * front, so a "paste it" said after the click lands in the tab left behind, and
+ * the person posts the words without the picture. The line under the actions
+ * says it while nothing else is being said, and the link is described by it.
+ *
  * Dollars by default, SOL on request (owner, 10-22); SOL only, and said, when
  * no price was read. A card with nothing saved has no unit to choose.
  */
@@ -160,7 +165,7 @@ function Thumb({ drawn }: { drawn: Drawn | undefined }) {
 }
 
 export function SharePanel({ card }: { card: ShareCardData }) {
-  const ids = { background: useId(), unit: useId() };
+  const ids = { background: useId(), unit: useId(), xHint: useId() };
   const [background, setBackground] = useState<ShareBackground>("vault");
   const [picked, setPicked] = useState<ShareUnit>(() => defaultUnit(card));
   const unit = unitFor(card, picked);
@@ -235,9 +240,10 @@ export function SharePanel({ card }: { card: ShareCardData }) {
     );
   }
 
-  // The link opens X whatever happens here; this only puts the image where a paste can find it.
+  // The link opens X whatever happens here; this only puts the image where a paste can find it —
+  // even while it is still being drawn: the clipboard takes the picture's promise (copy()).
   function postOnX(): void {
-    if (caps.copy && ready !== null) copy("copiedForX");
+    if (caps.copy) copy("copiedForX");
     else say("noCopyForX");
   }
 
@@ -303,14 +309,24 @@ export function SharePanel({ card }: { card: ShareCardData }) {
       {card.state === "saved" && !units.includes("usd") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.noPrice}</p> : null}
 
       <DialogFooter className="flex-col sm:flex-row sm:items-center">
-        <p role="status" aria-live="polite" className={cn("order-last flex min-h-4 items-center justify-center gap-1.5 text-xs sm:order-first sm:mr-auto sm:justify-start", GOOD[said] ? SAVED : "text-muted-foreground")}>
-          {saying ? (
-            <>
-              {GOOD[said] ? <Check aria-hidden className="size-3.5 shrink-0" /> : <CircleAlert aria-hidden className="size-3.5 shrink-0" />}
-              {SHARE_COPY[said]}
-            </>
-          ) : null}
-        </p>
+        {/*
+          One band, two voices: what an action did — a live region, always in
+          the tree so a screen reader hears what lands in it — and, while it is
+          empty, what Post on X will do.
+        */}
+        <div className="order-last flex min-h-4 items-center justify-center text-center text-xs sm:order-first sm:mr-auto sm:justify-start sm:text-left">
+          <p role="status" aria-live="polite" className={cn("flex items-center gap-1.5", GOOD[said] ? SAVED : "text-muted-foreground")}>
+            {saying ? (
+              <>
+                {GOOD[said] ? <Check aria-hidden className="size-3.5 shrink-0" /> : <CircleAlert aria-hidden className="size-3.5 shrink-0" />}
+                {SHARE_COPY[said]}
+              </>
+            ) : null}
+          </p>
+          <p id={ids.xHint} className="text-muted-foreground" hidden={saying}>
+            {caps.copy ? SHARE_COPY.xHint : SHARE_COPY.xHintNoCopy}
+          </p>
+        </div>
         {caps.share ? (
           <Button type="button" disabled={ready === null} onClick={share} className={cn("max-sm:h-10", OUTLINE_FROM_SM)} data-share-action="share">
             <Share aria-hidden />
@@ -330,7 +346,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
             {SHARE_COPY.download}
           </Button>
           <Button asChild className={caps.share ? OUTLINE_UNDER_SM : undefined}>
-            <a href={shareIntentUrl(text)} target="_blank" rel="noopener noreferrer" onClick={postOnX} data-share-action="x">
+            <a href={shareIntentUrl(text)} target="_blank" rel="noopener noreferrer" onClick={postOnX} aria-describedby={ids.xHint} data-share-action="x">
               <XMark />
               {SHARE_COPY.postOnX}
             </a>

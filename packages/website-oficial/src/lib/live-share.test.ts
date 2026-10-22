@@ -1,10 +1,11 @@
 // THE SHARE CARD'S FIGURES (owner, 10-22): what the image of a pension says,
 // from the Live page's own figures, through the REAL model and adapter — and
-// what it must never say: who it belongs to, a zero for an unknown, or the
-// code name.
+// what it must never say: who it belongs to, a figure that names its vault, a
+// zero for an unknown, or the code name.
 
 import { describe, expect, it } from "vitest";
 
+import { formatSol as leaderboardSol } from "@/lib/leaderboard";
 import { toDashboardMock } from "@/lib/live-mock";
 import type { LiveDashboard } from "@/lib/live-types";
 import {
@@ -51,7 +52,7 @@ describe("the card's figures, from the Live page's own", () => {
     expect(shared).toMatchObject({ state: "saved", usdText: "$6.00", solText: "0.06", priced: true, rate: "20%", mode: "profit", paused: false, basket: ["SPYx"] });
     expect(shared.asOf).toBe("Sep 16, 2026");
     expect(shared.day).toBe("2026-09-16");
-    expect(shared.since).toMatch(/^Sep \d+, 2026$/);
+    expect(shared.since).toBe("Sep 2026");
   });
 
   it("nothing saved yet is a ZERO card, never a $0.00", () => {
@@ -83,7 +84,7 @@ describe("the card's figures, from the Live page's own", () => {
   it("a positive amount never reads as zero, in either unit", () => {
     const dust = cardOf(withSaved("1000"));
     expect(dust.usdText).toBe("<$0.01");
-    expect(dust.solText).toBe("<0.0001");
+    expect(dust.solText).toBe("<0.01");
   });
 
   it("the basket biggest share first; a basket the page qualifies is not stated", () => {
@@ -113,21 +114,48 @@ describe("nothing on it identifies anyone", () => {
   it("the file is named by the day alone", () => {
     expect(shareFileName(cardOf())).toBe("saverfi-pension-2026-09-16.png");
   });
+
+  /**
+   * NO FIGURE THAT IS A KEY TO THE VAULT (review, 10-22): /leaderboard prints
+   * each vault's lifetime SOL to four places beside its address, linked to
+   * Solscan, so the first card's "11.4207 SOL" named its vault. Neither unit's
+   * card, post or description may carry that figure — nor the chain's full one,
+   * nor the day the vault was created.
+   */
+  it("never the leaderboard's figure, the chain's full one, or the vault's creation day", () => {
+    const shared = cardOf(withSaved("11420734512"));
+    const onTheBoard = leaderboardSol("11420734512");
+    expect(onTheBoard).toBe("11.4207");
+    expect(shared.solText).toBe("11.42");
+    expect(shared.since).toMatch(/^[A-Z][a-z]{2} \d{4}$/);
+    const said: string[] = [JSON.stringify(shared)];
+    for (const unit of ["usd", "sol"] as const) {
+      const hero = shareHero(shared, unit)!;
+      said.push(hero.number, hero.compact, hero.note ?? "", sharePostText(shared, unit), shareAlt(shared, unit));
+      for (const row of shareRows(shared)) said.push(row.label, row.value, row.after ?? "");
+    }
+    for (const sentence of said) {
+      expect(sentence).not.toContain(onTheBoard);
+      expect(sentence).not.toContain("11.420734512");
+      // "Sep 16, 2026" is the snapshot's own day (top-right), not the vault's: no other "Mon D," may appear.
+      expect(sentence.replaceAll(shared.asOf, "")).not.toMatch(/\b[A-Z][a-z]{2} \d{1,2}, \d{4}\b/);
+    }
+  });
 });
 
 describe("the hero", () => {
-  it("in dollars, with the chain's SOL under it at today's price", () => {
-    expect(shareHero(card({ usdText: "$2,073.42", usdCompact: "$2.1K", solText: "11.4207" }), "usd")).toEqual({
+  it("in dollars, with what valued them under it — and not the SOL figure", () => {
+    expect(shareHero(card({ usdText: "$2,073.42", usdCompact: "$2.1K", solText: "11.42" }), "usd")).toEqual({
       number: "$2,073.42",
       unit: null,
       compact: "$2.1K",
-      note: "11.4207 SOL, valued at today’s SOL price",
+      note: "Saved in SOL, valued at today’s SOL price",
     });
   });
 
   it("in SOL, with the dollars under it", () => {
-    expect(shareHero(card({ usdText: "$2,073.42", solText: "11.4207", solCompact: "11.4" }), "sol")).toEqual({
-      number: "11.4207",
+    expect(shareHero(card({ usdText: "$2,073.42", solText: "11.42", solCompact: "11.4" }), "sol")).toEqual({
+      number: "11.42",
       unit: "SOL",
       compact: "11.4",
       note: "$2,073.42 at today’s SOL price",
@@ -184,8 +212,9 @@ describe("the rows", () => {
     expect(shareRows(card({ streakDays: null, basket: [] })).map((row) => row.label)).toEqual(["Saving now"]);
   });
 
-  it("word a volume rule as the vault does, and a paused one as paused", () => {
-    expect(shareRows(card({ mode: "volume", rate: "2%", paused: true }))[0]).toEqual({ label: "Saving now", value: "2% of every buy and sell", after: " · paused" });
+  it("word a volume rule as the vault does, and a paused one as a paused rule — not as saving now", () => {
+    expect(shareRows(card({ mode: "volume", rate: "2%" }))[0]).toEqual({ label: "Saving now", value: "2% of every buy and sell" });
+    expect(shareRows(card({ mode: "volume", rate: "2%", paused: true }))[0]).toEqual({ label: "Rule", value: "2% of every buy and sell", after: " · paused" });
   });
 
   it("a card with nothing saved says so, quietly", () => {
@@ -200,15 +229,21 @@ describe("the rows", () => {
 
 describe("what leaves the page", () => {
   it("the post names SaverFi and the figure in the chosen unit; X adds saverfi.cash", () => {
-    const shared = card({ usdText: "$2,073.42", solText: "11.4207" });
+    const shared = card({ usdText: "$2,073.42", solText: "11.42" });
     expect(sharePostText(shared, "usd")).toBe("I’ve saved $2,073.42 for my pension with SaverFi so far.");
-    expect(sharePostText(shared, "sol")).toBe("I’ve saved 11.4207 SOL for my pension with SaverFi so far.");
+    expect(sharePostText(shared, "sol")).toBe("I’ve saved 11.42 SOL for my pension with SaverFi so far.");
     expect(sharePostText(card({ state: "zero" }), "usd")).toBe("I’m building my pension with SaverFi: 20% of my trading gains, put aside for later.");
     const url = new URL(shareIntentUrl(sharePostText(shared, "usd")));
     expect(url.origin + url.pathname).toBe("https://x.com/intent/post");
     expect(url.searchParams.get("text")).toBe(sharePostText(shared, "usd"));
     expect(url.searchParams.get("url")).toBe(SHARE_SITE);
     expect(SHARE_SITE).toBe("https://saverfi.cash");
+  });
+
+  it("a paused rule with nothing saved puts nothing aside, and the post and the description say no more", () => {
+    const paused = card({ state: "zero", paused: true, mode: "volume", rate: "2%" });
+    expect(sharePostText(paused, "usd")).toBe("I’m building my pension with SaverFi.");
+    expect(shareAlt(paused, "usd")).toBe("Your SaverFi image: 2% of every buy and sell, paused for now");
   });
 
   it("never the code name", () => {

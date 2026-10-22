@@ -971,8 +971,16 @@ export const PENDING_COPY = {
  *
  * AN IMAGE AND NOTHING ELSE, FOR NOW (owner, 10-22): no referral and no link of
  * the person's own on it yet — that comes later. Dollars by default, SOL on
- * request. Nothing on it, in its file name or in the post identifies anyone: no
- * vault, no wallet, no handle. The only address is the site's own.
+ * request. No vault, wallet or handle on it, in its file name or in the post:
+ * the only address is the site's own.
+ *
+ * AND NO KEY TO THE VAULT EITHER (review, 10-22). The public leaderboard prints
+ * every vault's lifetime SOL to four places beside its address, so a card with
+ * that figure on it named its vault — and the dialog had promised the opposite.
+ * The card's SOL is now to two places (like the dollar's cents), the dollar's
+ * note no longer carries the SOL figure, and "since" is a month, not the vault's
+ * creation day. The dialog promises only what is true: no address, wallet or
+ * name — not that nobody could ever match an amount to a vault.
  *
  * IN THE FIRST PERSON ON THE CARD — "My pension" — because it is the owner
  * who posts it; in the second person in the dialog, which speaks to him.
@@ -986,9 +994,9 @@ export const SHARE_COPY = {
 
   // ── the dialog ───────────────────────────────────────────────────────────
   title: "Share your pension",
-  description: "An image of what you’ve saved, ready to post. Nothing on it identifies you or your vault.",
+  description: "An image of what you’ve saved, ready to post. No address, wallet or name is on it.",
   /** Nothing saved yet: the card states the rule instead of a zero. */
-  descriptionZero: "An image of your savings rule, ready to post. Nothing on it identifies you or your vault.",
+  descriptionZero: "An image of your savings rule, ready to post. No address, wallet or name is on it.",
   background: "Background",
   backgrounds: { vault: "Vault", streaks: "Streaks", grid: "Grid" },
   showIn: "Show in",
@@ -1000,6 +1008,16 @@ export const SHARE_COPY = {
   copyShort: "Copy",
   download: "Download",
   postOnX: "Post on X",
+  /**
+   * SAID BEFORE THE CLICK, under the actions (review, 10-22): X opens in a new
+   * tab, in front, so whatever the dialog says after the click is behind it.
+   * X's composer cannot take an image from a link — the person pastes it.
+   */
+  xHint: "Post on X copies the image first: paste it into your post.",
+  xHintNoCopy: "To post on X, download the image, then attach it to your post.",
+  /** The dialog's own code did not arrive (a dropped connection, a new deploy): said in the frame. Only a reload fetches it again. */
+  loadFailed: "This did not load. Reload the page to try again.",
+  reload: "Reload",
 
   // ── what an action says it did — a refusal says so, silence reads as success
   copied: "Image copied. Paste it into your post.",
@@ -1013,9 +1031,12 @@ export const SHARE_COPY = {
   // ── the post's text: X adds the site's link after it ─────────────────────
   post: (figure: string): string => `I’ve saved ${figure} for my pension with ${BRAND} so far.`,
   postZero: (rule: string): string => `I’m building my pension with ${BRAND}: ${rule}, put aside for later.`,
+  /** Nothing saved and the rule paused: nothing is being put aside, so the post claims no rule. */
+  postZeroPaused: `I’m building my pension with ${BRAND}.`,
   /** The preview's description for a screen reader: what the image says, in a sentence. */
   alt: (figure: string): string => `Your ${BRAND} image: ${figure} saved for your pension`,
   altZero: (rule: string): string => `Your ${BRAND} image: ${rule}, put aside for your pension`,
+  altZeroPaused: (rule: string): string => `Your ${BRAND} image: ${rule}, paused for now`,
 
   // ── the card's own words ─────────────────────────────────────────────────
   card: {
@@ -1025,15 +1046,22 @@ export const SHARE_COPY = {
     since: (date: string): string => `since ${date}`,
     labelSaved: "Saved so far",
     labelZero: "My savings rule",
-    /** Under a dollar figure: the chain's own SOL and what turned it into dollars. */
-    solAtPrice: (sol: string): string => `${sol} SOL, valued at today’s SOL price`,
+    /**
+     * Under a dollar figure: what turned SOL into dollars — and not the SOL
+     * figure itself, which the leaderboard prints beside the vault's address.
+     */
+    inSolAtPrice: "Saved in SOL, valued at today’s SOL price",
     /** Under a SOL figure: the dollars it is worth at the one price read. */
     usdAtPrice: (usd: string): string => `${usd} at today’s SOL price`,
     /** Beside the rate on a card with nothing saved yet, the landing's words in the first person. */
     zeroMeasure: { profit: "of my trading gains,", volume: "of every buy and sell," },
     zeroAside: "put aside for later.",
+    /** The same line while the rule is paused: nothing is being put aside. */
+    zeroPaused: "paused for now.",
     zeroNote: "Into a pension only I control.",
     savingNow: "Saving now",
+    /** A paused rule's row: not "Saving now", which it is not. */
+    rule: "Rule",
     /** "20% of trading gains" — the rule is today's, the total is lifetime (pension-panel.tsx, 09-25). */
     measure: { profit: "of trading gains", volume: "of every buy and sell" },
     /** The same, in the first person, for the post. */

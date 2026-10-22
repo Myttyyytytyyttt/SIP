@@ -14,10 +14,18 @@
  * on our own domain. The person's browser draws the image from the figures it
  * was shown, and the image goes nowhere until they post it.
  *
- * NOTHING THAT IDENTIFIES ANYONE (owner, 10-22): ShareCardData has no field for
- * a vault, a wallet, an owner or a handle, so no layout can print one. Image
- * only for now — no referral and no personal link yet; the footer's right side
- * is left empty for that.
+ * NO ADDRESS, WALLET OR NAME (owner, 10-22): ShareCardData has no field for a
+ * vault, a wallet, an owner or a handle, so no layout can print one. Image only
+ * for now — no referral and no personal link yet; the footer's right side is
+ * left empty for that.
+ *
+ * AND NO FIGURE THAT IS A KEY TO THE VAULT (review, 10-22). /leaderboard prints
+ * each vault's lifetime SOL to four places beside its address, and the first
+ * card printed the same four places — so a posted card pointed at its vault,
+ * its owner and its wallets. So the card's SOL is to two places, the dollar's
+ * note says what valued it without the SOL figure, and "since" is a month (the
+ * day was the vault account's createdAt). An amount can still be guessed at
+ * from a handful of vaults; the dialog promises no more than what is true.
  *
  * UNKNOWN IS NEVER ZERO. A vault whose total could not be read has no card at
  * all (its button is off); a vault that has saved nothing yet gets a card of its
@@ -27,7 +35,7 @@
  */
 
 import { formatSolAtMost } from "@/lib/amounts";
-import { compact, dateLabel, pct, usd, usdCompact } from "@/lib/format";
+import { compact, dateLabel, monthLabel, pct, usd, usdCompact } from "@/lib/format";
 import { SHARE_COPY } from "@/lib/live-copy";
 import type { SavingsRule, SavingsStats } from "@/mocks/types";
 
@@ -55,7 +63,11 @@ export interface ShareCardData {
   readonly usdText: string | null;
   /** "$1.2M" — for a figure too long for the card even at its smallest step. */
   readonly usdCompact: string | null;
-  /** "11.4207", "<0.0001" — the chain's own figure at four places, never rounded to nothing. Null when unreadable. */
+  /**
+   * "11.42", "<0.01" — SOL to two places, like the dollar's cents, never
+   * rounded to nothing. Never the four places /leaderboard prints beside the
+   * vault's address: that figure would name the vault. Null when unreadable.
+   */
   readonly solText: string | null;
   readonly solCompact: string | null;
   /** Whether the dollar is SOL at a price read with this snapshot: the card's note says so. */
@@ -64,7 +76,7 @@ export interface ShareCardData {
   readonly rate: string;
   readonly mode: "profit" | "volume";
   readonly paused: boolean;
-  /** "Sep 18, 2026" — when the vault was created, as the hero's "saving since" says. */
+  /** "Sep 2026" — the month the vault was created: the hero's "saving since", without the day that is on chain. */
   readonly since: string | null;
   readonly streakDays: number | null;
   /** The basket's symbols, biggest share first; empty when the page does not vouch for it. */
@@ -91,13 +103,13 @@ export function shareCardOf(input: { readonly lifetimeSaved: bigint | null; read
     // A POSITIVE AMOUNT NEVER READS AS ZERO (amounts.ts formatSolAtMost's rule, for the dollar).
     usdText: dollars === null ? null : dollars > 0 && dollars < 0.005 ? "<$0.01" : usd(dollars),
     usdCompact: dollars === null ? null : usdCompact(dollars),
-    solText: lifetimeSaved === null ? null : formatSolAtMost(lifetimeSaved, 4),
+    solText: lifetimeSaved === null ? null : formatSolAtMost(lifetimeSaved, SHARE_SOL_PLACES),
     solCompact: lifetimeSaved === null ? null : compact(Number(lifetimeSaved) / 1e9),
     priced: dollars !== null && stats.pricedToday === true,
     rate: pct(rule.rateBps),
     mode: rule.mode ?? "volume",
     paused: rule.paused,
-    since: stats.firstSaveAt ? dateLabel(stats.firstSaveAt) : null,
+    since: stats.firstSaveAt ? monthLabel(stats.firstSaveAt) : null,
     streakDays: stats.currentStreakDays,
     // A basket the page qualifies (unread, or chosen and not approved yet) is not stated on an image.
     basket: rule.targetsNote === undefined ? [...rule.targets].sort((a, b) => b.weightBps - a.weightBps).map((target) => target.symbol) : [],
@@ -105,6 +117,9 @@ export function shareCardOf(input: { readonly lifetimeSaved: bigint | null; read
     day: now.slice(0, 10),
   };
 }
+
+/** The card's SOL places: two, where the leaderboard's are four (formatSol in lib/leaderboard.ts). */
+export const SHARE_SOL_PLACES = 2;
 
 /** The units this card can show: dollars only with a price. */
 export const unitsOf = (card: ShareCardData): readonly ShareUnit[] => (card.usdText === null ? ["sol"] : ["usd", "sol"]);
@@ -138,8 +153,8 @@ export function shareHero(card: ShareCardData, wanted: ShareUnit): ShareHero | n
     number: card.usdText!,
     unit: null,
     compact: card.usdCompact ?? card.usdText!,
-    // The dollar is SOL at one price read now: said under it, as the hero's own title does.
-    note: SHARE_COPY.card.solAtPrice(card.solText),
+    // The dollar is SOL at one price read now: said under it, as the hero's own title does — without the SOL figure (a key to the vault).
+    note: SHARE_COPY.card.inSolAtPrice,
   };
 }
 
@@ -162,13 +177,14 @@ export interface ShareRow {
 
 /**
  * THE ROWS UNDER THE HERO, bottom-anchored on the card. "Saving now", because
- * the rule is today's and the total is lifetime (pension-panel.tsx, 09-25); a
- * streak only when it is one (two days or more); the basket when it is known.
+ * the rule is today's and the total is lifetime (pension-panel.tsx, 09-25) —
+ * "Rule … · paused" when it is paused, which is not saving; a streak only when
+ * it is one (two days or more); the basket when it is known.
  */
 export function shareRows(card: ShareCardData): readonly ShareRow[] {
   const rows: ShareRow[] = [];
   if (card.state === "saved") {
-    rows.push({ label: SHARE_COPY.card.savingNow, value: ruleLine(card), ...(card.paused ? { after: ` · ${SHARE_COPY.card.paused}` } : {}) });
+    rows.push(card.paused ? { label: SHARE_COPY.card.rule, value: ruleLine(card), after: ` · ${SHARE_COPY.card.paused}` } : { label: SHARE_COPY.card.savingNow, value: ruleLine(card) });
     if (card.streakDays !== null && card.streakDays >= 2) rows.push({ label: SHARE_COPY.card.streak, value: SHARE_COPY.card.streakDays(card.streakDays) });
   } else {
     rows.push({ label: SHARE_COPY.card.savedSoFar, value: SHARE_COPY.card.nothingYet, muted: true });
@@ -231,17 +247,17 @@ export function fitHero(
 
 // ── what leaves the page ─────────────────────────────────────────────────────
 
-/** The post's words. X puts the site's link after them (shareIntentUrl). */
+/** The post's words. X puts the site's link after them (shareIntentUrl). A paused rule puts nothing aside, so a post with nothing saved claims no rule. */
 export function sharePostText(card: ShareCardData, wanted: ShareUnit): string {
   const hero = shareHero(card, wanted);
-  if (hero === null) return SHARE_COPY.postZero(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
+  if (hero === null) return card.paused ? SHARE_COPY.postZeroPaused : SHARE_COPY.postZero(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
   return SHARE_COPY.post(hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`);
 }
 
 /** The image described in a sentence, for the preview's alt text. */
 export function shareAlt(card: ShareCardData, wanted: ShareUnit): string {
   const hero = shareHero(card, wanted);
-  if (hero === null) return SHARE_COPY.altZero(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
+  if (hero === null) return (card.paused ? SHARE_COPY.altZeroPaused : SHARE_COPY.altZero)(`${card.rate} ${SHARE_COPY.card.measureMine[card.mode]}`);
   return SHARE_COPY.alt(hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`);
 }
 

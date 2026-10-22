@@ -118,6 +118,12 @@ export function dateLabel(iso: string): string {
   return `${dayLabel(iso)}, ${new Date(iso).getUTCFullYear()}`;
 }
 
+/** "Sep 2026" — a month, where the day would say too much (the share card's "since", 10-22). */
+export function monthLabel(iso: string): string {
+  const date = new Date(iso);
+  return `${MONTHS[date.getUTCMonth()] ?? "?"} ${date.getUTCFullYear()}`;
+}
+
 /**
  * "Sep 28 – Oct 4" / "Sep 14 – 20" — the UTC week that starts on `monday`
  * (a "YYYY-MM-DD" day or a timestamp on it).

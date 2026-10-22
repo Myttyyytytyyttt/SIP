@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { clockLabel, compact, dayLabel, relativeDayLabel, timeAgo, weekLabel, whenLabel } from "@/lib/format";
+import { clockLabel, compact, dayLabel, monthLabel, relativeDayLabel, timeAgo, weekLabel, whenLabel } from "@/lib/format";
 
 const AT = "2026-09-16T01:34:00.000Z";
 
@@ -63,6 +63,14 @@ describe("a day heading", () => {
     expect(relativeDayLabel(AT, "2026-09-16T12:00:00.000Z")).toBe("Today");
     expect(relativeDayLabel(AT, "2026-09-17T12:00:00.000Z")).toBe("Yesterday");
     expect(relativeDayLabel(AT, "2026-09-30T12:00:00.000Z")).toBe("Sep 16");
+  });
+});
+
+describe("a month", () => {
+  it("is the UTC month and year, and no day", () => {
+    expect(monthLabel("2026-10-19T18:01:48.000Z")).toBe("Oct 2026");
+    expect(monthLabel("2026-12-31T23:59:59.000Z")).toBe("Dec 2026");
+    expect(monthLabel("2027-01-01T00:00:00.000Z")).toBe("Jan 2027");
   });
 });
 

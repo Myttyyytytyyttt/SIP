@@ -1,11 +1,13 @@
 import type { ReactNode } from "react";
 
 import { CopyButton } from "@/components/copy-button";
+import { Figure } from "@/components/live/Figure";
 import { Num } from "@/components/num";
 import { PensionChart } from "@/components/pension-chart";
 import { PensionHoldings } from "@/components/pension-holdings";
 import { PensionStats, SaveCalendar } from "@/components/pension-stats";
 import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
+import { splitDecimal } from "@/lib/amounts";
 import { LABEL, SAVED } from "@/lib/classes";
 import { dateLabel, pct, usd, usdSigned } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
@@ -23,6 +25,37 @@ import type { Holding, SavingsDay, SavingsPoint, SavingsRule, SavingsStats, Trad
 export interface HeroPulse {
   readonly pill: { readonly text: string; readonly title: string | null } | null;
   readonly shown: boolean;
+}
+
+/** The hero figure's face, and its size: the sample's, and a live page's while the figure is short enough. */
+const HERO_FIGURE = "font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl";
+/** One step smaller on a line of the SAME height (40/48 px), so the hero does not change height. */
+const HERO_FIGURE_LONG = "font-mono text-3xl leading-10 font-semibold tracking-tight tabular-nums sm:text-4xl sm:leading-12 xl:short:text-3xl xl:short:leading-10";
+/**
+ * The no-price figure's digits past the fourth: every one on the page
+ * (live/Figure.tsx), at 0.6 em. leading-none, because the long figure's line
+ * height is a length (leading-10/12), inherited whole by the smaller tail — whose
+ * box then hung 4 px below the line and made the hero taller (measured).
+ * The class is spelled out whole, for Tailwind to find.
+ */
+const HERO_TAIL = { em: 0.6, className: "text-[0.6em] leading-none" } as const;
+/**
+ * HOW MANY CHARACTERS SHARE THE FIGURE'S LINE WITH THE SHARE BUTTON (review,
+ * 10-22). Measured beside the 32 px button and its 12 px gap: 10 at 1440 —
+ * the tightest, the save-days squares beside a 48 px figure — 11 at 768, 12 at
+ * 375 and 360. One step down, 14 fit at all of them: every dollar figure under
+ * $10M, and — under 100 SOL — the chain's nine-decimal SOL shown when no price
+ * was read, which at full size wrapped the button under the figure (and at 1440
+ * wrapped itself).
+ */
+const HERO_FITS = 10;
+
+/** A figure's width in characters of its own size: a Figure tail counts at its step. */
+export function heroWidth(text: string, tailed: boolean): number {
+  if (!tailed) return text.length;
+  const [head, rest] = splitDecimal(text, 4);
+  const tail = /^\d*/.exec(rest)?.[0] ?? "";
+  return head.length + tail.length * HERO_TAIL.em + (rest.length - tail.length);
 }
 
 /**
@@ -77,14 +110,18 @@ export function PensionPanel({
   // where the question arises, rather than on a line of its own.
   const priced = stats.pricedToday === true ? ACTIVITY_COPY.atTodaysPrice : undefined;
 
+  // No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify.
+  const solHero = stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : null;
+  // Beside the share button, a figure too long for the line steps down a size (HERO_FITS); the sample has no button.
+  const long = share !== undefined && heroWidth(solHero ?? usd(stats.totalSavedUsd), solHero !== null) > HERO_FITS;
   const figure = (
     <p
-      className="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl"
+      className={long ? HERO_FIGURE_LONG : HERO_FIGURE}
       // The chain's own figure, in full, and that the dollar is it at one price read now.
       {...(stats.totalSavedSol === undefined || stats.totalSavedSol === null || priced === undefined ? {} : { title: LIVE_COPY.heroSolAtPrice(stats.totalSavedSol) })}
     >
-      {/* No price read: the chain's own figure leads rather than a dash — it is already SOL, so there is nothing to qualify. */}
-      {stats.totalSavedUsd === null && stats.totalSavedSol !== undefined && stats.totalSavedSol !== null ? `${stats.totalSavedSol} SOL` : usd(stats.totalSavedUsd)}
+      {/* Nine decimals: every digit stays, the ones past the fourth a size down (live/Figure.tsx) — a figure, not a wall of digits. */}
+      {solHero === null ? usd(stats.totalSavedUsd) : <Figure tailClassName={HERO_TAIL.className}>{solHero}</Figure>}
     </p>
   );
 
@@ -127,8 +164,10 @@ export function PensionPanel({
             /*
              * THE SHARE BUTTON ON THE FIGURE'S OWN LINE (owner, 10-22: right of
              * the number, above the chart). 32 px centred on a 40/48 px line,
-             * so the hero keeps its height; only a figure too wide for a phone
-             * beside it wraps the button under it rather than off the card.
+             * so the hero keeps its height, and a long figure steps down a size
+             * to keep it there (HERO_FITS). Only a figure past even that — 100
+             * SOL or more with no price read, at 1440 or 360 — wraps the button
+             * under it rather than off the card.
              */
             <div className="flex min-w-0 flex-wrap items-center gap-x-3">
               {figure}

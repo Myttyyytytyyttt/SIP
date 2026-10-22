@@ -44,11 +44,15 @@ const W = SHARE_CARD.width;
 const H = SHARE_CARD.height;
 const PAD = 64;
 
+/**
+ * The card's inks. The quietest text is 55 % white (about 6:1 on the ground):
+ * 40 % was about 3.8:1, and at a phone's timeline width — the card ~300 px wide
+ * — the dollar's note and the date all but went (review, 10-22).
+ */
 const C = {
   ground: "#0A0B11",
   fg: "#FAFAFA",
   fg55: "rgba(255,255,255,0.55)",
-  fg40: "rgba(255,255,255,0.40)",
   fg10: "rgba(255,255,255,0.10)",
   /** emerald-400: the app's "saved". */
   emerald: "#34d399",
@@ -492,7 +496,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   font(ctx, 600, 30, fonts.sans, "-0.6px");
   ctx.fillText(SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + 12, 79.5);
   font(ctx, 400, 18, fonts.mono);
-  ctx.fillStyle = C.fg40;
+  ctx.fillStyle = C.fg55;
   ctx.textAlign = "right";
   ctx.fillText(card.asOf, W - PAD, 75.5);
   ctx.textAlign = "left";
@@ -520,8 +524,8 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   };
 
   if (hero === null) {
-    // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it.
-    const [line1, line2] = [SHARE_COPY.card.zeroMeasure[card.mode], SHARE_COPY.card.zeroAside];
+    // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it — and, paused, no claim that anything is put aside.
+    const [line1, line2] = [SHARE_COPY.card.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
     font(ctx, 500, 32, fonts.sans, "-0.5px");
     const beside = 28 + Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width);
     const fit = fitHero([card.rate], null, beside, measure);
@@ -538,7 +542,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
     ctx.fillText(line1, tx, BAND_MID - 6);
     ctx.fillStyle = C.fg55;
     ctx.fillText(line2, tx, BAND_MID + 34);
-    runs(ctx, fonts, PAD, NOTE_Y, SHARE_COPY.card.zeroNote, 18, 400, C.fg40);
+    runs(ctx, fonts, PAD, NOTE_Y, SHARE_COPY.card.zeroNote, 18, 400, C.fg55);
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, measure);
     const h = Math.round(fit.size * 1.25);
@@ -555,7 +559,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
       ctx.fillStyle = "rgba(2,44,34,0.72)";
       ctx.fillText(hero.unit, x + fit.numberWidth + heroUnitGap(fit.size), baseline);
     }
-    if (hero.note !== null) runs(ctx, fonts, PAD, NOTE_Y, hero.note, 18, 400, C.fg40);
+    if (hero.note !== null) runs(ctx, fonts, PAD, NOTE_Y, hero.note, 18, 400, C.fg55);
   }
 
   // 4. The rows, anchored at the bottom: the last one's baseline is always 534.

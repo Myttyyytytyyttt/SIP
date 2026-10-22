@@ -25,19 +25,29 @@
  *            tooltip can still say why.
  *
  * THE BUTTON DOES NOT MOVE THE HERO: 32 px, centred on the figure's 40/48 px
- * line (measured at 375, 768, 1024 and 1440: the line keeps the figure's height).
+ * line, and a figure too long to share its line with it is set one step
+ * smaller on a line of the same height (pension-panel.tsx).
  *
  * THE DIALOG'S CODE ARRIVES ON FIRST OPEN (SharePanel.tsx, with the canvas):
  * the Live page's first load does not carry it, and a pointer resting on the
  * button starts fetching it.
+ *
+ * AND IF IT NEVER ARRIVES, ONLY THE DIALOG SAYS SO (review, 10-22). A lazy
+ * component whose code fails to load throws to the nearest error boundary, and
+ * the app has none of its own: Next's root one replaced the whole Live page
+ * with "This page couldn't load" — for one optional button. PanelBoundary keeps
+ * the failure inside the preview's frame. Its way out is a reload, not a retry:
+ * Turbopack keeps a chunk that failed as failed for the page's life (measured
+ * on next dev: a retry after the network came back requested nothing), and a
+ * reload is the one thing that fetches it again.
  */
 
-import { Share } from "lucide-react";
-import { Suspense, lazy, useState } from "react";
+import { RefreshCw, Share } from "lucide-react";
+import { Component, Suspense, lazy, useState, type ReactNode } from "react";
 
 import { SharePreviewFrame } from "@/components/live/share-frame";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
@@ -51,6 +61,34 @@ const SharePanel = lazy(() => loadPanel().then((module) => ({ default: module.Sh
 const prefetch = (): void => {
   loadPanel().catch(() => undefined);
 };
+
+/** The dialog's body failing — its code not loading, or a throw while it renders — stays in the dialog. */
+class PanelBoundary extends Component<{ readonly children: ReactNode; readonly fallback: ReactNode }, { readonly failed: boolean }> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  override render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
+/** What stands in the dialog when its body could not load: the frame, in words, and the reload that fetches it again. */
+export function SharePanelFailed() {
+  return (
+    <>
+      <SharePreviewFrame failed={SHARE_COPY.loadFailed} />
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={() => window.location.reload()} data-share-action="reload">
+          <RefreshCw aria-hidden />
+          {SHARE_COPY.reload}
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
 
 /** The trigger's look in each state: the round button, and the icon's own colour. */
 export const SHARE_TRIGGER = {
@@ -111,9 +149,11 @@ export function ShareSavings({ card }: { card: ShareCardData }) {
           <DialogTitle>{SHARE_COPY.title}</DialogTitle>
           <DialogDescription>{saved ? SHARE_COPY.description : SHARE_COPY.descriptionZero}</DialogDescription>
         </DialogHeader>
-        <Suspense fallback={<SharePreviewFrame drawing />}>
-          <SharePanel card={card} />
-        </Suspense>
+        <PanelBoundary fallback={<SharePanelFailed />}>
+          <Suspense fallback={<SharePreviewFrame drawing />}>
+            <SharePanel card={card} />
+          </Suspense>
+        </PanelBoundary>
       </DialogContent>
     </Dialog>
   );

@@ -8,7 +8,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ShareSavings } from "@/components/live/ShareSavings";
+import { SharePanelFailed, ShareSavings } from "@/components/live/ShareSavings";
 import { SharePanel } from "@/components/live/SharePanel";
 import { SharePreviewFrame } from "@/components/live/share-frame";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -99,6 +99,19 @@ describe("the dialog's body", () => {
     expect(href.searchParams.get("url")).toBe("https://saverfi.cash");
   });
 
+  it("says what Post on X does BEFORE the click — X opens in front of anything said after it", () => {
+    const plain = panel(card(60_000_000n));
+    expect(plain).toContain(SHARE_COPY.xHintNoCopy);
+    vi.stubGlobal("ClipboardItem", class {});
+    vi.stubGlobal("navigator", { clipboard: { write: () => Promise.resolve() } });
+    const html = panel(card(60_000_000n));
+    const hint = html.match(/<p id="([^"]+)" class="text-muted-foreground">([^<]*)<\/p>/);
+    expect(hint?.[2]).toBe(SHARE_COPY.xHint);
+    // The link is described by it, and the live region stays in the tree, empty until an action speaks.
+    expect(html.match(/<a [^>]*data-share-action="x"[^>]*>/)?.[0]).toContain(`aria-describedby="${hint?.[1]}"`);
+    expect(html).toMatch(/<p role="status" aria-live="polite" class="[^"]*"><\/p>/);
+  });
+
   it("the image's actions wait for the image", () => {
     const html = panel(card(60_000_000n));
     expect(html.match(/<button[^>]*data-share-action="download"[^>]*>/)?.[0]).toMatch(/disabled=""/);
@@ -122,6 +135,15 @@ describe("the dialog's body", () => {
     const html = panel(card(0n));
     expect(html).not.toContain(SHARE_COPY.showIn);
     expect(html).not.toContain(">USD<");
+  });
+});
+
+describe("a dialog whose code did not load", () => {
+  it("says so in the frame and offers the reload that fetches it again — the page around it stays", () => {
+    const html = renderToStaticMarkup(createElement(SharePanelFailed));
+    expect(html).toContain('role="alert"');
+    expect(html).toContain(SHARE_COPY.loadFailed);
+    expect(html).toMatch(/<button[^>]*data-share-action="reload"[^>]*>.*Reload<\/button>/);
   });
 });
 

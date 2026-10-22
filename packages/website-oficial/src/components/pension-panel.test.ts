@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 // recharts draws on a ResizeObserver, which node has none of.
 vi.mock("@/components/pension-chart", () => ({ PensionChart: () => null }));
 
-const { PensionPanel } = await import("@/components/pension-panel");
+const { PensionPanel, heroWidth } = await import("@/components/pension-panel");
 const { TooltipProvider } = await import("@/components/ui/tooltip");
 const { mock } = await import("@/mocks");
 
@@ -96,5 +96,61 @@ describe("the share slot", () => {
     expect(html).toMatch(FIGURE);
     expect(html).not.toContain("flex-wrap items-center gap-x-3");
     expect(html).not.toContain("data-share-savings");
+  });
+});
+
+/**
+ * A FIGURE TOO LONG TO SHARE ITS LINE WITH THE BUTTON (review, 10-22): the
+ * chain's nine-decimal SOL, shown when no price was read, wrapped the button
+ * under it and made the hero 32 px taller. Past HERO_FITS characters the
+ * figure steps down a size on a line of the same height; the no-price SOL keeps
+ * every digit, the ones past the fourth a size down.
+ */
+describe("a long figure beside the share button", () => {
+  const LONG = "font-mono text-3xl leading-10 font-semibold tracking-tight tabular-nums sm:text-4xl sm:leading-12 xl:short:text-3xl xl:short:leading-10";
+  const SHORT = "font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl";
+  const figureOf = (stats: Partial<typeof mock.stats>, share = true): string => {
+    const html = renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(PensionPanel, {
+          stats: { ...mock.stats, ...stats },
+          curve: mock.curve,
+          holdings: mock.holdings,
+          days: mock.days,
+          rule: mock.rule,
+          now: mock.now,
+          ...(share ? { share: createElement("button", { "data-share-savings": "" }) } : {}),
+        }),
+      ),
+    );
+    return html.match(/<p class="font-mono [^"]*"[^>]*>.*?<\/p>/)?.[0] ?? "";
+  };
+
+  it("counts a figure in characters of its own size, a tail at its step", () => {
+    expect(heroWidth("$1,142.51", false)).toBe(9);
+    expect(heroWidth("0.036612345 SOL", true)).toBeCloseTo(13);
+    expect(heroWidth("0.06 SOL", true)).toBe(8);
+  });
+
+  it("keeps a realistic dollar figure at full size", () => {
+    expect(figureOf({ totalSavedUsd: 1_142.51 })).toContain(`class="${SHORT}"`);
+    expect(figureOf({ totalSavedUsd: 12_345.67 })).toContain(`class="${SHORT}"`);
+  });
+
+  it("steps a long one down, on a line of the same 40/48 px", () => {
+    expect(figureOf({ totalSavedUsd: 123_504.57 })).toContain(`class="${LONG}"`);
+  });
+
+  it("no price: the chain's SOL, every digit, the tail a size down — and stepped down beside the button", () => {
+    const figure = figureOf({ totalSavedUsd: null, totalSavedSol: "0.036612345", pricedToday: false });
+    expect(figure).toContain(`class="${LONG}"`);
+    expect(figure).toContain('<span>0.0366<span class="text-[0.6em] leading-none">12345</span> SOL</span>');
+    expect(figureOf({ totalSavedUsd: null, totalSavedSol: "0.06", pricedToday: false })).toContain(`class="${SHORT}"`);
+  });
+
+  it("never on the sample, which has no button", () => {
+    expect(figureOf({ totalSavedUsd: 123_504.57 }, false)).toContain(`class="${SHORT}"`);
   });
 });
