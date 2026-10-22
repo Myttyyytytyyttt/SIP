@@ -25,12 +25,17 @@ export const RATE_RANGES = {
 export type RuleMode = keyof typeof RATE_RANGES;
 
 /**
- * WHERE THE BAR STARTS WHEN A PROFIT VAULT SWITCHES TO VOLUME (owner, 09-25):
- * 1 % — "1 % ida y 1 % vuelta", 1 % of every buy and 1 % of every sell. The
- * vault's stored volume rate is whatever it was created with (the program's 2 %
- * product rate, rules.ts DEFAULT_RATES, pinned to state.rs), never a choice.
+ * WHERE VOLUME STARTS (owner, 10-22: "2 %"): a vault created on Volume, and
+ * the bar when a profit vault switches to Volume, both start at 2 % of every
+ * buy and every sell — the program's own product rate (rules.ts DEFAULT_RATES,
+ * pinned to state.rs) and the rate the create form's label already said
+ * (vault-copy.ts VOLUME_RATE). Until 10-22 it was 1 % (owner, 09-25: "1 % ida
+ * y 1 % vuelta") under that same 2 % label. A profit vault's stored volume rate
+ * is still never read as a choice: it is whatever the vault was created with,
+ * or what a switch back to Profit left behind. Written out like RATE_RANGES;
+ * rule-settings.test.ts holds it to the package's value.
  */
-export const VOLUME_START_BPS = 100;
+export const VOLUME_START_BPS = 200;
 
 /**
  * THE INVESTMENT THRESHOLD EVERY BASKET STARTS AT (owner, 09-25): $10,

@@ -122,7 +122,7 @@ export function liveSeed(state: VaultStateJson, choice: BasketChoice | null): Li
   const mode = modeOf(account.skimMode);
   // A profit vault's stored volume rate was never chosen — it is whatever the
   // vault was created with — so switching to Volume starts at the product's
-  // default (1 %, owner 09-25), not at that leftover. A volume vault's own
+  // default (2 %, owner 10-22), not at that leftover. A volume vault's own
   // rate is its owner's choice and is kept.
   const rates = { profit: account.skimBps, volume: mode === "volume" ? account.volumeBps : VOLUME_START_BPS };
   const saving = { mode, rateBps: rates[mode], paused: account.paused };

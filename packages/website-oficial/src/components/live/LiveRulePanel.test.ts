@@ -226,8 +226,8 @@ describe("the form the gear opens", () => {
     expect(form.initial.picked.map((pick) => pick.id).sort()).toEqual([ANTHROPIC_MINT, SPYX_MINT].sort());
     expect(form.initial.threshold).toMatch(/^10(\.0+)?$/);
     expect(form.volume).toEqual({ selectable: true, note: null });
-    // Switching starts the bar at 1 %, not at the vault's creation leftover.
-    expect(form.rates.volume).toBe(100);
+    // Switching starts the bar at the program's 2 % (owner, 10-22), whatever volume rate the profit vault stores.
+    expect(form.rates.volume).toBe(200);
     expect(form.weightsEditable).toBe(true);
   });
 
