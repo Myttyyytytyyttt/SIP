@@ -9,13 +9,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SharePanelFailed, ShareSavings } from "@/components/live/ShareSavings";
-import { SharePanel } from "@/components/live/SharePanel";
+import { SharePanel, VideoRow, type Video } from "@/components/live/SharePanel";
 import { SharePreviewFrame } from "@/components/live/share-frame";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import { shareCardOf, type ShareCardData } from "@/lib/live-share";
+import { SHARE_PLATES } from "@/lib/share-plates";
 
 import { liveDashboard } from "../../../test/fixtures/live-dashboard";
 
@@ -117,15 +118,32 @@ describe("the dialog's body", () => {
     expect(html.match(/<button[^>]*data-share-action="download"[^>]*>/)?.[0]).toMatch(/disabled=""/);
   });
 
-  it("three backgrounds; dollars by default, SOL beside them", () => {
+  it("the picker's thumbs are the plates' own, under the card's words", () => {
+    const html = panel(card(60_000_000n));
+    for (const plate of Object.values(SHARE_PLATES)) expect(html).toContain(`src="${plate.thumb}"`);
+  });
+
+  it("offers no video before this browser has said it can make one — the question is asynchronous", () => {
+    const html = panel(card(60_000_000n));
+    expect(html).not.toContain("data-share-video");
+    expect(actions(html)).not.toContain("video-make");
+  });
+
+  it("three backgrounds, Grid first and chosen (owner, 10-22); dollars by default, SOL beside them", () => {
     const html = panel(card(60_000_000n));
     for (const name of Object.values(SHARE_COPY.backgrounds)) expect(html).toContain(`>${name}</button>`);
+    const radios = [...html.matchAll(/<button[^>]*role="radio"[^>]*aria-checked="(true|false)"[^>]*>(?:<span[^>]*>.*?<\/span>)?([A-Za-z]+)<\/button>/g)].map((match) => [match[2], match[1]]);
+    expect(radios.slice(0, 3)).toEqual([
+      ["Grid", "true"],
+      ["Streaks", "false"],
+      ["Vault", "false"],
+    ]);
     expect(html).toMatch(/<button[^>]*role="radio"[^>]*aria-checked="true"[^>]*>USD<\/button>/);
     expect(html).toMatch(/<button[^>]*role="radio"[^>]*aria-checked="false"[^>]*>SOL<\/button>/);
   });
 
   it("no price: SOL only, and it says so", () => {
-    const html = panel(card(60_000_000n, { usdText: null, usdCompact: null, priced: false }));
+    const html = panel(card(60_000_000n, { usdText: null, usdCompact: null }));
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>USD<\/button>/);
     expect(html).toMatch(/<button[^>]*aria-checked="true"[^>]*>SOL<\/button>/);
     expect(html).toContain(SHARE_COPY.noPrice);
@@ -147,7 +165,57 @@ describe("a dialog whose code did not load", () => {
   });
 });
 
+describe("the video's row", () => {
+  const row = (video: Video | undefined, canShare = false): string =>
+    renderToStaticMarkup(
+      createElement(VideoRow, { video, progress: { percent: 0, show: null }, seconds: 12, canShare, onMake: () => undefined, onCancel: () => undefined, onDownload: () => undefined, onShare: () => undefined }),
+    );
+  const rowActions = (html: string): string[] => [...html.matchAll(/data-share-action="([a-z-]+)"/g)].map((match) => match[1]!);
+
+  it("before: what it is — an MP4 that plays like a GIF — and Make video", () => {
+    const html = row(undefined);
+    expect(html).toContain('data-share-video="idle"');
+    expect(html).toContain(SHARE_COPY.video.about(12));
+    expect(rowActions(html)).toEqual(["video-make"]);
+  });
+
+  it("while it is made: a bar a screen reader can read, and Cancel", () => {
+    const html = row({ status: "making" });
+    expect(html).toContain('data-share-video="making"');
+    expect(html).toMatch(/role="progressbar" aria-label="[^"]+" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"/);
+    expect(rowActions(html)).toEqual(["video-cancel"]);
+  });
+
+  it("made: its length and weight, Download video — and Share video only where the sheet takes one", () => {
+    const blob = new Blob([new Uint8Array(934_000)], { type: "video/mp4" });
+    expect(row({ status: "ready", blob })).toContain(SHARE_COPY.video.ready(12, "934 KB"));
+    expect(rowActions(row({ status: "ready", blob }))).toEqual(["video-download"]);
+    expect(rowActions(row({ status: "ready", blob }, true))).toEqual(["video-share", "video-download"]);
+  });
+
+  it("failed: said in words, and a retry — the image's actions are elsewhere and stay", () => {
+    const html = row({ status: "failed" });
+    expect(html).toContain(SHARE_COPY.video.failed);
+    expect(rowActions(html)).toEqual(["video-make"]);
+    expect(html).toContain(SHARE_COPY.video.retry);
+  });
+});
+
 describe("the preview's frame", () => {
+  it("is the plate — its still, its loop over it (WebM, then MP4) — with the card's words on top", () => {
+    const html = renderToStaticMarkup(createElement(SharePreviewFrame, { plate: SHARE_PLATES.grid, src: "blob:words", alt: "Your SaverFi image" }));
+    const still = html.indexOf(`src="${SHARE_PLATES.grid.still}"`);
+    const webm = html.indexOf(`src="${SHARE_PLATES.grid.webm}"`);
+    const mp4 = html.indexOf(`src="${SHARE_PLATES.grid.mp4}"`);
+    const words = html.indexOf('src="blob:words"');
+    expect(still).toBeGreaterThan(-1);
+    expect([still, webm, mp4, words]).toEqual([still, webm, mp4, words].sort((a, b) => a - b));
+    expect(html).toMatch(/<video[^>]*aria-hidden="true"[^>]*>/);
+    expect(html).toMatch(/<video[^>]*muted=""[^>]*loop=""[^>]*playsInline=""/);
+    // The loop never ends, so it can be paused (WCAG 2.2.2).
+    expect(html).toContain(`aria-label="${SHARE_COPY.pauseMotion}"`);
+  });
+
   it("keeps the card's shape and dark ground while the picture is drawn, and says so", () => {
     const html = renderToStaticMarkup(createElement(SharePreviewFrame, { drawing: true }));
     expect(html).toContain("aspect-ratio:1200 / 630");

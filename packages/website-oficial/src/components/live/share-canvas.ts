@@ -1,52 +1,58 @@
 /**
- * THE SHARE CARD, DRAWN (owner, 10-22): Canvas 2D, in the browser, into a PNG.
- * What the person sees in the dialog is this PNG itself, so what they post is
- * exactly what they saw.
+ * THE SHARE CARD, DRAWN (owner, 10-22): Canvas 2D, in the browser, into a PNG —
+ * the words over one of the films' plates. What the dialog shows is the same
+ * words over the same plate, so what is posted is what was seen.
  *
  * BROWSER ONLY. Nothing here runs while a page renders: ShareSavings loads the
  * dialog that calls it on first open, and every call is from an effect or a
  * click. The words and the layout's arithmetic are src/lib/live-share.ts's;
  * this file only paints.
  *
- * NO IMAGES, NOTHING FETCHED. The S is drawn from its own numbers
- * (lib/brand-mark.ts), the backgrounds are procedural, and the only thing
- * waited on is the page's own Geist faces — which next/font serves, so the card
- * is set in the app's type. A canvas does not wait for a font: with
- * `display: swap`, drawing before the face loaded draws the fallback, so the
- * faces are loaded by name first (cardFonts).
+ * THE BACKGROUND IS A PLATE'S FRAME 0 (owner, 10-22: "que las imágenes tengan
+ * movimientos"). The films made three animated backgrounds (src/lib/
+ * share-plates.ts); the still image is drawn on the first frame of the same
+ * loop the video moves, so the PNG and the MP4 open on one picture. The three
+ * hand-drawn backgrounds this file used to paint are gone. A plate that does not
+ * arrive (offline in the middle of a dialog) leaves the card's dark ground and
+ * every word on it, rather than no image: the preview's own copy of the plate
+ * did not arrive either, so the picture still matches what was seen, and 400
+ * lines of art kept for that moment alone would be 400 lines nobody looks at.
+ *
+ * THE WORDS ARE THEIR OWN LAYER (drawCardWords): over the still for the PNG,
+ * over each decoded frame for the video (live/share-video.ts), and as a
+ * transparent PNG over the plate's own <video> for the dialog's moving
+ * preview. One drawing, three uses. No scrim under them: the plates keep their
+ * text zone (x 64–720) dark and still — measured rgb(10,12,17–18), the card's
+ * own ground — and put their motion right of x = 720.
+ *
+ * FONTS: the page's own Geist faces, which next/font serves, so the card is set
+ * in the app's type. A canvas does not wait for a font: with `display: swap`,
+ * drawing before the face loaded draws the fallback, so the faces are loaded by
+ * name first (cardFonts).
  *
  * FIXED SCALE, NOT devicePixelRatio: every image is 2400×1260 (SHARE_SCALE),
- * so what is posted never depends on whose screen it was made on. The
- * previews draw the same card smaller (THUMB_SCALE). shadowBlur is in device
- * pixels — the transform does not scale it — so every blur is multiplied by
- * the scale by hand. No ctx.filter: Safari has long lacked it.
+ * so what is posted never depends on whose screen it was made on; the video is
+ * the card at 1×, the plates' size. shadowBlur is in device pixels — the
+ * transform does not scale it — so every blur is multiplied by the scale by
+ * hand. No ctx.filter: Safari has long lacked it.
  *
  * THE NUMBER RULE (the app's <Num>): in a line of words, every number is Geist
  * Mono at the same size; words are Geist.
  *
- * THE SAMPLE'S CARD SAYS "Example" ON ITSELF (owner, 10-22), three times: the
- * docs clips' pill at the top-right corner, the day moved beside it; the title
- * above the figure, "Example pension" where a pension's card says "My pension"
- * (review, 10-22: a crop of the title and the figure lost both other marks);
- * and the sample's notice under the figure, where a live card says what valued
- * it. Nothing on it says "my" (SHARE_COPY.example.card). A card of a Live page
- * has none of these (`example` is false on it).
+ * THE SAMPLE'S CARD SAYS "Example" ON ITSELF (owner, 10-22), twice: the docs
+ * clips' pill at the top-right corner, the day moved beside it; and the title
+ * over the figure, "Example pension" where a pension's card says "My pension"
+ * (review, 10-22: a crop of the title and the figure must keep the mark).
+ * Nothing on it says "my" (SHARE_COPY.example.card). A card of a Live page has
+ * neither (`example` is false on it). The line that used to say "Example
+ * numbers. Nobody's pension." under the figure went with every card's note
+ * (owner, 10-22: nothing under the money).
  */
 
-import { MARK_H, MARK_H_LINES, MARK_PIECES, MARK_V_LINES, MARK_W } from "@/lib/brand-mark";
+import { MARK_H, MARK_PIECES, MARK_W } from "@/lib/brand-mark";
 import { SHARE_COPY } from "@/lib/live-copy";
-import {
-  SHARE_CARD,
-  fitHero,
-  heroPadX,
-  heroUnitGap,
-  heroUnitSize,
-  shareHero,
-  shareRows,
-  type ShareBackground,
-  type ShareCardData,
-  type ShareUnit,
-} from "@/lib/live-share";
+import { SHARE_CARD, SHARE_SCALE, fitHero, heroPadX, heroUnitGap, heroUnitSize, shareHero, shareRows, type ShareBackground, type ShareCardData, type ShareUnit } from "@/lib/live-share";
+import { SHARE_PLATES } from "@/lib/share-plates";
 
 const W = SHARE_CARD.width;
 const H = SHARE_CARD.height;
@@ -55,7 +61,7 @@ const PAD = 64;
 /**
  * The card's inks. The quietest text is 55 % white (about 6:1 on the ground):
  * 40 % was about 3.8:1, and at a phone's timeline width — the card ~300 px wide
- * — the dollar's note and the date all but went (review, 10-22).
+ * — the date all but went (review, 10-22).
  */
 const C = {
   ground: "#0A0B11",
@@ -74,13 +80,12 @@ export interface CardFonts {
 }
 
 export interface DrawOptions {
-  readonly background: ShareBackground;
   readonly unit: ShareUnit;
-  /** Device pixels per logical pixel: SHARE_SCALE for the image, THUMB_SCALE for a preview. */
+  /** Device pixels per logical pixel: SHARE_SCALE for the image and the preview's words, 1 for the video. */
   readonly scale: number;
 }
 
-type Ctx = CanvasRenderingContext2D;
+type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 let fontsOnce: Promise<CardFonts> | null = null;
 
@@ -108,15 +113,53 @@ export function cardFonts(): Promise<CardFonts> {
   return fontsOnce;
 }
 
-/** The PNG of one card. */
-export async function renderShareCard(card: ShareCardData, options: DrawOptions): Promise<Blob> {
-  const fonts = await cardFonts();
+const stills = new Map<ShareBackground, Promise<ImageBitmap | null>>();
+
+/**
+ * A PLATE'S STILL, DECODED ONCE PER DIALOG'S LIFE (measured 10-22: 10–25 ms to
+ * fetch and decode, the whole card 35–60 ms). Null when it does not arrive —
+ * the card is then drawn on its ground (above) — and a failure is not kept, so
+ * the next draw asks again.
+ */
+export function loadStill(background: ShareBackground): Promise<ImageBitmap | null> {
+  let still = stills.get(background);
+  if (still === undefined) {
+    still = fetch(SHARE_PLATES[background].still)
+      .then((response) => (response.ok ? response.blob() : Promise.reject(new Error(`still ${response.status}`))))
+      .then((blob) => createImageBitmap(blob))
+      .catch(() => {
+        stills.delete(background);
+        return null;
+      });
+    stills.set(background, still);
+  }
+  return still;
+}
+
+function canvasOf(scale: number): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(W * options.scale);
-  canvas.height = Math.round(H * options.scale);
+  canvas.width = Math.round(W * scale);
+  canvas.height = Math.round(H * scale);
+  return canvas;
+}
+
+/** The PNG of one card: the plate's still, and the words over it, at 2400×1260. */
+export async function renderShareCard(card: ShareCardData, { background, unit }: { readonly background: ShareBackground; readonly unit: ShareUnit }): Promise<Blob> {
+  const [fonts, still] = await Promise.all([cardFonts(), loadStill(background)]);
+  const canvas = canvasOf(SHARE_SCALE);
   const ctx = canvas.getContext("2d");
   if (ctx === null) throw new Error("no 2d canvas");
-  drawShareCard(ctx, card, options, fonts);
+  drawShareCard(ctx, card, { unit, scale: SHARE_SCALE }, fonts, still);
+  return canvasBlob(canvas);
+}
+
+/** The words alone, on a transparent 2400×1260 PNG: laid over the plate's <video> (and its thumbs) in the dialog. */
+export async function renderShareWords(card: ShareCardData, unit: ShareUnit): Promise<Blob> {
+  const fonts = await cardFonts();
+  const canvas = canvasOf(SHARE_SCALE);
+  const ctx = canvas.getContext("2d");
+  if (ctx === null) throw new Error("no 2d canvas");
+  drawCardWords(ctx, card, { unit, scale: SHARE_SCALE }, fonts);
   return canvasBlob(canvas);
 }
 
@@ -127,21 +170,15 @@ export function canvasBlob(canvas: HTMLCanvasElement): Promise<Blob> {
   });
 }
 
-/** The whole card on a context `options.scale` times its logical size. */
-export function drawShareCard(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts): void {
+/** The whole card on a context `options.scale` times its logical size: the plate's still (or the bare ground), then the words. */
+export function drawShareCard(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts, still: CanvasImageSource | null): void {
   ctx.save();
   ctx.setTransform(options.scale, 0, 0, options.scale, 0, 0);
-  BACKGROUNDS[options.background](ctx, options.scale);
-  // A legibility scrim under the words, for the backgrounds whose art reaches left.
-  if (options.background !== "vault") {
-    const scrim = ctx.createLinearGradient(0, 0, 760, 0);
-    scrim.addColorStop(0, "rgba(10,11,17,0.70)");
-    scrim.addColorStop(1, "rgba(10,11,17,0)");
-    ctx.fillStyle = scrim;
-    ctx.fillRect(0, 0, W, H);
-  }
-  drawContent(ctx, card, options, fonts);
+  ctx.fillStyle = C.ground;
+  ctx.fillRect(0, 0, W, H);
+  if (still !== null) ctx.drawImage(still, 0, 0, W, H);
   ctx.restore();
+  drawCardWords(ctx, card, options, fonts);
 }
 
 // ── type ─────────────────────────────────────────────────────────────────────
@@ -181,282 +218,6 @@ function markPath(ctx: Ctx, x: number, y: number, height: number): void {
     ctx.closePath();
   }
 }
-
-// ── backgrounds ──────────────────────────────────────────────────────────────
-
-function radial(ctx: Ctx, x: number, y: number, r: number, stops: readonly (readonly [number, string])[], sy = 1): void {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(1, sy);
-  const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-  for (const [offset, color] of stops) gradient.addColorStop(offset, color);
-  ctx.fillStyle = gradient;
-  ctx.fillRect(-W * 2, -H * 4, W * 4, H * 8);
-  ctx.restore();
-}
-
-/** An offscreen layer at the card's scale, drawn back whole: for art that is masked before it lands. */
-function layer(scale: number, draw: (l: Ctx) => void): HTMLCanvasElement {
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(W * scale);
-  canvas.height = Math.round(H * scale);
-  const l = canvas.getContext("2d");
-  if (l === null) throw new Error("no 2d canvas");
-  l.setTransform(scale, 0, 0, scale, 0, 0);
-  draw(l);
-  return canvas;
-}
-
-const DIAL = { x: 942, y: 318 } as const;
-
-/** VAULT: the docs clips' dial — rings, a lit arc of ticks, and the padlock shut. */
-function vault(ctx: Ctx): void {
-  ctx.fillStyle = C.ground;
-  ctx.fillRect(0, 0, W, H);
-  radial(ctx, DIAL.x, DIAL.y, 400, [
-    [0, "rgba(16,185,129,0.18)"],
-    [0.5, "rgba(16,185,129,0.06)"],
-    [1, "rgba(16,185,129,0)"],
-  ]);
-  ctx.lineWidth = 1;
-  for (const [r, a] of [
-    [236, 0.12],
-    [292, 0.085],
-    [360, 0.06],
-    [444, 0.045],
-    [540, 0.032],
-    [650, 0.022],
-  ] as const) {
-    ctx.strokeStyle = `rgba(52,211,153,${a})`;
-    ctx.beginPath();
-    ctx.arc(DIAL.x, DIAL.y, r, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-  ctx.strokeStyle = "rgba(52,211,153,0.16)";
-  ctx.beginPath();
-  ctx.arc(DIAL.x, DIAL.y, 214, 0, Math.PI * 2);
-  ctx.stroke();
-  // The lit arc, 150° round through the top to 330° (canvas degrees, clockwise from 3 o'clock).
-  const A0 = (150 * Math.PI) / 180;
-  const A1 = (330 * Math.PI) / 180;
-  ctx.lineCap = "round";
-  for (const [width, color] of [
-    [34, "rgba(52,211,153,0.10)"],
-    [8, "rgba(52,211,153,0.22)"],
-  ] as const) {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = width;
-    ctx.beginPath();
-    ctx.arc(DIAL.x, DIAL.y, 190, A0, A1);
-    ctx.stroke();
-  }
-  for (let i = 0; i < 72; i += 1) {
-    const a = (i * 2 * Math.PI) / 72;
-    const deg = i * 5;
-    const lit = deg >= 150 && deg <= 330;
-    const major = i % 6 === 0;
-    const r0 = major ? 170 : 176;
-    const r1 = major ? 208 : 202;
-    ctx.lineWidth = major ? 2.6 : 1.8;
-    ctx.strokeStyle = lit ? (major ? "rgba(110,231,183,0.95)" : "rgba(52,211,153,0.70)") : major ? "rgba(52,211,153,0.34)" : "rgba(52,211,153,0.16)";
-    ctx.beginPath();
-    ctx.moveTo(DIAL.x + Math.cos(a) * r0, DIAL.y + Math.sin(a) * r0);
-    ctx.lineTo(DIAL.x + Math.cos(a) * r1, DIAL.y + Math.sin(a) * r1);
-    ctx.stroke();
-  }
-  // The spark at the arc's moving end.
-  const hx = DIAL.x + Math.cos(A1) * 190;
-  const hy = DIAL.y + Math.sin(A1) * 190;
-  radial(ctx, hx, hy, 34, [
-    [0, "rgba(52,211,153,0.55)"],
-    [1, "rgba(52,211,153,0)"],
-  ]);
-  ctx.fillStyle = "#ecfdf5";
-  ctx.beginPath();
-  ctx.arc(hx, hy, 5, 0, Math.PI * 2);
-  ctx.fill();
-  // The inner disc and its small ticks.
-  const disc = ctx.createRadialGradient(DIAL.x, DIAL.y - 50, 0, DIAL.x, DIAL.y, 150);
-  disc.addColorStop(0, "#181a22");
-  disc.addColorStop(1, "#0d0e13");
-  ctx.fillStyle = disc;
-  ctx.beginPath();
-  ctx.arc(DIAL.x, DIAL.y, 146, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.strokeStyle = C.fg10;
-  ctx.lineWidth = 1;
-  ctx.stroke();
-  ctx.lineCap = "butt";
-  for (let i = 0; i < 40; i += 1) {
-    const a = (i * 2 * Math.PI) / 40;
-    ctx.beginPath();
-    ctx.moveTo(DIAL.x + Math.cos(a) * 128, DIAL.y + Math.sin(a) * 128);
-    ctx.lineTo(DIAL.x + Math.cos(a) * 137, DIAL.y + Math.sin(a) * 137);
-    ctx.stroke();
-  }
-  // The padlock, shut (lucide Lock), in emerald.
-  ctx.save();
-  ctx.translate(DIAL.x, DIAL.y);
-  ctx.scale(3.4, 3.4);
-  ctx.translate(-12, -12.4);
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.strokeStyle = C.emerald;
-  ctx.lineWidth = 1.6;
-  ctx.stroke(new Path2D("M7 11V7a5 5 0 0 1 10 0v4"));
-  const body = new Path2D();
-  body.roundRect(3, 11, 18, 11, 2.4);
-  ctx.fillStyle = "#121319";
-  ctx.fill(body);
-  ctx.stroke(body);
-  ctx.fillStyle = C.emerald;
-  ctx.beginPath();
-  ctx.arc(12, 15.6, 1.25, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = 1.3;
-  ctx.stroke(new Path2D("M12 16.6v2"));
-  ctx.restore();
-}
-
-/** [offset across the streak's axis, width, rgb, peak alpha]. */
-const STREAKS: readonly (readonly [number, number, string, number])[] = [
-  [-60, 300, "16,185,129", 0.09],
-  [210, 240, "59,130,246", 0.07],
-  [-190, 84, "52,211,153", 0.2],
-  [40, 54, "52,211,153", 0.26],
-  [150, 30, "110,231,183", 0.32],
-  [260, 96, "96,165,250", 0.16],
-  [-130, 7, "167,243,208", 0.6],
-  [12, 3, "236,253,245", 0.75],
-  [118, 11, "52,211,153", 0.5],
-  [196, 2, "236,253,245", 0.45],
-  [318, 5, "191,219,254", 0.5],
-  [-262, 3, "167,243,208", 0.35],
-  [-30, 2, "236,253,245", 0.3],
-];
-
-/** STREAKS: the reference's light streaks, in the app's emerald ("saved") and blue ("invested"). */
-function streaks(ctx: Ctx, scale: number): void {
-  ctx.fillStyle = C.ground;
-  ctx.fillRect(0, 0, W, H);
-  radial(ctx, 1010, 90, 560, [
-    [0, "rgba(16,185,129,0.16)"],
-    [1, "rgba(16,185,129,0)"],
-  ]);
-  radial(ctx, 1180, 640, 440, [
-    [0, "rgba(59,130,246,0.12)"],
-    [1, "rgba(59,130,246,0)"],
-  ]);
-  const art = layer(scale, (l) => {
-    l.translate(W / 2, H / 2);
-    l.rotate((-34 * Math.PI) / 180);
-    for (const [offset, width, rgb, alpha] of STREAKS) {
-      const g = l.createLinearGradient(0, offset - width / 2, 0, offset + width / 2);
-      g.addColorStop(0, `rgba(${rgb},0)`);
-      g.addColorStop(0.5, `rgba(${rgb},${alpha})`);
-      g.addColorStop(1, `rgba(${rgb},0)`);
-      l.fillStyle = g;
-      l.fillRect(-1400, offset - width / 2, 2800, width);
-    }
-    // Gone under the words, full on the right.
-    l.setTransform(scale, 0, 0, scale, 0, 0);
-    l.globalCompositeOperation = "destination-in";
-    const mask = l.createLinearGradient(360, 0, 980, 0);
-    mask.addColorStop(0, "rgba(0,0,0,0)");
-    mask.addColorStop(1, "rgba(0,0,0,1)");
-    l.fillStyle = mask;
-    l.fillRect(0, 0, W, H);
-  });
-  ctx.drawImage(art, 0, 0, W, H);
-}
-
-/** GRID: the landing's blueprint, where ONE TILE IS THE S — the mark drawn on it has every edge on a line. */
-function grid(ctx: Ctx, scale: number): void {
-  ctx.fillStyle = C.ground;
-  ctx.fillRect(0, 0, W, H);
-  const TW = 280;
-  const TH = (TW * MARK_H) / MARK_W;
-  const cx = 930;
-  const cy = 318;
-  const sx = cx - TW / 2;
-  const sy = cy - TH / 2;
-  radial(ctx, cx, cy, 480, [
-    [0, "rgba(16,185,129,0.26)"],
-    [0.45, "rgba(16,185,129,0.08)"],
-    [0.75, "rgba(16,185,129,0)"],
-  ]);
-  const art = layer(scale, (l) => {
-    const hl = MARK_H_LINES.map((y) => (y / MARK_H) * TH);
-    const vl = MARK_V_LINES.map((x) => (x / MARK_W) * TW);
-    const ox = sx - TW * Math.ceil(sx / TW);
-    const oy = sy - TH * Math.ceil(sy / TH);
-    for (let ty = oy; ty < H; ty += TH) {
-      for (let tx = ox; tx < W; tx += TW) {
-        l.strokeStyle = "rgba(255,255,255,0.11)";
-        l.lineWidth = 1;
-        l.setLineDash([]);
-        for (const x of vl) {
-          l.beginPath();
-          l.moveTo(tx + x, ty);
-          l.lineTo(tx + x, ty + TH);
-          l.stroke();
-        }
-        for (const y of hl) {
-          l.beginPath();
-          l.moveTo(tx, ty + y);
-          l.lineTo(tx + TW, ty + y);
-          l.stroke();
-        }
-        l.strokeStyle = "rgba(255,255,255,0.06)";
-        l.setLineDash([5, 6]);
-        l.beginPath();
-        l.moveTo(tx, ty + TH * 0.18);
-        l.lineTo(tx + TW * 0.82, ty + TH);
-        l.stroke();
-        l.setLineDash([]);
-        l.fillStyle = "rgba(52,211,153,0.6)";
-        for (const [x, y] of [
-          [vl[1]!, hl[2]!],
-          [vl[2]!, hl[5]!],
-        ] as const) {
-          l.beginPath();
-          l.arc(tx + x, ty + y, 1.8, 0, Math.PI * 2);
-          l.fill();
-        }
-      }
-    }
-    // The landing's mask: strongest at the glow, gone at the edges.
-    l.save();
-    l.globalCompositeOperation = "destination-in";
-    l.translate(cx, cy);
-    l.scale(1, 0.82);
-    const mask = l.createRadialGradient(0, 0, 0, 0, 0, 640);
-    mask.addColorStop(0, "rgba(0,0,0,1)");
-    mask.addColorStop(0.45, "rgba(0,0,0,0.55)");
-    mask.addColorStop(0.85, "rgba(0,0,0,0)");
-    l.fillStyle = mask;
-    l.fillRect(-W * 2, -H * 2, W * 4, H * 4);
-    l.restore();
-  });
-  ctx.drawImage(art, 0, 0, W, H);
-  // The S on its tile: a faint emerald body, a lit edge — the piece seams read as a blueprint.
-  markPath(ctx, sx, sy, TH);
-  const body = ctx.createLinearGradient(sx, sy, sx + TW, sy + TH);
-  body.addColorStop(0, "rgba(52,211,153,0.16)");
-  body.addColorStop(1, "rgba(16,185,129,0.04)");
-  ctx.fillStyle = body;
-  ctx.fill();
-  ctx.save();
-  ctx.shadowColor = "rgba(52,211,153,0.6)";
-  ctx.shadowBlur = 9 * scale;
-  ctx.strokeStyle = "rgba(110,231,183,0.55)";
-  ctx.lineWidth = 1.5;
-  ctx.lineJoin = "miter";
-  ctx.stroke();
-  ctx.restore();
-}
-
-const BACKGROUNDS: Readonly<Record<ShareBackground, (ctx: Ctx, scale: number) => void>> = { vault, streaks, grid };
 
 // ── the words and the figure ─────────────────────────────────────────────────
 
@@ -532,14 +293,24 @@ function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, m
   return x;
 }
 
-/** The hero band's middle: a smaller step shrinks the block about it, so the note and the rows never move. */
-const BAND_MID = 293;
-const LABEL_Y = 210;
-const NOTE_Y = 392;
-const TITLE_Y = 158;
+/**
+ * THE LAYOUT, TOP TO BOTTOM (owner, 10-22: no label over the figure, no note
+ * under it). The title and the figure are one group — the title is the
+ * figure's label now — centred between the lockup (bottom at 86) and the
+ * tallest stack of rows (three, their top at ~443): the title's baseline at
+ * 186, the block's middle at 300. A smaller step shrinks the block about that
+ * middle, so nothing else moves. The rows stay anchored to the footer.
+ */
+export const TITLE_Y = 186;
+export const BAND_MID = 300;
+/** The rows' last baseline, and the step between rows. */
+export const ROWS_Y = 534;
+const ROW_STEP = 38;
 
-function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts): void {
+export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts): void {
   const { scale } = options;
+  ctx.save();
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
 
@@ -561,7 +332,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   // A pension's own words, or — on the sample's card — the example's, which are nobody's.
   const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
 
-  // 2. The title.
+  // 2. The title: the figure's label.
   font(ctx, 500, 44, fonts.sans, "-0.9px");
   ctx.fillStyle = C.fg;
   const title = hero === null ? own.titleZero : own.titleSaved;
@@ -571,11 +342,7 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
     runs(ctx, fonts, PAD + titleWidth + 16, TITLE_Y, SHARE_COPY.card.since(card.since), 26, 400, C.fg55);
   }
 
-  // 3. The hero.
-  font(ctx, 600, 15, fonts.sans, "1.8px");
-  ctx.fillStyle = C.fg55;
-  ctx.fillText((hero === null ? own.labelZero : SHARE_COPY.card.labelSaved).toUpperCase(), PAD, LABEL_Y);
-
+  // 3. The figure on its block, and nothing under it.
   const measure = (text: string, size: number, part: "number" | "unit"): number => {
     font(ctx, 600, size, fonts.mono, part === "number" ? `${-0.02 * size}px` : "0px");
     return ctx.measureText(text).width;
@@ -600,7 +367,6 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
     ctx.fillText(line1, tx, BAND_MID - 6);
     ctx.fillStyle = C.fg55;
     ctx.fillText(line2, tx, BAND_MID + 34);
-    runs(ctx, fonts, PAD, NOTE_Y, card.example ? SHARE_COPY.example.note : SHARE_COPY.card.zeroNote, 18, 400, C.fg55);
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, measure);
     const h = Math.round(fit.size * 1.25);
@@ -617,17 +383,16 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
       ctx.fillStyle = "rgba(2,44,34,0.72)";
       ctx.fillText(hero.unit, x + fit.numberWidth + heroUnitGap(fit.size), baseline);
     }
-    if (hero.note !== null) runs(ctx, fonts, PAD, NOTE_Y, hero.note, 18, 400, C.fg55);
   }
 
-  // 4. The rows, anchored at the bottom: the last one's baseline is always 534.
+  // 4. The rows, anchored at the bottom: the last one's baseline is always ROWS_Y.
   const rows = shareRows(card);
   rows.forEach((row, index) => {
-    const y = 534 - 38 * (rows.length - 1 - index);
+    const y = ROWS_Y - ROW_STEP * (rows.length - 1 - index);
     font(ctx, 400, 21, fonts.sans);
     ctx.fillStyle = C.fg55;
     ctx.fillText(row.label, PAD, y);
-    const width = runs(ctx, fonts, PAD + 150, y, row.value, 21, 500, row.muted === true ? C.fg55 : C.fg);
+    const width = runs(ctx, fonts, PAD + 150, y, row.value, 21, 500, C.fg);
     if (row.after !== undefined) runs(ctx, fonts, PAD + 150 + width, y, row.after, 21, 500, C.fg55);
   });
 
@@ -641,4 +406,5 @@ function drawContent(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts:
   font(ctx, 400, 19, fonts.sans);
   ctx.fillStyle = C.fg55;
   ctx.fillText(SHARE_COPY.card.tagline, PAD + siteWidth + 20, 594);
+  ctx.restore();
 }

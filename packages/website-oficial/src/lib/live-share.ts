@@ -22,10 +22,18 @@
  * AND NO FIGURE THAT IS A KEY TO THE VAULT (review, 10-22). /leaderboard prints
  * each vault's lifetime SOL to four places beside its address, and the first
  * card printed the same four places — so a posted card pointed at its vault,
- * its owner and its wallets. So the card's SOL is to two places, the dollar's
- * note says what valued it without the SOL figure, and "since" is a month (the
- * day was the vault account's createdAt). An amount can still be guessed at
- * from a handful of vaults; the dialog promises no more than what is true.
+ * its owner and its wallets. So the card's SOL is to two places, no line on it
+ * carries the SOL figure beside the dollars, and "since" is a month (the day
+ * was the vault account's createdAt). An amount can still be guessed at from a
+ * handful of vaults; the dialog promises no more than what is true.
+ *
+ * NOTHING AROUND THE FIGURE BUT THE FIGURE (owner, 10-22: "Quitamos en todas
+ * las imágenes lo que está debajo del dinero: saved so far, value at sols price
+ * today"). The card had a "SAVED SO FAR" label over the green block and a note
+ * under it — what valued the dollars, or, on the sample, "Example numbers.
+ * Nobody's pension." Both are gone from every card, and "Saved so far" with
+ * them, the zero card's row included: the title says whose pension it is, and
+ * the block what it holds.
  *
  * UNKNOWN IS NEVER ZERO. A vault whose total could not be read has no card at
  * all (its button is off); a vault that has saved nothing yet gets a card of its
@@ -35,11 +43,12 @@
  * puede aparecer pero con los datos del mock claro"). exampleShareCardOf builds
  * it from what the sample's hero shows, and the same card and renderer carry it
  * with `example` set. That flag is the whole difference, and it is a promise:
- * the image says "Example" on itself (a pill at the corner, the sample's notice
- * under the figure — share-canvas.ts), the post is a line about SaverFi rather
- * than "I've saved", and the file is saverfi-example-<day>.png. A card of a
- * Live page never sets it. The sample is in dollars only: it has no SOL total,
- * and a SOL figure made up for the image would be a second invention.
+ * the image says "Example" on itself (a pill at the corner, and "Example
+ * pension" over the figure — share-canvas.ts), the post is a line about SaverFi
+ * rather than "I've saved", and the files are saverfi-example-<day>.png and
+ * .mp4. A card of a Live page never sets it. The sample is in dollars only: it
+ * has no SOL total, and a SOL figure made up for the image would be a second
+ * invention.
  *
  * Types from '@/mocks/types' only: no-mock-import.test.ts scans lib/live-*.
  */
@@ -56,10 +65,14 @@ export const SHARE_SITE = "https://saverfi.cash";
 export const SHARE_CARD = { width: 1200, height: 630 } as const;
 /** Every image is drawn at twice that (2400×1260), whatever this screen's pixel ratio: what is posted must not depend on who posts it. */
 export const SHARE_SCALE = 2;
-/** The background picker's previews: small, and cheap to draw three of. */
-export const THUMB_SCALE = 0.5;
 
-export const SHARE_BACKGROUNDS = ["vault", "streaks", "grid"] as const;
+/**
+ * THE BACKGROUNDS, IN THE PICKER'S ORDER (owner, 10-22: "La primera tiene que
+ * ser la del grid donde muestra el logo chill"): Grid first, and the one a
+ * dialog opens on; then Streaks and Vault, both with the S behind, fainter.
+ * Each is one of the films' plates (src/lib/share-plates.ts).
+ */
+export const SHARE_BACKGROUNDS = ["grid", "streaks", "vault"] as const;
 export type ShareBackground = (typeof SHARE_BACKGROUNDS)[number];
 
 export type ShareUnit = "usd" | "sol";
@@ -81,8 +94,6 @@ export interface ShareCardData {
    */
   readonly solText: string | null;
   readonly solCompact: string | null;
-  /** Whether the dollar is SOL at a price read with this snapshot: the card's note says so. */
-  readonly priced: boolean;
   /** "20%" — today's rate. */
   readonly rate: string;
   readonly mode: "profit" | "volume";
@@ -141,7 +152,6 @@ export function shareCardOf(input: CardInput & { readonly lifetimeSaved: bigint 
     ...dollarsOf(dollars),
     solText: lifetimeSaved === null ? null : formatSolAtMost(lifetimeSaved, SHARE_SOL_PLACES),
     solCompact: lifetimeSaved === null ? null : compact(Number(lifetimeSaved) / 1e9),
-    priced: dollars !== null && stats.pricedToday === true,
     ...ruleOf(input),
     example: false,
   };
@@ -162,8 +172,6 @@ export function exampleShareCardOf(input: CardInput): ShareCardData {
     ...dollarsOf(state === "saved" ? dollars : null),
     solText: null,
     solCompact: null,
-    // Its dollars are dollars, not SOL valued at a price read now: nothing to qualify.
-    priced: false,
     ...ruleOf(input),
     example: true,
   };
@@ -181,35 +189,22 @@ export const defaultUnit = (card: ShareCardData): ShareUnit => unitsOf(card)[0]!
 /** What is shown for a unit asked for: dollars that do not exist fall back to SOL, and SOL that does not exist to dollars. */
 export const unitFor = (card: ShareCardData, wanted: ShareUnit): ShareUnit => (unitsOf(card).includes(wanted) ? wanted : defaultUnit(card));
 
-/** The hero of a card with savings: the figure, its unit, a shorter form, and the one qualifier under it. */
+/** The hero of a card with savings: the figure, its unit and a shorter form — and nothing under it (owner, 10-22). */
 export interface ShareHero {
   readonly number: string;
   /** "SOL", set smaller beside the number; dollars carry their unit in the number. */
   readonly unit: string | null;
   readonly compact: string;
-  readonly note: string | null;
 }
 
 export function shareHero(card: ShareCardData, wanted: ShareUnit): ShareHero | null {
   if (card.state !== "saved") return null;
   if (unitFor(card, wanted) === "sol") {
     if (card.solText === null) return null;
-    return {
-      number: card.solText,
-      unit: "SOL",
-      compact: card.solCompact ?? card.solText,
-      note: card.example ? SHARE_COPY.example.note : card.priced && card.usdText !== null ? SHARE_COPY.card.usdAtPrice(card.usdText) : null,
-    };
+    return { number: card.solText, unit: "SOL", compact: card.solCompact ?? card.solText };
   }
   if (card.usdText === null) return null;
-  return {
-    number: card.usdText,
-    unit: null,
-    compact: card.usdCompact ?? card.usdText,
-    // The dollar is SOL at one price read now: said under it, as the hero's own title does — without the SOL figure (a key to the vault).
-    // The sample's dollars are just dollars, and what goes under them is that they are nobody's.
-    note: card.example ? SHARE_COPY.example.note : SHARE_COPY.card.inSolAtPrice,
-  };
+  return { number: card.usdText, unit: null, compact: card.usdCompact ?? card.usdText };
 }
 
 /** "20% of trading gains" / "2% of every buy and sell". */
@@ -226,22 +221,22 @@ export interface ShareRow {
   readonly value: string;
   /** Said after the value, quieter: " · paused". */
   readonly after?: string;
-  readonly muted?: boolean;
 }
 
 /**
  * THE ROWS UNDER THE HERO, bottom-anchored on the card. "Saving now", because
  * the rule is today's and the total is lifetime (pension-panel.tsx, 09-25) —
  * "Rule … · paused" when it is paused, which is not saving; a streak only when
- * it is one (two days or more); the basket when it is known.
+ * it is one (two days or more); the basket when it is known. A card with
+ * nothing saved has its rule as its hero, so its rows are the basket alone —
+ * and no "Saved so far · Nothing yet" (owner, 10-22): that is what its title,
+ * "Building my pension", already says.
  */
 export function shareRows(card: ShareCardData): readonly ShareRow[] {
   const rows: ShareRow[] = [];
   if (card.state === "saved") {
     rows.push(card.paused ? { label: SHARE_COPY.card.rule, value: ruleLine(card), after: ` · ${SHARE_COPY.card.paused}` } : { label: SHARE_COPY.card.savingNow, value: ruleLine(card) });
     if (card.streakDays !== null && card.streakDays >= 2) rows.push({ label: SHARE_COPY.card.streak, value: SHARE_COPY.card.streakDays(card.streakDays) });
-  } else {
-    rows.push({ label: SHARE_COPY.card.savedSoFar, value: SHARE_COPY.card.nothingYet, muted: true });
   }
   if (card.basket.length > 0) rows.push({ label: SHARE_COPY.card.investsIn, value: basketLine(card.basket) });
   return rows;
@@ -252,9 +247,10 @@ export function shareRows(card: ShareCardData): readonly ShareRow[] {
 /** The figure's sizes, largest first: the first that fits is used. */
 export const HERO_STEPS = [104, 92, 80, 68, 60] as const;
 /**
- * THE HERO'S ROOM: from the card's left padding (64) to x = 720, where the art
- * begins (the vault's dial is at 942 ± 214). The emerald block — and on a card
- * with nothing saved, the words beside it — must end before it.
+ * THE HERO'S ROOM: from the card's left padding (64) to x = 720, where the
+ * plates' motion begins — their text zone, x 64–720, is kept dark and still
+ * (the films, 10-22). The emerald block — and on a card with nothing saved,
+ * the words beside it — must end before it.
  */
 export const HERO_ROOM = 656;
 /** The block's padding either side of the figure, and the unit's size and gap, all in proportion to the step. */
@@ -331,8 +327,12 @@ export function shareWords(card: ShareCardData): { readonly trigger: string; rea
 /** X's composer, with the words and the site. Opened in a new tab; nothing is posted until the person posts it. */
 export const shareIntentUrl = (text: string): string => `https://x.com/intent/post?text=${encodeURIComponent(text)}&url=${encodeURIComponent(SHARE_SITE)}`;
 
-/** "saverfi-pension-2026-10-22.png": the day, and nothing about whose. The sample's is "saverfi-example-…": a file found later still says what it is. */
-export const shareFileName = (card: ShareCardData): string => `saverfi-${card.example ? "example" : "pension"}-${card.day}.png`;
+/**
+ * "saverfi-pension-2026-10-22.png", or ".mp4" for the video: the day, and
+ * nothing about whose. The sample's is "saverfi-example-…": a file found later
+ * still says what it is.
+ */
+export const shareFileName = (card: ShareCardData, kind: "png" | "mp4" = "png"): string => `saverfi-${card.example ? "example" : "pension"}-${card.day}.${kind}`;
 
 // ── what this browser can do with an image ───────────────────────────────────
 
@@ -341,6 +341,12 @@ export interface ShareCaps {
   readonly copy: boolean;
   /** Hand a PNG to the system's share sheet (navigator.share with files) — mainly phones. */
   readonly share: boolean;
+  /**
+   * Hand an MP4 to the same sheet. Asked on its own: a sheet that takes an
+   * image need not take a video. Whether this browser can MAKE the video is
+   * another, asynchronous question (live/share-video.ts videoCaps).
+   */
+  readonly shareVideo: boolean;
 }
 
 /** Just the parts of a browser's global scope this asks about, so a test can hand it one. */
@@ -352,6 +358,18 @@ export interface ShareScope {
   };
   readonly ClipboardItem?: unknown;
   readonly File?: unknown;
+}
+
+/** Whether the system's sheet takes a file of this type; false wherever asking throws. */
+function sheetTakes(scope: ShareScope, name: string, type: string): boolean {
+  const nav = scope.navigator;
+  if (typeof nav?.share !== "function" || typeof nav.canShare !== "function" || typeof scope.File !== "function") return false;
+  try {
+    const FileOf = scope.File as typeof File;
+    return nav.canShare({ files: [new FileOf([new Uint8Array([0])], name, { type })] }) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -368,14 +386,5 @@ export function shareCaps(scope: ShareScope): ShareCaps {
     typeof Item === "function" &&
     typeof nav?.clipboard?.write === "function" &&
     (typeof supports !== "function" || (supports as (type: string) => unknown).call(Item, "image/png") === true);
-  let share = false;
-  if (typeof nav?.share === "function" && typeof nav.canShare === "function" && typeof scope.File === "function") {
-    try {
-      const FileOf = scope.File as typeof File;
-      share = nav.canShare({ files: [new FileOf([new Uint8Array([0])], "saverfi.png", { type: "image/png" })] }) === true;
-    } catch {
-      share = false;
-    }
-  }
-  return { copy, share };
+  return { copy, share: sheetTakes(scope, "saverfi.png", "image/png"), shareVideo: sheetTakes(scope, "saverfi.mp4", "video/mp4") };
 }

@@ -1,28 +1,46 @@
 "use client";
 
 /**
- * THE SHARE DIALOG'S BODY (owner, 10-22): the image, its background and unit,
- * and what to do with it. Loaded on the dialog's first open (ShareSavings.tsx),
- * with the canvas that draws it (share-canvas.ts).
+ * THE SHARE DIALOG'S BODY (owner, 10-22): the card, its background and unit,
+ * and what to do with it — as an image, or as a short video. Loaded on the
+ * dialog's first open (ShareSavings.tsx), with the canvas that draws it
+ * (share-canvas.ts) and the code that makes the video (share-video.ts).
  *
- * WHAT YOU SEE IS WHAT YOU POST: the preview is the PNG itself. Each choice of
- * background and unit is drawn once and kept while the dialog is open, so
- * going back to one is instant; a choice not drawn yet keeps the last picture
- * under a spinner. The three backgrounds' previews are the same card, smaller.
- * Every preview's blob: URL is revoked when its picture goes (useObjectUrl),
- * and a download's once the browser has had time to take the file.
+ * WHAT YOU SEE IS WHAT YOU POST. The preview is the plate the files are made
+ * from — its loop, or its still under reduced motion — with the card's words
+ * on top, drawn by the same function as the PNG and the MP4 (share-frame.tsx).
+ * The words are drawn once per unit and kept while the dialog is open; the
+ * three backgrounds' thumbs are the plates' own, with the same words over them.
+ * The PNG for the actions is drawn for the background and unit chosen, and kept
+ * the same way, so going back to one is instant. Every blob: URL is revoked when
+ * its picture goes (useObjectUrl), and a download's once the browser has had
+ * time to take the file.
  *
- * THE ACTIONS ARE THE ONES THIS BROWSER CAN CARRY OUT (live-share.ts shareCaps):
- *   Share image  the system's sheet with the file — on a phone, straight into
- *                X, Telegram or anything else. Only where it works.
- *   Copy image   a PNG on the clipboard, to paste into any post. Only where a
- *                browser takes an image there.
- *   Download     always.
- *   Post on X    always: copies the image first where it can, then opens X's
- *                composer in a new tab with a short line and saverfi.cash. A
- *                plain link, so no popup blocker can swallow it.
+ * GRID FIRST (owner, 10-22: "La primera tiene que ser la del grid"): the dialog
+ * opens on it, and the picker lists it first (SHARE_BACKGROUNDS).
+ *
+ * THE IMAGE'S ACTIONS ARE THE ONES THIS BROWSER CAN CARRY OUT (live-share.ts shareCaps):
+ *   Share image     the system's sheet with the file — on a phone, straight into
+ *                   X, Telegram or anything else. Only where it works.
+ *   Copy image      a PNG on the clipboard, to paste into any post. Only where a
+ *                   browser takes an image there.
+ *   Download        always.
+ *   Post on X       always: copies the image first where it can, then opens X's
+ *                   composer in a new tab with a short line and saverfi.cash. A
+ *                   plain link, so no popup blocker can swallow it.
  * A refusal says so in words (copy-button.tsx's rule: silence reads as success).
  * A download says nothing: the browser shows its own.
+ *
+ * THE VIDEO (owner, 10-22: "Vídeo corto MP4"), in its own row, offered only
+ * where this browser can make one (share-video.ts videoCaps). Made on request,
+ * never on open: "Make video" → a progress bar and Cancel → "Download video",
+ * and "Share video" where the sheet takes a video. Each is a tap of its own:
+ * Safari lets a share sheet open only from a fresh tap, and a second or two of
+ * encoding outlives the first one, so the sheet is never opened at the end of
+ * the encode. A finished video is kept per background and unit, like the
+ * pictures; one in flight is cancelled when the dialog closes, and when its
+ * background or unit is changed under it. A video that cannot be made says so,
+ * and the image's actions stay.
  *
  * WHAT POST ON X DOES IS SAID BEFORE THE CLICK (review, 10-22). X opens in
  * front, so a "paste it" said after the click lands in the tab left behind, and
@@ -35,11 +53,12 @@
  * and says so the same way: SOL off, and a line under it.
  */
 
-import { Check, CircleAlert, Copy, Download, Share } from "lucide-react";
-import { useCallback, useEffect, useId, useState } from "react";
+import { Check, CircleAlert, Copy, Download, Film, RotateCcw, Share, X } from "lucide-react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
-import { renderShareCard } from "@/components/live/share-canvas";
+import { renderShareCard, renderShareWords } from "@/components/live/share-canvas";
 import { SharePreviewFrame } from "@/components/live/share-frame";
+import { makeShareVideo, videoCaps } from "@/components/live/share-video";
 import { Button } from "@/components/ui/button";
 import { DialogFooter } from "@/components/ui/dialog";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -49,9 +68,7 @@ import { SHARE_COPY } from "@/lib/live-copy";
 import {
   SHARE_BACKGROUNDS,
   SHARE_CARD,
-  SHARE_SCALE,
   SHARE_SITE,
-  THUMB_SCALE,
   defaultUnit,
   shareAlt,
   shareCaps,
@@ -65,18 +82,27 @@ import {
   type ShareScope,
   type ShareUnit,
 } from "@/lib/live-share";
+import { SHARE_PLATES, videoSeconds, type SharePlate } from "@/lib/share-plates";
 import { cn } from "@/lib/utils";
 
 /** How long a line under the actions stays. */
 const SAID_MS = 6_000;
 
-type Said = "copied" | "copiedForX" | "copyFailed" | "noCopyForX" | "shareFailed";
-const GOOD: Readonly<Record<Said, boolean>> = { copied: true, copiedForX: true, copyFailed: false, noCopyForX: false, shareFailed: false };
+type Said = "copied" | "copiedForX" | "copyFailed" | "noCopyForX" | "shareFailed" | "videoShareFailed";
+const SAID: Readonly<Record<Said, { readonly good: boolean; readonly words: string }>> = {
+  copied: { good: true, words: SHARE_COPY.copied },
+  copiedForX: { good: true, words: SHARE_COPY.copiedForX },
+  copyFailed: { good: false, words: SHARE_COPY.copyFailed },
+  noCopyForX: { good: false, words: SHARE_COPY.noCopyForX },
+  shareFailed: { good: false, words: SHARE_COPY.shareFailed },
+  videoShareFailed: { good: false, words: SHARE_COPY.video.shareFailed },
+};
 
 /** A picture drawn, or the draw that failed. */
 type Drawn = Blob | "failed";
 
 const isBackground = (value: string): value is ShareBackground => (SHARE_BACKGROUNDS as readonly string[]).includes(value);
+const isUnit = (value: string): value is ShareUnit => value === "usd" || value === "sol";
 
 /**
  * A PHONE LEADS WITH THE SHEET, A DESKTOP WITH X. Where the system's share
@@ -112,24 +138,39 @@ function useObjectUrl(blob: Blob | null): string | null {
   return url;
 }
 
+/** A file handed to the browser's download: its URL revoked once the browser has had time to take it (at once, Firefox can lose the save). */
+function saveFile(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+/** "0.9 MB", "740 KB". */
+const sizeLabel = (bytes: number): string => (bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1_000))} KB`);
+
 /**
- * EVERY PICTURE THIS DIALOG HAS DRAWN, by what it shows. The card is a new
- * object on each of the Live page's renders, so pictures are keyed by its
- * CONTENT: the same figures are the same picture, and a saving that lands while
- * the dialog is open draws the new one — and lets the old ones go.
+ * EVERY BLOB THIS DIALOG HAS DRAWN FOR THIS CARD, by what it shows (`part`).
+ * The card is a new object on each of the Live page's renders, so blobs are
+ * keyed by its CONTENT: the same figures are the same picture, and a saving
+ * that lands while the dialog is open draws the new one — and lets the old ones
+ * go. `render` must be a stable function.
  */
-function useSharePictures(card: ShareCardData) {
+function useCardBlobs(card: ShareCardData, render: (card: ShareCardData, part: string) => Promise<Blob>) {
   const cardKey = JSON.stringify(card);
   const [started] = useState(() => new Map<string, Promise<Blob>>());
   const [drawn, setDrawn] = useState<ReadonlyMap<string, Drawn>>(() => new Map());
-  const keyOf = useCallback((background: ShareBackground, unit: ShareUnit, scale: number) => `${background}|${unit}|${scale}|${cardKey}`, [cardKey]);
 
   const request = useCallback(
-    (background: ShareBackground, unit: ShareUnit, scale: number): Promise<Blob> => {
-      const key = keyOf(background, unit, scale);
+    (part: string): Promise<Blob> => {
+      const key = `${part}|${cardKey}`;
       let picture = started.get(key);
       if (picture === undefined) {
-        picture = renderShareCard(JSON.parse(cardKey) as ShareCardData, { background, unit, scale });
+        picture = render(JSON.parse(cardKey) as ShareCardData, part);
         started.set(key, picture);
         // Set even after the dialog closed: a no-op then, and a StrictMode remount must still see it.
         picture.then(
@@ -139,58 +180,293 @@ function useSharePictures(card: ShareCardData) {
       }
       return picture;
     },
-    [cardKey, keyOf, started],
+    [cardKey, render, started],
   );
 
   // Figures changed: the pictures of the old ones go.
   useEffect(() => {
     const current = `|${cardKey}`;
     for (const key of [...started.keys()]) if (!key.endsWith(current)) started.delete(key);
-    setDrawn((prev) => (([...prev.keys()].every((key) => key.endsWith(current)) ? prev : new Map([...prev].filter(([key]) => key.endsWith(current))))));
+    setDrawn((prev) => ([...prev.keys()].every((key) => key.endsWith(current)) ? prev : new Map([...prev].filter(([key]) => key.endsWith(current)))));
   }, [cardKey, started]);
 
-  const get = (background: ShareBackground, unit: ShareUnit, scale: number): Drawn | undefined => drawn.get(keyOf(background, unit, scale));
+  const get = (part: string): Drawn | undefined => drawn.get(`${part}|${cardKey}`);
   return { request, get };
 }
 
-/** A background's preview in the picker: the whole card, small. */
-function Thumb({ drawn }: { drawn: Drawn | undefined }) {
-  const url = useObjectUrl(drawn instanceof Blob ? drawn : null);
+/** The PNG of a background and a unit: "grid|usd". */
+const drawCard = (card: ShareCardData, part: string): Promise<Blob> => {
+  const [background = "", unit = ""] = part.split("|");
+  if (!isBackground(background) || !isUnit(unit)) return Promise.reject(new Error(`no card ${part}`));
+  return renderShareCard(card, { background, unit });
+};
+/** The words alone, for a unit: "usd". */
+const drawWords = (card: ShareCardData, unit: string): Promise<Blob> => (isUnit(unit) ? renderShareWords(card, unit) : Promise.reject(new Error(`no unit ${unit}`)));
+
+export type Video = { readonly status: "making" } | { readonly status: "ready"; readonly blob: Blob } | { readonly status: "failed" };
+
+/**
+ * THE BAR OF THE VIDEO BEING MADE, MOVED BY HAND (measured 10-22). Its percent
+ * is written straight into the bar's DOM, not through React state: in WebKit
+ * the frames are drawn steadily (frame 30 at 360 ms, frame 150 at 841 ms) and
+ * the page paints between them, yet React committed no update until the very
+ * end — the bar said 0 %, then done. Written by hand, every engine shows it
+ * move, and nothing re-renders 100 times. `show` is the bar on screen, if any.
+ */
+export interface ProgressSink {
+  percent: number;
+  show: ((percent: number) => void) | null;
+}
+
+/**
+ * THE VIDEOS THIS DIALOG HAS MADE, by background and unit, for this card — and
+ * the one being made, which a new request, a closed dialog or a change of
+ * background or unit cancels (the caller's effect).
+ */
+function useShareVideos(card: ShareCardData) {
+  const cardKey = JSON.stringify(card);
+  const [videos, setVideos] = useState<ReadonlyMap<string, Video>>(() => new Map());
+  const making = useRef<{ readonly key: string; readonly controller: AbortController } | null>(null);
+  const progress = useRef<ProgressSink>({ percent: 0, show: null });
+  const keyOf = useCallback((background: ShareBackground, unit: ShareUnit) => `${background}|${unit}|${cardKey}`, [cardKey]);
+
+  const set = useCallback(
+    (key: string, video: Video | null): void =>
+      setVideos((prev) => {
+        const next = new Map(prev);
+        if (video === null) next.delete(key);
+        else next.set(key, video);
+        return next;
+      }),
+    [],
+  );
+
+  /** Stop the video being made, unless it is `keep`'s; it leaves no trace. */
+  const cancel = useCallback(
+    (keep?: string): void => {
+      const current = making.current;
+      if (current === null || current.key === keep) return;
+      making.current = null;
+      current.controller.abort();
+      set(current.key, null);
+    },
+    [set],
+  );
+
+  const make = useCallback(
+    (background: ShareBackground, unit: ShareUnit): void => {
+      cancel();
+      const key = keyOf(background, unit);
+      const controller = new AbortController();
+      making.current = { key, controller };
+      progress.current.percent = 0;
+      set(key, { status: "making" });
+      makeShareVideo({
+        card: JSON.parse(cardKey) as ShareCardData,
+        unit,
+        background,
+        signal: controller.signal,
+        onProgress: (done) => {
+          const percent = Math.min(99, Math.floor(done * 100));
+          if (percent === progress.current.percent || controller.signal.aborted) return;
+          progress.current.percent = percent;
+          progress.current.show?.(percent);
+        },
+      }).then(
+        (blob) => {
+          if (controller.signal.aborted) return;
+          making.current = null;
+          set(key, { status: "ready", blob });
+        },
+        () => {
+          if (controller.signal.aborted) return;
+          making.current = null;
+          set(key, { status: "failed" });
+        },
+      );
+    },
+    [cancel, cardKey, keyOf, set],
+  );
+
+  // Figures changed: the old card's videos go, and one in flight stops.
+  useEffect(() => {
+    const current = `|${cardKey}`;
+    if (making.current !== null && !making.current.key.endsWith(current)) cancel();
+    setVideos((prev) => ([...prev.keys()].every((key) => key.endsWith(current)) ? prev : new Map([...prev].filter(([key]) => key.endsWith(current)))));
+  }, [cancel, cardKey]);
+
+  // The dialog closed: nothing keeps encoding behind it.
+  useEffect(() => () => cancel(), [cancel]);
+
+  const get = (background: ShareBackground, unit: ShareUnit): Video | undefined => videos.get(keyOf(background, unit));
+  return { make, cancel, get, keyOf, progress: progress.current };
+}
+
+/** The bar and its percent, written by the sink while the video is made (ProgressSink says why). */
+function MakingBar({ sink }: { sink: ProgressSink }) {
+  const bar = useRef<HTMLDivElement>(null);
+  const fill = useRef<HTMLDivElement>(null);
+  const label = useRef<HTMLSpanElement>(null);
+  useLayoutEffect(() => {
+    const show = (percent: number): void => {
+      bar.current?.setAttribute("aria-valuenow", String(percent));
+      if (fill.current !== null) fill.current.style.width = `${percent}%`;
+      if (label.current !== null) label.current.textContent = SHARE_COPY.video.making(percent);
+    };
+    sink.show = show;
+    show(sink.percent);
+    return () => {
+      if (sink.show === show) sink.show = null;
+    };
+  }, [sink]);
+  return (
+    <div className="flex items-center gap-3">
+      {/* Its own bar, not ui/progress: that one keeps the value off the bar's role, so a screen reader would hear no number. */}
+      <div ref={bar} role="progressbar" aria-label={SHARE_COPY.video.makingSaid} aria-valuemin={0} aria-valuemax={100} aria-valuenow={0} className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+        <div ref={fill} className="h-full w-0 rounded-full bg-emerald-500 transition-[width] duration-150 motion-reduce:transition-none" />
+      </div>
+      <span ref={label} aria-hidden className="shrink-0 text-xs text-muted-foreground tabular-nums">
+        {SHARE_COPY.video.making(0)}
+      </span>
+    </div>
+  );
+}
+
+/** A background's preview in the picker: the plate's thumb, the card's words over it. */
+function Thumb({ plate, words }: { plate: SharePlate; words: string | null }) {
   return (
     <span
-      className="block w-full overflow-hidden rounded-md bg-[#0A0B11] ring-1 ring-foreground/10 ring-offset-2 ring-offset-popover group-data-[state=on]/toggle:ring-2 group-data-[state=on]/toggle:ring-emerald-500 sm:w-22"
+      className="relative block w-full overflow-hidden rounded-md bg-[#0A0B11] ring-1 ring-foreground/10 ring-offset-2 ring-offset-popover group-data-[state=on]/toggle:ring-2 group-data-[state=on]/toggle:ring-emerald-500 sm:w-22"
       style={{ aspectRatio: `${SHARE_CARD.width} / ${SHARE_CARD.height}` }}
     >
-      {url === null ? null : <img src={url} alt="" className="block size-full" draggable={false} />}
+      <img src={plate.thumb} alt="" className="absolute inset-0 block size-full" draggable={false} />
+      {words === null ? null : <img src={words} alt="" className="relative block size-full" draggable={false} />}
     </span>
+  );
+}
+
+/** THE VIDEO'S ROW: what it is, then its progress, then what to do with it. */
+export function VideoRow({
+  video,
+  progress,
+  seconds,
+  canShare,
+  onMake,
+  onCancel,
+  onDownload,
+  onShare,
+}: {
+  video: Video | undefined;
+  progress: ProgressSink;
+  seconds: number;
+  canShare: boolean;
+  onMake: () => void;
+  onCancel: () => void;
+  onDownload: (blob: Blob) => void;
+  onShare: (blob: Blob) => void;
+}) {
+  const titleId = useId();
+  const status = video?.status ?? "idle";
+  // Said to a screen reader once per state, not once per percent.
+  const said = status === "making" ? SHARE_COPY.video.makingSaid : video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : status === "failed" ? SHARE_COPY.video.failed : "";
+  return (
+    <section aria-labelledby={titleId} data-share-video={status} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+          <Film className="size-4" />
+        </span>
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <p id={titleId} className="text-sm leading-none font-medium">
+            {SHARE_COPY.video.title}
+          </p>
+          {video?.status === "making" ? (
+            <MakingBar sink={progress} />
+          ) : (
+            <p aria-hidden className={cn("text-xs", video?.status === "failed" ? "text-destructive" : video?.status === "ready" ? SAVED : "text-muted-foreground")}>
+              {video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : video?.status === "failed" ? SHARE_COPY.video.failed : SHARE_COPY.video.about(seconds)}
+            </p>
+          )}
+          <p role="status" aria-live="polite" className="sr-only">
+            {said}
+          </p>
+        </div>
+      </div>
+      <div className="flex gap-2 *:flex-1 max-sm:*:h-10 sm:*:flex-none">
+        {video?.status === "making" ? (
+          <Button type="button" variant="outline" onClick={onCancel} data-share-action="video-cancel">
+            <X aria-hidden />
+            {SHARE_COPY.video.cancel}
+          </Button>
+        ) : video?.status === "ready" ? (
+          <>
+            {canShare ? (
+              <Button type="button" variant="outline" onClick={() => onShare(video.blob)} data-share-action="video-share">
+                <Share aria-hidden />
+                {SHARE_COPY.video.share}
+              </Button>
+            ) : null}
+            <Button type="button" variant="outline" onClick={() => onDownload(video.blob)} data-share-action="video-download">
+              <Download aria-hidden />
+              {SHARE_COPY.video.download}
+            </Button>
+          </>
+        ) : (
+          <Button type="button" variant="outline" onClick={onMake} data-share-action="video-make">
+            {status === "failed" ? <RotateCcw aria-hidden /> : <Film aria-hidden />}
+            {status === "failed" ? SHARE_COPY.video.retry : SHARE_COPY.video.make}
+          </Button>
+        )}
+      </div>
+    </section>
   );
 }
 
 export function SharePanel({ card }: { card: ShareCardData }) {
   const ids = { background: useId(), unit: useId(), xHint: useId() };
-  const [background, setBackground] = useState<ShareBackground>("vault");
+  const [background, setBackground] = useState<ShareBackground>(SHARE_BACKGROUNDS[0]);
   const [picked, setPicked] = useState<ShareUnit>(() => defaultUnit(card));
   const unit = unitFor(card, picked);
   const units = unitsOf(card);
   // Asked once, in the browser: this body is only ever mounted by an open dialog.
   const [caps] = useState(() => shareCaps(globalThis as ShareScope));
-  const pictures = useSharePictures(card);
+  // Whether this browser can make the video: asked once, asynchronously; no row until it answers yes.
+  const [canVideo, setCanVideo] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void videoCaps().then((can) => {
+      if (live) setCanVideo(can);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const pictures = useCardBlobs(card, drawCard);
+  const words = useCardBlobs(card, drawWords);
+  const videos = useShareVideos(card);
   const { request } = pictures;
+  const requestWords = words.request;
 
-  // The picture asked for first, then the three previews in the same unit.
+  // The words first (the preview waits on them), then the image the actions take.
   useEffect(() => {
-    void request(background, unit, SHARE_SCALE).catch(() => undefined);
-    for (const each of SHARE_BACKGROUNDS) void request(each, unit, THUMB_SCALE).catch(() => undefined);
-  }, [request, background, unit]);
+    void requestWords(unit).catch(() => undefined);
+    void request(`${background}|${unit}`).catch(() => undefined);
+  }, [request, requestWords, background, unit]);
 
-  const main = pictures.get(background, unit, SHARE_SCALE);
+  // A video being made for another background or unit stops.
+  const { cancel: cancelVideo, keyOf: videoKeyOf } = videos;
+  useEffect(() => cancelVideo(videoKeyOf(background, unit)), [cancelVideo, videoKeyOf, background, unit]);
+
+  const main = pictures.get(`${background}|${unit}`);
   const ready = main instanceof Blob ? main : null;
-  // The last picture shown stays up while the next is drawn.
-  const [last, setLast] = useState<Blob | null>(null);
+  const wordsDrawn = words.get(unit);
+  const wordsReady = wordsDrawn instanceof Blob ? wordsDrawn : null;
+  // The last words shown stay up while the next are drawn.
+  const [lastWords, setLastWords] = useState<Blob | null>(null);
   useEffect(() => {
-    if (ready !== null) setLast(ready);
-  }, [ready]);
-  const shownUrl = useObjectUrl(ready ?? last);
+    if (wordsReady !== null) setLastWords(wordsReady);
+  }, [wordsReady]);
+  const wordsUrl = useObjectUrl(wordsReady ?? lastWords);
 
   const [said, setSaid] = useState<Said>("copied");
   const [saying, flash] = useFlash(SAID_MS);
@@ -201,12 +477,13 @@ export function SharePanel({ card }: { card: ShareCardData }) {
 
   const fileName = shareFileName(card);
   const text = sharePostText(card, unit);
+  const plate = SHARE_PLATES[background];
 
   function copy(then: "copied" | "copiedForX"): void {
     try {
       // BUILT IN THE CLICK, WITH A PROMISE: Safari takes a ClipboardItem only
       // inside the gesture, and lets its data arrive after it.
-      const item = new ClipboardItem({ "image/png": request(background, unit, SHARE_SCALE) });
+      const item = new ClipboardItem({ "image/png": request(`${background}|${unit}`) });
       navigator.clipboard.write([item]).then(
         () => say(then),
         () => say("copyFailed"),
@@ -217,27 +494,17 @@ export function SharePanel({ card }: { card: ShareCardData }) {
   }
 
   function download(): void {
-    if (ready === null) return;
-    const url = URL.createObjectURL(ready);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = fileName;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    // Once the browser has taken the file: revoked at once, Firefox can lose the save.
-    window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    if (ready !== null) saveFile(ready, fileName);
   }
 
-  function share(): void {
-    if (ready === null) return;
-    const file = new File([ready], fileName, { type: "image/png" });
+  function shareFile(blob: Blob, name: string, failed: Said): void {
+    const file = new File([blob], name, { type: blob.type });
     // The site inside the text: with a file attached, most targets drop a separate `url`.
     navigator.share({ files: [file], text: `${text} ${SHARE_SITE}` }).then(
       () => undefined,
       (error: unknown) => {
         // Closing the sheet is a choice, not a failure.
-        if ((error as { name?: unknown } | null)?.name !== "AbortError") say("shareFailed");
+        if ((error as { name?: unknown } | null)?.name !== "AbortError") say(failed);
       },
     );
   }
@@ -249,11 +516,11 @@ export function SharePanel({ card }: { card: ShareCardData }) {
     else say("noCopyForX");
   }
 
-  const drawFailed = main === "failed";
+  const drawFailed = main === "failed" || wordsDrawn === "failed";
 
   return (
     <>
-      <SharePreviewFrame src={shownUrl} alt={shareAlt(card, unit)} drawing={ready === null && !drawFailed} failed={drawFailed ? SHARE_COPY.drawFailed : null} />
+      <SharePreviewFrame plate={plate} src={wordsUrl} alt={shareAlt(card, unit)} drawing={wordsReady === null && !drawFailed} failed={drawFailed ? SHARE_COPY.drawFailed : null} />
 
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div className="min-w-0 space-y-1.5">
@@ -275,7 +542,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
                 value={each}
                 className="h-auto min-w-0 flex-col gap-1.5 p-0 text-xs font-normal text-muted-foreground hover:bg-transparent data-[state=on]:bg-transparent data-[state=on]:font-medium data-[state=on]:text-foreground"
               >
-                <Thumb drawn={pictures.get(each, unit, THUMB_SCALE)} />
+                <Thumb plate={SHARE_PLATES[each]} words={wordsUrl} />
                 {SHARE_COPY.backgrounds[each]}
               </ToggleGroupItem>
             ))}
@@ -295,7 +562,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
               aria-labelledby={ids.unit}
               className="w-full sm:w-auto"
               onValueChange={(value) => {
-                if (value === "usd" || value === "sol") setPicked(value);
+                if (isUnit(value)) setPicked(value);
               }}
             >
               <ToggleGroupItem value="usd" disabled={!units.includes("usd")} className="flex-1 px-3 font-mono">
@@ -311,6 +578,19 @@ export function SharePanel({ card }: { card: ShareCardData }) {
       {card.state === "saved" && !units.includes("usd") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.noPrice}</p> : null}
       {card.state === "saved" && !units.includes("sol") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.example.dollarsOnly}</p> : null}
 
+      {canVideo ? (
+        <VideoRow
+          video={videos.get(background, unit)}
+          progress={videos.progress}
+          seconds={videoSeconds(plate)}
+          canShare={caps.shareVideo}
+          onMake={() => videos.make(background, unit)}
+          onCancel={() => videos.cancel()}
+          onDownload={(blob) => saveFile(blob, shareFileName(card, "mp4"))}
+          onShare={(blob) => shareFile(blob, shareFileName(card, "mp4"), "videoShareFailed")}
+        />
+      ) : null}
+
       <DialogFooter className="flex-col sm:flex-row sm:items-center">
         {/*
           One band, two voices: what an action did — a live region, always in
@@ -318,11 +598,11 @@ export function SharePanel({ card }: { card: ShareCardData }) {
           empty, what Post on X will do.
         */}
         <div className="order-last flex min-h-4 items-center justify-center text-center text-xs sm:order-first sm:mr-auto sm:justify-start sm:text-left">
-          <p role="status" aria-live="polite" className={cn("flex items-center gap-1.5", GOOD[said] ? SAVED : "text-muted-foreground")}>
+          <p role="status" aria-live="polite" className={cn("flex items-center gap-1.5", SAID[said].good ? SAVED : "text-muted-foreground")}>
             {saying ? (
               <>
-                {GOOD[said] ? <Check aria-hidden className="size-3.5 shrink-0" /> : <CircleAlert aria-hidden className="size-3.5 shrink-0" />}
-                {SHARE_COPY[said]}
+                {SAID[said].good ? <Check aria-hidden className="size-3.5 shrink-0" /> : <CircleAlert aria-hidden className="size-3.5 shrink-0" />}
+                {SAID[said].words}
               </>
             ) : null}
           </p>
@@ -331,7 +611,7 @@ export function SharePanel({ card }: { card: ShareCardData }) {
           </p>
         </div>
         {caps.share ? (
-          <Button type="button" disabled={ready === null} onClick={share} className={cn("max-sm:h-10", OUTLINE_FROM_SM)} data-share-action="share">
+          <Button type="button" disabled={ready === null} onClick={() => ready !== null && shareFile(ready, fileName, "shareFailed")} className={cn("max-sm:h-10", OUTLINE_FROM_SM)} data-share-action="share">
             <Share aria-hidden />
             {SHARE_COPY.share}
           </Button>

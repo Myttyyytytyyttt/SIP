@@ -998,7 +998,7 @@ export const SHARE_COPY = {
   /** Nothing saved yet: the card states the rule instead of a zero. */
   descriptionZero: "An image of your savings rule, ready to post. No address, wallet or name is on it.",
   background: "Background",
-  backgrounds: { vault: "Vault", streaks: "Streaks", grid: "Grid" },
+  backgrounds: { grid: "Grid", streaks: "Streaks", vault: "Vault" },
   showIn: "Show in",
   /** No price read: the dollar figure does not exist, and the card shows the chain's SOL. */
   noPrice: "No SOL price right now, so the image shows SOL.",
@@ -1006,8 +1006,12 @@ export const SHARE_COPY = {
   share: "Share image",
   copy: "Copy image",
   copyShort: "Copy",
+  /** The image's: the video has its own row, and its own "Download video". */
   download: "Download",
   postOnX: "Post on X",
+  /** The preview's motion is a loop that never ends: it can be stopped (WCAG 2.2.2). */
+  pauseMotion: "Pause the motion",
+  playMotion: "Play the motion",
   /**
    * SAID BEFORE THE CLICK, under the actions (review, 10-22): X opens in a new
    * tab, in front, so whatever the dialog says after the click is behind it.
@@ -1028,6 +1032,25 @@ export const SHARE_COPY = {
   shareFailed: "That did not share. Download the image instead.",
   drawFailed: "This browser could not draw the image.",
 
+  // ── the video (owner, 10-22: "Vídeo corto MP4"): made in this browser, on request
+  video: {
+    title: "Video",
+    /** What it is, before it is made: how long, and where it plays as a loop. */
+    about: (seconds: number): string => `A ${seconds}-second MP4 of this card, moving. X, Telegram and Discord play it like a GIF.`,
+    make: "Make video",
+    making: (percent: number): string => `Making the video… ${percent}%`,
+    /** For a screen reader, once: not every percent. */
+    makingSaid: "Making the video.",
+    cancel: "Cancel",
+    ready: (seconds: number, size: string): string => `Ready: ${seconds} seconds, ${size}.`,
+    download: "Download video",
+    share: "Share video",
+    /** Said in words: a video that silently never comes reads as one that worked. */
+    failed: "This browser could not make the video. The image still works.",
+    retry: "Try again",
+    shareFailed: "That did not share. Download the video instead.",
+  },
+
   // ── the post's text: X adds the site's link after it ─────────────────────
   post: (figure: string): string => `I’ve saved ${figure} for my pension with ${BRAND} so far.`,
   postZero: (rule: string): string => `I’m building my pension with ${BRAND}: ${rule}, put aside for later.`,
@@ -1044,21 +1067,11 @@ export const SHARE_COPY = {
     titleSaved: "My pension",
     titleZero: "Building my pension",
     since: (date: string): string => `since ${date}`,
-    labelSaved: "Saved so far",
-    labelZero: "My savings rule",
-    /**
-     * Under a dollar figure: what turned SOL into dollars — and not the SOL
-     * figure itself, which the leaderboard prints beside the vault's address.
-     */
-    inSolAtPrice: "Saved in SOL, valued at today’s SOL price",
-    /** Under a SOL figure: the dollars it is worth at the one price read. */
-    usdAtPrice: (usd: string): string => `${usd} at today’s SOL price`,
     /** Beside the rate on a card with nothing saved yet, the landing's words in the first person. */
     zeroMeasure: { profit: "of my trading gains,", volume: "of every buy and sell," },
     zeroAside: "put aside for later.",
     /** The same line while the rule is paused: nothing is being put aside. */
     zeroPaused: "paused for now.",
-    zeroNote: "Into a pension only I control.",
     savingNow: "Saving now",
     /** A paused rule's row: not "Saving now", which it is not. */
     rule: "Rule",
@@ -1070,8 +1083,6 @@ export const SHARE_COPY = {
     streak: "Streak",
     streakDays: (days: number): string => `${days} days in a row`,
     investsIn: "Invests in",
-    savedSoFar: "Saved so far",
-    nothingYet: "Nothing yet",
     site: "saverfi.cash",
     tagline: "A pension that builds itself, on Solana",
   },
@@ -1097,19 +1108,17 @@ export const SHARE_COPY = {
     alt: (what: string): string => `Example ${BRAND} image, nobody’s pension: ${what}`,
     /** The pill at the image's top-right corner: the docs clips' label, word for word. */
     mark: "Example",
-    /** Under the figure, where a live card says what valued it: the sample's own notice (MODE_COPY.sample). */
-    note: "Example numbers. Nobody’s pension.",
     /**
-     * THE IMAGE'S OWN WORDS, where a pension's card says "My pension", "My
-     * savings rule" and "of my trading gains" (review, 10-22: the example's
-     * card said "My pension since Jun 2026" right above "Nobody's pension").
-     * The title is the card's largest line and the one a crop keeps with the
-     * figure, so it carries the mark itself; and nothing on it says "my".
+     * THE IMAGE'S OWN WORDS, where a pension's card says "My pension" and "of
+     * my trading gains" (review, 10-22: the example's card said "My pension
+     * since Jun 2026" right above "Nobody's pension"). The title is the card's
+     * largest line and the one a crop keeps with the figure, so it carries the
+     * mark itself — and, since the owner took every line from under the figure
+     * (10-22), it is the mark nearest the money; nothing on it says "my".
      */
     card: {
       titleSaved: "Example pension",
       titleZero: "Example pension",
-      labelZero: "Savings rule",
       zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
     },
   },

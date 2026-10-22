@@ -59,13 +59,19 @@ describe("the headers the config adds", () => {
     expect((await config.headers())[0]).toEqual({ source: "/:path*", headers: securityHeaders() });
   });
 
-  it("caches the docs' clips for a year, immutable, only at a versioned URL, and nothing else", async () => {
+  it("caches the docs' clips and the share card's plates for a year, immutable, only at a versioned URL, and nothing else", async () => {
     const config = (await import("../next.config.mjs")).default;
     const cached = (await config.headers()).filter((rule) => rule.headers.some((header) => header.key.toLowerCase() === "cache-control"));
     expect(cached).toEqual([
       {
         source: "/docs/clips/:file*",
         // The ?v= every docs page's clip URL carries (src/lib/docs/clips.ts): a bare address keeps public/'s default.
+        has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+      {
+        source: "/share/:file*",
+        // The ?v= every plate URL carries (src/lib/share-plates.ts), checked by check:plates.
         has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },

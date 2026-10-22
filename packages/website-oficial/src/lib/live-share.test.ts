@@ -14,6 +14,7 @@ import type { LiveDashboard } from "@/lib/live-types";
 import {
   HERO_ROOM,
   HERO_STEPS,
+  SHARE_BACKGROUNDS,
   SHARE_SITE,
   basketLine,
   defaultUnit,
@@ -53,7 +54,7 @@ describe("the card's figures, from the Live page's own", () => {
   it("a pension with savings: today's dollars, the chain's SOL, the rule, the day", () => {
     const shared = cardOf();
     // The fixture: 0.06 SOL at $100.038711.
-    expect(shared).toMatchObject({ state: "saved", usdText: "$6.00", solText: "0.06", priced: true, rate: "20%", mode: "profit", paused: false, basket: ["SPYx"] });
+    expect(shared).toMatchObject({ state: "saved", usdText: "$6.00", solText: "0.06", rate: "20%", mode: "profit", paused: false, basket: ["SPYx"] });
     expect(shared.asOf).toBe("Sep 16, 2026");
     expect(shared.day).toBe("2026-09-16");
     expect(shared.since).toBe("Sep 2026");
@@ -70,14 +71,14 @@ describe("the card's figures, from the Live page's own", () => {
     expect(cardOf(withSaved(null)).state).toBe("unknown");
   });
 
-  it("no price read: no dollars, SOL by default and the only unit, and no note to qualify it", () => {
+  it("no price read: no dollars, SOL by default and the only unit", () => {
     const shared = cardOf(liveDashboard({ snapshot: liveSnapshot({ prices: null }) }));
     expect(shared.state).toBe("saved");
     expect(shared.usdText).toBeNull();
     expect(defaultUnit(shared)).toBe("sol");
     expect(unitsOf(shared)).toEqual(["sol"]);
     expect(unitFor(shared, "usd")).toBe("sol");
-    expect(shareHero(shared, "usd")).toEqual({ number: "0.06", unit: "SOL", compact: "0.1", note: null });
+    expect(shareHero(shared, "usd")).toEqual({ number: "0.06", unit: "SOL", compact: "0.1" });
   });
 
   it("dollars by default where there is a price (owner, 10-22)", () => {
@@ -122,13 +123,11 @@ describe("a Live page's card is never the example", () => {
       const shared = cardOf(data);
       expect(shared.example, name).toBe(false);
       expect(shareFileName(shared), name).toMatch(/^saverfi-pension-\d{4}-\d{2}-\d{2}\.png$/);
+      expect(shareFileName(shared, "mp4"), name).toMatch(/^saverfi-pension-\d{4}-\d{2}-\d{2}\.mp4$/);
       expect(shareWords(shared).trigger, name).toBe(SHARE_COPY.trigger);
       for (const unit of ["usd", "sol"] as const) {
-        const said = [sharePostText(shared, unit), shareAlt(shared, unit), shareHero(shared, unit)?.note ?? "", ...Object.values(shareWords(shared))];
-        for (const sentence of said) {
-          expect(sentence, name).not.toMatch(/example/i);
-          expect(sentence, name).not.toContain(SHARE_COPY.example.note);
-        }
+        const said = [sharePostText(shared, unit), shareAlt(shared, unit), ...Object.values(shareWords(shared))];
+        for (const sentence of said) expect(sentence, name).not.toMatch(/example|nobody/i);
       }
     }
   });
@@ -136,14 +135,14 @@ describe("a Live page's card is never the example", () => {
 
 describe("an example card (the flag's own rules; the sample's figures: sample-share.test.ts)", () => {
   /** What exampleShareCardOf makes of a page with no SOL total: dollars only, flagged. */
-  const example = card({ example: true, solText: null, solCompact: null, priced: false, usdText: "$2,073.42", usdCompact: "$2.1K" });
+  const example = card({ example: true, solText: null, solCompact: null, usdText: "$2,073.42", usdCompact: "$2.1K" });
 
   it("is dollars only, whichever unit is asked for", () => {
     expect(unitsOf(example)).toEqual(["usd"]);
     expect(defaultUnit(example)).toBe("usd");
     expect(unitFor(example, "sol")).toBe("usd");
     for (const unit of ["usd", "sol"] as const) {
-      expect(shareHero(example, unit)).toEqual({ number: "$2,073.42", unit: null, compact: "$2.1K", note: SHARE_COPY.example.note });
+      expect(shareHero(example, unit)).toEqual({ number: "$2,073.42", unit: null, compact: "$2.1K" });
     }
   });
 
@@ -153,6 +152,7 @@ describe("an example card (the flag's own rules; the sample's figures: sample-sh
       expect(shareAlt(example, unit)).toBe("Example SaverFi image, nobody’s pension: $2,073.42 saved");
     }
     expect(shareFileName(example)).toBe("saverfi-example-2026-09-16.png");
+    expect(shareFileName(example, "mp4")).toBe("saverfi-example-2026-09-16.mp4");
     expect(shareWords(example)).toMatchObject({ trigger: "Share this example", title: "Share the example" });
     expect(shareWords(example).description).toContain("“Example”");
   });
@@ -165,8 +165,9 @@ describe("nothing on it identifies anyone", () => {
     for (const who of [OWNER, VAULT, WALLET_A]) expect(everything).not.toContain(who);
   });
 
-  it("the file is named by the day alone", () => {
+  it("the files are named by the day alone: the image and the video", () => {
     expect(shareFileName(cardOf())).toBe("saverfi-pension-2026-09-16.png");
+    expect(shareFileName(cardOf(), "mp4")).toBe("saverfi-pension-2026-09-16.mp4");
   });
 
   /**
@@ -185,7 +186,7 @@ describe("nothing on it identifies anyone", () => {
     const said: string[] = [JSON.stringify(shared)];
     for (const unit of ["usd", "sol"] as const) {
       const hero = shareHero(shared, unit)!;
-      said.push(hero.number, hero.compact, hero.note ?? "", sharePostText(shared, unit), shareAlt(shared, unit));
+      said.push(hero.number, hero.compact, sharePostText(shared, unit), shareAlt(shared, unit));
       for (const row of shareRows(shared)) said.push(row.label, row.value, row.after ?? "");
     }
     for (const sentence of said) {
@@ -197,23 +198,30 @@ describe("nothing on it identifies anyone", () => {
   });
 });
 
+/**
+ * NOTHING AROUND THE FIGURE BUT THE FIGURE (owner, 10-22: "Quitamos en todas
+ * las imágenes lo que está debajo del dinero: saved so far, value at sols price
+ * today"). The hero is the number, its unit and a shorter form; no line under it
+ * in either unit, on any card — what it says on the image: share-canvas.test.ts.
+ */
 describe("the hero", () => {
-  it("in dollars, with what valued them under it — and not the SOL figure", () => {
-    expect(shareHero(card({ usdText: "$2,073.42", usdCompact: "$2.1K", solText: "11.42" }), "usd")).toEqual({
-      number: "$2,073.42",
-      unit: null,
-      compact: "$2.1K",
-      note: "Saved in SOL, valued at today’s SOL price",
-    });
+  it("in dollars: the figure alone — nothing under it, and never the SOL figure", () => {
+    const hero = shareHero(card({ usdText: "$2,073.42", usdCompact: "$2.1K", solText: "11.42" }), "usd");
+    expect(hero).toEqual({ number: "$2,073.42", unit: null, compact: "$2.1K" });
+    expect(JSON.stringify(hero)).not.toContain("11.42");
   });
 
-  it("in SOL, with the dollars under it", () => {
-    expect(shareHero(card({ usdText: "$2,073.42", solText: "11.42", solCompact: "11.4" }), "sol")).toEqual({
-      number: "11.42",
-      unit: "SOL",
-      compact: "11.4",
-      note: "$2,073.42 at today’s SOL price",
-    });
+  it("in SOL: the figure and its unit — and not the dollars under it", () => {
+    const hero = shareHero(card({ usdText: "$2,073.42", solText: "11.42", solCompact: "11.4" }), "sol");
+    expect(hero).toEqual({ number: "11.42", unit: "SOL", compact: "11.4" });
+    expect(JSON.stringify(hero)).not.toContain("$2,073.42");
+  });
+});
+
+describe("the backgrounds", () => {
+  it("Grid first — the one a dialog opens on — then Streaks and Vault (owner, 10-22)", () => {
+    expect(SHARE_BACKGROUNDS).toEqual(["grid", "streaks", "vault"]);
+    expect(Object.keys(SHARE_COPY.backgrounds)).toEqual([...SHARE_BACKGROUNDS]);
   });
 });
 
@@ -271,8 +279,12 @@ describe("the rows", () => {
     expect(shareRows(card({ mode: "volume", rate: "2%", paused: true }))[0]).toEqual({ label: "Rule", value: "2% of every buy and sell", after: " · paused" });
   });
 
-  it("a card with nothing saved says so, quietly", () => {
-    expect(shareRows(card({ state: "zero", basket: [] }))).toEqual([{ label: "Saved so far", value: "Nothing yet", muted: true }]);
+  it("a card with nothing saved has its rule as its hero, so its rows are the basket alone — no \"Saved so far\" (owner, 10-22)", () => {
+    expect(shareRows(card({ state: "zero", basket: [] }))).toEqual([]);
+    expect(shareRows(card({ state: "zero", basket: ["SPYx", "ANTHROPIC"] }))).toEqual([{ label: "Invests in", value: "SPYx · ANTHROPIC" }]);
+    for (const state of ["saved", "zero"] as const) {
+      for (const row of shareRows(card({ state, streakDays: 5, paused: state === "zero" }))) expect(`${row.label} ${row.value}`).not.toMatch(/saved so far|nothing yet/i);
+    }
   });
 
   it("the basket: three at most, then how many more", () => {
@@ -313,8 +325,8 @@ describe("the actions this browser can carry out", () => {
   const canShare = (): boolean => true;
 
   it("none where there is no clipboard or sheet (a server, an old browser)", () => {
-    expect(shareCaps({})).toEqual({ copy: false, share: false });
-    expect(shareCaps({ navigator: {} })).toEqual({ copy: false, share: false });
+    expect(shareCaps({})).toEqual({ copy: false, share: false, shareVideo: false });
+    expect(shareCaps({ navigator: {} })).toEqual({ copy: false, share: false, shareVideo: false });
   });
 
   it("copy where an image can go on the clipboard, and not where the browser says PNG cannot", () => {
@@ -334,5 +346,15 @@ describe("the actions this browser can carry out", () => {
     expect(shareCaps({ navigator: { share: () => Promise.resolve(), canShare }, File }).share).toBe(true);
     expect(shareCaps({ navigator: { share: () => Promise.resolve(), canShare: () => false }, File }).share).toBe(false);
     expect(shareCaps({ navigator: { canShare }, File }).share).toBe(false);
+  });
+
+  it("the video's sheet asked on its own: a sheet that takes an image need not take an MP4", () => {
+    const imagesOnly = ({ files }: { files: File[] }): boolean => files.every((file) => file.type === "image/png");
+    expect(shareCaps({ navigator: { share: () => Promise.resolve(), canShare }, File })).toMatchObject({ share: true, shareVideo: true });
+    expect(shareCaps({ navigator: { share: () => Promise.resolve(), canShare: imagesOnly }, File })).toMatchObject({ share: true, shareVideo: false });
+    const throws = (): boolean => {
+      throw new TypeError("no");
+    };
+    expect(shareCaps({ navigator: { share: () => Promise.resolve(), canShare: throws }, File })).toMatchObject({ share: false, shareVideo: false });
   });
 });

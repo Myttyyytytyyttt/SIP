@@ -54,13 +54,13 @@ describe("the sample's card, from the sample's own figures", () => {
 
   it("has no SOL: the sample has no SOL total, and none is made up for it", () => {
     expect(mock.stats.totalSavedSol).toBeUndefined();
-    expect(card).toMatchObject({ solText: null, solCompact: null, priced: false });
+    expect(card).toMatchObject({ solText: null, solCompact: null });
     expect(unitsOf(card)).toEqual(["usd"]);
     expect(defaultUnit(card)).toBe("usd");
     expect(unitFor(card, "sol")).toBe("usd");
     expect(shareHero(card, "sol")).toEqual(shareHero(card, "usd"));
-    // Under the figure, where a live card says what valued it: that it is nobody's.
-    expect(shareHero(card, "usd")?.note).toBe("Example numbers. Nobody’s pension.");
+    // Nothing under the figure (owner, 10-22): the card's "Example pension" and its pill say whose it is (share-canvas.test.ts).
+    expect(shareHero(card, "usd")).toEqual({ number: card.usdText, unit: null, compact: card.usdCompact });
   });
 
   it("posts a line about SaverFi — no \"my pension\", no \"I've saved\", no figure of anybody's", () => {
@@ -74,9 +74,10 @@ describe("the sample's card, from the sample's own figures", () => {
     }
   });
 
-  it("describes the image as the example, and names the file so", () => {
+  it("describes the image as the example, and names the files so", () => {
     expect(shareAlt(card, "usd")).toBe(`Example SaverFi image, nobody’s pension: ${card.usdText} saved`);
     expect(shareFileName(card)).toBe(`saverfi-example-${mock.now.slice(0, 10)}.png`);
+    expect(shareFileName(card, "mp4")).toBe(`saverfi-example-${mock.now.slice(0, 10)}.mp4`);
   });
 
   it("carries nothing of the sample's made-up wallet either", () => {

@@ -61,6 +61,15 @@ const nextConfig = {
         has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
         headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
+      // THE SHARE CARD'S PLATES, THE SAME WAY (10-22): the dialog asks for a
+      // plate's still, thumb and loop on every open, and the video export for its
+      // MP4. Every URL it uses carries its file's version (src/lib/share-plates.ts),
+      // which check:plates checks before every build.
+      {
+        source: "/share/:file*",
+        has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
     ];
   },
 
