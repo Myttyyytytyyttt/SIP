@@ -92,6 +92,7 @@ import { ExampleActivity, LandingBackdrop } from "@/components/landing-backdrop"
 import { Separator } from "@/components/ui/separator";
 import { useWalletsOpener } from "@/components/wallets-host";
 import type { UrlMode } from "@/lib/dashboard-mode";
+import { DOCS_HOME } from "@/lib/docs/pages";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { privyFailure } from "@/lib/privy-failure";
 import { cn } from "@/lib/utils";
@@ -789,7 +790,8 @@ export function Landing({
             this bar crowds Connect, and Connect is what this page is for.
 
             THEN THE BAR'S TWO SIDES (owner, 10-08), as in the app's own header:
-            the pages, Dashboard last; a rule; and the account — Connect.
+            the pages, Dashboard last; a rule; and the account — Connect. The
+            Docs (owner, 10-22) are one of the pages, so they sit before it.
           */}
           <a
             href="/leaderboard"
@@ -809,6 +811,15 @@ export function Landing({
             )}
           >
             See the app
+          </a>
+          <a
+            href={DOCS_HOME}
+            className={cn(
+              "hidden rounded-full px-4 py-2 text-sm font-medium text-white/70 transition-colors hover:text-white sm:inline-flex",
+              FOCUS,
+            )}
+          >
+            Docs
           </a>
           <a
             href="/dashboard"
@@ -896,6 +907,18 @@ export function Landing({
                   style={{ animationDelay: "1.04s" }}
                 >
                   Dashboard
+                  <ArrowUpRight size={14} aria-hidden />
+                </a>
+                {/* And the docs: the bar's Docs is from sm up too, and this page has no footer to carry it. */}
+                <a
+                  href={DOCS_HOME}
+                  className={cn(
+                    "landing-in landing-in-pop flex items-center gap-1.5 px-2 py-3 text-sm font-medium text-white/60 transition-colors hover:text-white sm:hidden",
+                    FOCUS,
+                  )}
+                  style={{ animationDelay: "1.1s" }}
+                >
+                  Docs
                   <ArrowUpRight size={14} aria-hidden />
                 </a>
               </div>

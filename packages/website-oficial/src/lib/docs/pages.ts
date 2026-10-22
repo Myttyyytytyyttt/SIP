@@ -132,6 +132,15 @@ export function docHref(slug: DocSlug): string {
   return `/docs/${slug}`;
 }
 
+/**
+ * WHERE A LINK TO THE DOCS GOES (owner, 10-22: the header, the footer and the
+ * landing link them): straight to the first page, never to /docs. /docs is a
+ * redirect, so it would cost every reader a hop — and the header's tabs raise
+ * the route loader until the path they named is on screen (route-loader.tsx),
+ * which /docs never is: the loader would hang for its whole MAX_MS.
+ */
+export const DOCS_HOME: string = docHref(FIRST_DOC.slug);
+
 /** The page a pathname shows, or null off /docs or on an address that is not a page. */
 export function docSlugOf(pathname: string | null): DocSlug | null {
   const match = pathname?.match(/^\/docs\/([^/?#]+)\/?$/);

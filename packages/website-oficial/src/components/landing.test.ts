@@ -1,7 +1,8 @@
 // The landing's ways out (owner, 10-08): Connect logs in and a login made here
 // goes into the pension; somebody already connected gets "Open my pension";
-// See the app opens the example; Leaderboard and Dashboard are real links, and
-// the bar reads as the app's header does — the pages, a rule, then the account.
+// See the app opens the example; Leaderboard, Docs (10-22) and Dashboard are
+// real links, and the bar reads as the app's header does — the pages, a rule,
+// then the account.
 //
 // Rendered to HTML with Privy mocked. Effects never run here, so the click and
 // the fade are proven in a browser; the decisions are the pure functions, and a
@@ -163,7 +164,7 @@ describe("the intro's five minutes of memory (owner, 10-08)", () => {
 });
 
 describe("the bar", () => {
-  it("lists the pages, Dashboard last, then a rule, then Connect", () => {
+  it("lists the pages, Docs among them and Dashboard last, then a rule, then Connect", () => {
     const nav = navOf(render());
     const at = (needle: string) => {
       const i = nav.indexOf(needle);
@@ -173,6 +174,7 @@ describe("the bar", () => {
     const order = [
       at('href="/leaderboard"'),
       at('href="/?mode=mock"'),
+      at('href="/docs/what-is-saverfi"'),
       at('href="/dashboard"'),
       at('data-slot="separator"'),
       at(">Connect</button>"),
@@ -180,6 +182,7 @@ describe("the bar", () => {
     expect(order).toEqual([...order].sort((a, b) => a - b));
     expect(nav).toContain('data-orientation="vertical"');
     expect(nav).toContain(">Dashboard</a>");
+    expect(nav).toContain(">Docs</a>");
   });
 
   it("leaves Leaderboard and Dashboard as real links: other pages, not the fade into the example", () => {
@@ -190,13 +193,17 @@ describe("the bar", () => {
     expect(html.match(/href="\/\?mode=mock"/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
   });
 
-  it("keeps Dashboard reachable on a phone, where the bar shows Connect alone", () => {
+  it.each(["/dashboard", "/docs/what-is-saverfi"])("keeps %s reachable on a phone, where the bar shows Connect alone", (path) => {
     const html = render();
-    const links = html.match(/<a href="\/dashboard"[^>]*>/g) ?? [];
+    const links = html.match(new RegExp(`<a href="${path.replaceAll("/", "\\/")}"[^>]*>`, "g")) ?? [];
     expect(links).toHaveLength(2);
     // The bar's from sm up, the hero's below it: never both on one screen.
     expect(links.filter((a) => a.includes("sm:inline-flex"))).toHaveLength(1);
     expect(links.filter((a) => a.includes("sm:hidden"))).toHaveLength(1);
+  });
+
+  it("sends Docs straight to its first page, never through the /docs redirect", () => {
+    expect(render()).not.toMatch(/href="\/docs"/);
   });
 });
 

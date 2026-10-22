@@ -27,11 +27,13 @@ import { SipMark } from "@/components/sip-mark";
 import { Separator } from "@/components/ui/separator";
 import { LABEL, MONO } from "@/lib/classes";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
+import { DOCS_HOME } from "@/lib/docs/pages";
 import { cn } from "@/lib/utils";
 
 /**
- * PLACEHOLDERS, and the `#` is the honest part: none of these pages exist yet,
- * exactly like the header's own nav. `/wallets` is deliberately NOT here — the
+ * THE APP'S PAGES, then the docs and the fine print. Privacy and Terms are
+ * placeholders, and the `#` is the honest part: those pages do not exist yet.
+ * `/wallets` is deliberately NOT here — the
  * way into wallet management is the sidebar's "Manage wallets", which opens a
  * modal over the dashboard; a second, worse door in the footer would undo that.
  */
@@ -44,7 +46,8 @@ const LINKS = [
   { title: "Leaderboard", href: "/leaderboard" },
   // Every pension added up. Below md the header's tabs are gone, so this is a phone's one door to it.
   { title: "Dashboard", href: "/dashboard" },
-  { title: "Docs", href: "#" },
+  // The docs (owner, 10-22): the same for the sample and for a pension, so they take no mode (hrefOf below).
+  { title: "Docs", href: DOCS_HOME, modeless: true },
   { title: "Privacy", href: "#" },
   { title: "Terms", href: "#" },
 ] as const;
@@ -67,8 +70,9 @@ const QUIET =
 export function SiteFooter({ now, className, mode = null }: { now: string; className?: string; /** The mode the app's own links carry; see SiteHeader. */ mode?: UrlMode | null }) {
   // ISO 8601, always `YYYY-…` — the same string the rest of the page dates from.
   const year = now.slice(0, 4);
-  // Only the app's own pages take the mode; an anchor or anywhere else is left as it is.
-  const hrefOf = (href: string): string => (mode !== null && href.startsWith("/") ? urlWithMode(href, mode) : href);
+  // Only the app's own pages take the mode; the docs, an anchor or anywhere else is left as it is.
+  const hrefOf = (link: (typeof LINKS)[number]): string =>
+    mode !== null && link.href.startsWith("/") && !("modeless" in link) ? urlWithMode(link.href, mode) : link.href;
 
   return (
     <footer className={cn("border-t", className)}>
@@ -104,10 +108,10 @@ export function SiteFooter({ now, className, mode = null }: { now: string; class
               column — four rows since the dashboard joined, so the four pages stay in the first column.
             */}
             <ul className="mt-4 grid w-fit grid-flow-col grid-rows-4 gap-x-12 gap-y-2.5 text-sm">
-              {LINKS.map(({ title, href }) => (
-                <li key={title}>
-                  <AppLink className={QUIET} href={hrefOf(href)}>
-                    {title}
+              {LINKS.map((link) => (
+                <li key={link.title}>
+                  <AppLink className={QUIET} href={hrefOf(link)}>
+                    {link.title}
                   </AppLink>
                 </li>
               ))}

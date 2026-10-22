@@ -1,9 +1,8 @@
 // /docs (owner, 10-22): the index on the left, the page from the centre to the
-// right, a clip where one helps — and, until the owner makes them official, reached
-// by their URL alone. These hold the owner's list of pages, what every page
+// right, a clip where one helps — linked from the header, the footer and the
+// landing since 10-22. These hold the owner's list of pages, what every page
 // renders, and his decisions that a writer could undo without noticing: no
-// status tags, noindex, no link from the header or the footer, never a broken
-// video. And what makes a page load fast (10-22, measured): the poster asked for
+// status tags, noindex, never a broken video. And what makes a page load fast (10-22, measured): the poster asked for
 // first, no video byte before the loop plays, every clip's URL versioned by its
 // content so it can be cached for a year.
 
@@ -23,7 +22,7 @@ import { DocsNav } from "@/components/docs/docs-nav";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { CLIPS, clipOf } from "@/lib/docs/clips";
-import { DOC_GROUPS, DOC_PAGES, docNeighbours, docSlugOf, type DocSlug } from "@/lib/docs/pages";
+import { DOC_GROUPS, DOC_PAGES, DOCS_HOME, docNeighbours, docSlugOf, type DocSlug } from "@/lib/docs/pages";
 
 import { VERSIONED, clipProblems } from "../../../scripts/check-clips.mts";
 
@@ -361,9 +360,13 @@ describe("the owner's decisions, held in every page (10-22)", () => {
     expect(await everything()).not.toMatch(/\bSIP\b|Nuvem/);
   });
 
-  it("is not linked yet: the header's and the footer's Docs links stay '#'", () => {
+  it("is linked from the header and the footer (owner, 10-22), straight to its first page and with no mode", () => {
     const docsHref = (html: string) => html.match(/<a [^>]*href="([^"]*)"[^>]*>Docs<\/a>/)?.[1];
-    expect(docsHref(renderToStaticMarkup(createElement(SiteHeader, { activitySheet: null, account: null })))).toBe("#");
-    expect(docsHref(renderToStaticMarkup(createElement(SiteFooter, { now: "2026-10-22T00:00:00.000Z" })))).toBe("#");
+    expect(DOCS_HOME).toBe("/docs/what-is-saverfi");
+    for (const mode of [undefined, "mock", "live"] as const) {
+      const props = mode === undefined ? {} : { mode };
+      expect(docsHref(renderToStaticMarkup(createElement(SiteHeader, { activitySheet: null, account: null, ...props }))), String(mode)).toBe(DOCS_HOME);
+      expect(docsHref(renderToStaticMarkup(createElement(SiteFooter, { now: "2026-10-22T00:00:00.000Z", ...props }))), String(mode)).toBe(DOCS_HOME);
+    }
   });
 });

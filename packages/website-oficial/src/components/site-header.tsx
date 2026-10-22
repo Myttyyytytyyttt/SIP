@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
+import { DOCS_HOME } from "@/lib/docs/pages";
 import { cn } from "@/lib/utils";
 
 /**
@@ -90,9 +91,11 @@ export function SiteHeader({
     // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
     // this link works for a visitor who has never connected anything.
     { label: "Leaderboard", href: tab("/leaderboard"), current: current === "leaderboard", className: undefined },
-    // A placeholder ("#"), so it is the one that gives way between md and lg:
-    // with the tabs, the Dashboard, the Live|Mock control and the account, 768 px overflowed.
-    { label: "Docs", href: "#", current: false, className: "hidden lg:inline-flex" },
+    // THE DOCS (owner, 10-22), public and modeless: they are the same for the
+    // sample and for a pension, so no ?mode. Still the one that gives way between
+    // md and lg: with the tabs, the Dashboard, the Live|Mock control and the
+    // account, 768 px overflowed. Below lg the footer carries it.
+    { label: "Docs", href: DOCS_HOME, current: false, className: "hidden lg:inline-flex" },
   ];
   // Every pension added up (owner, 10-06): public as well, and it follows the
   // mode like the rest — the sample in Mock, the real figures in Live. On the

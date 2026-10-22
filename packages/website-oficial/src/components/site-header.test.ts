@@ -45,8 +45,9 @@ describe("the navbar's tabs", () => {
     expect(href(html, "Dashboard")).toBe("/dashboard");
   });
 
-  it("leave a link that goes nowhere in the app as it is", () => {
-    expect(href(nav("mock"), "Docs")).toBe("#");
+  it("leave the docs bare: they are the same in the sample and in a pension", () => {
+    expect(href(nav("mock"), "Docs")).toBe("/docs/what-is-saverfi");
+    expect(href(nav(), "Docs")).toBe("/docs/what-is-saverfi");
   });
 });
 
