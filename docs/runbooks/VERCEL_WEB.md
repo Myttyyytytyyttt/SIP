@@ -24,8 +24,8 @@ Vercel en GitHub.
 
 - **Framework Preset**: Next.js. Ya lo fija `packages/website-oficial/vercel.json`.
 - **Root Directory**: `packages/website-oficial`.
-- **Build Command, Install Command y Output Directory**: sin tocar. El build de la web ejecuta `check:csp` y `check:idl`
-  antes de `next build`, y un comando propio se los salta.
+- **Build Command, Install Command y Output Directory**: sin tocar. El build de la web ejecuta `check:csp`, `check:clips` y
+  `check:idl` antes de `next build`, y un comando propio se los salta.
 - Añade las variables del paso 2 **antes** de pulsar **Deploy**.
 
 Después, en **Settings**:
@@ -109,6 +109,7 @@ bash -c '. ~/sip-keys/sip-hackathon.env; printf %s "$SIP_SOLANA_RPC_URLS"' | pbc
 - **Las rutas de Solana responden 429 a todo el mundo, o nadie ve nunca un 429**: comprueba que
   `SIP_TRUSTED_CLIENT_IP_HEADER` sea exactamente `x-real-ip`. Con cualquier otro valor los límites por visitante no
   protegen, aunque todo parezca funcionar.
-- **El build falla en `check:csp` o `check:idl`**: no lo saltes con un Build Command propio. Pásale el log a Claude.
+- **El build falla en `check:csp`, `check:clips` o `check:idl`**: no lo saltes con un Build Command propio. Pásale el log a
+  Claude.
 - **Un secreto se pega en el sitio equivocado** (en un chat, en un log, en Preview): se rota, como dice
   [SECRETS.md](SECRETS.md).

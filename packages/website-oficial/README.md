@@ -151,8 +151,9 @@ src/components/ui/*                 shadcn, generated — add with `pnpm dlx sha
 pnpm --dir packages/website-oficial run typecheck
 pnpm --dir packages/website-oficial run test
 pnpm --dir packages/website-oficial run check:csp   # the production Content-Security-Policy, pinned byte for byte
+pnpm --dir packages/website-oficial run check:clips # every /docs clip in public/, every cached-for-a-year URL at its file's version
 pnpm --dir packages/website-oficial run check:idl   # solana-core's check of the program's IDL
-pnpm --dir packages/website-oficial run build       # its prebuild runs check:csp and check:idl
+pnpm --dir packages/website-oficial run build       # its prebuild runs check:csp, check:clips and check:idl
 pnpm --dir packages/website-oficial run verify      # all of the above
 ```
 

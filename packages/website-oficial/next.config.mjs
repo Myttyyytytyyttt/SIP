@@ -51,10 +51,16 @@ const nextConfig = {
       // measured). public/ is served "max-age=0", so every visit asked again for
       // the poster and for each range of the loop, a round trip each before the
       // loop played. Safe only because every URL a docs page uses carries its
-      // file's version (?v=, src/lib/docs/clips.ts), which docs.test.ts checks:
-      // a re-rendered clip gets a new address. Nothing outside /docs/clips/
-      // changes: the landing's /landing/* keeps public/'s default.
-      { source: "/docs/clips/:file*", headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }] },
+      // file's version (?v=, src/lib/docs/clips.ts), which check:clips checks
+      // before every build: a re-rendered clip gets a new address. And only a
+      // URL that carries one: a bare /docs/clips/ address, which no page uses,
+      // keeps public/'s default, so it can never pin an old file for a year.
+      // Nothing outside /docs/clips/ changes: /landing/* keeps public/'s default.
+      {
+        source: "/docs/clips/:file*",
+        has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
     ];
   },
 

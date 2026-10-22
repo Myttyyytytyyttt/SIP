@@ -28,7 +28,10 @@
  * or less data (Save-Data), none for a refused play(), none while the clip is
  * out of view. It pauses as it leaves the screen or the tab is hidden, and plays
  * again on the way back, unless the reader paused it. The poster stays on screen
- * until the loop's first frame is painted, so its start is never black.
+ * until the loop's first frame is painted, so its start is never black. And a
+ * clip whose page is gone (a client navigation) stops downloading: taken off the
+ * page, a video only pauses, and its fetch would run to the end beside the next
+ * page's.
  *
  * THE POSTER IS ASKED FOR FIRST. It is the page's largest paint, and as a plain
  * poster it was fetched at medium priority beside all of the page's scripts and
@@ -80,6 +83,7 @@ function PageClip({ slug, className }: { readonly slug: DocSlug; readonly classN
 /**
  * "idle" until the browser has said whether to play, and while the page itself
  * holds the loop (out of view, tab hidden): no button over a loop about to start.
+ * Not while that button has the keyboard's focus: then it stays as it was.
  */
 type Playback = "idle" | "playing" | "paused";
 
@@ -87,6 +91,7 @@ function ClipVideo({ files, onBroken, className }: { readonly files: ClipFiles; 
   // Rendered on the server, this lands in the <head>, ahead of the scripts.
   preload(files.poster, { as: "image", fetchPriority: "high" });
   const video = useRef<HTMLVideoElement>(null);
+  const button = useRef<HTMLButtonElement>(null);
   const [playback, setPlayback] = useState<Playback>("idle");
   // Once the reader has pressed play (true) or pause (false), their choice stands over the motion and data settings.
   const chosen = useRef<boolean | null>(null);
@@ -140,16 +145,33 @@ function ClipVideo({ files, onBroken, className }: { readonly files: ClipFiles; 
       seen.disconnect();
       query.removeEventListener("change", follow);
       document.removeEventListener("visibilitychange", follow);
+      // The clip is gone from the page: end its download. With no source left,
+      // load() stops the fetch (measured 10-22: the rest of a 450 KB loop kept
+      // arriving for 3 s after the reader had left, slowing the next page's
+      // loop). Only once detached:
+      // React's development re-run of this effect keeps the element on the
+      // page, and it still needs its sources.
+      if (!element.isConnected) {
+        for (const source of element.querySelectorAll("source")) source.remove();
+        element.load();
+      }
     };
   }, []);
 
   const toggle = (): void => {
     const element = video.current;
     if (element === null) return;
-    chosen.current = element.paused;
-    if (element.paused) {
+    // From what the reader sees, not from element.paused: that turns false the
+    // moment play() is called, while the button says Play until the first frame
+    // is painted, and a second tap on a loop still loading would stop it for good.
+    const play = playback !== "playing";
+    chosen.current = play;
+    if (play) {
       element.muted = true;
       element.play().catch(refused);
+    } else if (element.paused) {
+      // Already held by the page (out of view, tab hidden): no pause event is coming.
+      setPlayback("paused");
     } else {
       element.pause();
     }
@@ -170,7 +192,11 @@ function ClipVideo({ files, onBroken, className }: { readonly files: ClipFiles; 
           aria-hidden
           onPlaying={() => setPlayback("playing")}
           onPause={() => {
-            setPlayback(holding.current ? "idle" : "paused");
+            if (!holding.current) setPlayback("paused");
+            // Held by the page, the button goes, as the loop comes back by itself;
+            // but it stays while it has the keyboard's focus, which would
+            // otherwise drop to the page.
+            else if (document.activeElement !== button.current) setPlayback("idle");
             holding.current = false;
           }}
         >
@@ -180,6 +206,7 @@ function ClipVideo({ files, onBroken, className }: { readonly files: ClipFiles; 
         </video>
         {playback === "idle" ? null : (
           <button
+            ref={button}
             type="button"
             onClick={toggle}
             aria-label={playing ? "Pause the clip" : "Play the clip"}

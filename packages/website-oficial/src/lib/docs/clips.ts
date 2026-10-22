@@ -19,17 +19,20 @@
  *      add it to CLIPS);
  *   3. `CI=1 vitest run src/app/docs`.
  *
- * EVERY URL CARRIES ITS FILE'S VERSION (?v=, the first 8 hex of its sha256).
- * /docs/clips/* is cached for a year without asking again (next.config.mjs), so
- * a repeat visit does not ask for them again; a re-rendered clip gets a new
- * address instead of a stale copy. docs.test.ts recomputes every version and
- * fails on a stale one.
+ * EVERY /docs/clips/ URL CARRIES ITS FILE'S VERSION (?v=, the first 8 hex of its
+ * sha256). Such a URL is cached for a year without asking again
+ * (next.config.mjs), so a repeat visit does not ask for it again; a re-rendered
+ * clip gets a new address instead of a stale copy. scripts/check-clips.mts
+ * recomputes every version and fails on a stale one, in the tests and before
+ * every build.
  *
  * "dashboard" REUSES THE LANDING'S APP LOOP (owner, 10-22): the same 8 s loop
  * over the sample, with the caption the landing's frame wears, because the
  * video itself carries none. Its poster is the docs' own WebP of that loop's
- * first frame: the landing's JPEG weighs more than twice as much. /landing/ keeps
- * the landing's own caching, so only that poster is cached for a year.
+ * first frame: the landing's JPEG weighs more than twice as much. The loop's
+ * URLs are the landing's own, with no ?v=: /landing/ keeps the landing's
+ * caching, so a version would buy nothing and would make a reader who has seen
+ * the landing download the loop again.
  */
 
 import type { DocSlug } from "@/lib/docs/pages";
@@ -67,8 +70,8 @@ export const CLIPS: Readonly<Partial<Record<DocSlug, ClipFiles>>> = {
   "take-money-out": clipFiles("take-money-out", { webm: "8fb0a00d", mp4: "9b3c8632", poster: "8f7acf8c" }),
   "who-controls-what": clipFiles("who-controls-what", { webm: "0966641e", mp4: "7861b2e8", poster: "18b62928" }),
   dashboard: {
-    webm: "/landing/app-loop.webm?v=34036bfd",
-    mp4: "/landing/app-loop.mp4?v=bcdd1689",
+    webm: "/landing/app-loop.webm",
+    mp4: "/landing/app-loop.mp4",
     poster: "/docs/clips/dashboard.webp?v=b8e44938",
     caption: "Example — nobody’s pension",
   },

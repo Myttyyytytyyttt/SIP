@@ -17,11 +17,13 @@
  * TO ADD A CLIP: run it with --from; a slug not in CLIPS yet gets its line
  * printed, to paste into CLIPS; then `CI=1 vitest run src/app/docs`.
  *
- * A VERSION IN EVERY URL (?v=, the first 8 hex of the file's sha256), because
- * /docs/clips/* is served with a year-long immutable cache (next.config.mjs): a
- * clip re-rendered under the same name gets a new address, so no browser can
- * keep showing the old one. src/app/docs/docs.test.ts recomputes every version
- * and fails on a stale one: a file changed without this script fails CI.
+ * A VERSION IN EVERY /docs/clips/ URL (?v=, the first 8 hex of the file's
+ * sha256), because such a URL is served with a year-long immutable cache
+ * (next.config.mjs): a clip re-rendered under the same name gets a new address,
+ * so no browser can keep showing the old one. scripts/check-clips.mts recomputes
+ * every version and fails on a stale one, in the tests and before every build:
+ * a file changed without this script fails the deploy. The dashboard page's loop
+ * stays at the landing's own URLs, with no version (src/lib/docs/clips.ts says why).
  *
  * THE POSTER IS THE MP4'S FIRST FRAME, AS WebP: the frame the loop opens on, so
  * nothing jumps when the loop takes over from it, at about 40 % of the films'
@@ -31,13 +33,13 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DOC_PAGES } from "../src/lib/docs/pages.ts";
+import { versionOf } from "./check-clips.mts";
 
 const PACKAGE = fileURLToPath(new URL("../", import.meta.url));
 const PUBLIC = join(PACKAGE, "public");
@@ -61,8 +63,6 @@ function run(command: string, args: readonly string[]): void {
   if (result.error !== undefined) fail(`${command} did not run (${result.error.message}); brew install ffmpeg webp`);
   if (result.status !== 0) fail(`${command} ${args.join(" ")} exited ${result.status}`);
 }
-
-const versionOf = (path: string): string => createHash("sha256").update(readFileSync(join(PUBLIC, path))).digest("hex").slice(0, 8);
 
 const args = process.argv.slice(2);
 const fromAt = args.indexOf("--from");
@@ -97,17 +97,17 @@ for (const slug of slugs) {
   const kb = (path: string): string => `${Math.round(statSync(join(PUBLIC, path)).size / 1024)} KB`;
   console.log(`${slug}: webm ${v.webm} (${kb(files.webm)}), mp4 ${v.mp4} (${kb(files.mp4)}), poster ${v.poster} (${kb(files.poster)})`);
 
-  // An own clip is one `clipFiles("<slug>", { … })` call; a borrowed one names its files whole, each with its ?v=.
+  // An own clip is one `clipFiles("<slug>", { … })` call; a borrowed one names its files whole, and only its
+  // poster, under /docs/clips/, carries a ?v=: the loop keeps the landing's exact URLs.
   const call = new RegExp(`clipFiles\\("${slug}", \\{[^}]*\\}\\)`);
   const own = `clipFiles("${slug}", { webm: "${v.webm}", mp4: "${v.mp4}", poster: "${v.poster}" })`;
+  const poster = new RegExp(`"${files.poster.replaceAll(".", "\\.")}\\?v=[0-9a-f]{8}"`);
   if (borrowed === undefined && call.test(source)) {
     source = source.replace(call, own);
-  } else if (borrowed !== undefined && source.includes(`"${files.webm}?v=`)) {
-    for (const kind of ["webm", "mp4", "poster"] as const) {
-      source = source.replace(new RegExp(`"${files[kind].replaceAll(".", "\\.")}\\?v=[0-9a-f]{8}"`), `"${files[kind]}?v=${v[kind]}"`);
-    }
+  } else if (borrowed !== undefined && poster.test(source)) {
+    source = source.replace(poster, `"${files.poster}?v=${v.poster}"`);
   } else {
-    const entry = borrowed === undefined ? own : `{ ${(["webm", "mp4", "poster"] as const).map((kind) => `${kind}: "${files[kind]}?v=${v[kind]}"`).join(", ")} }`;
+    const entry = borrowed === undefined ? own : `{ webm: "${files.webm}", mp4: "${files.mp4}", poster: "${files.poster}?v=${v.poster}" }`;
     missing.push(`  ${/^[a-z]+$/.test(slug) ? slug : `"${slug}"`}: ${entry},`);
   }
 }

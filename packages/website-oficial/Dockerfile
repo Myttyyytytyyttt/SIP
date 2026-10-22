@@ -118,7 +118,7 @@ COPY packages/solana-program/scripts/clmm-layout.ts packages/solana-program/scri
 
 COPY packages/website-oficial packages/website-oficial
 
-# The web's own build: prebuild runs check:csp and check:idl, then next build.
+# The web's own build: prebuild runs check:csp, check:clips and check:idl, then next build.
 RUN pnpm --filter @sip/web run build
 
 # Post-build normalisation and assertions.

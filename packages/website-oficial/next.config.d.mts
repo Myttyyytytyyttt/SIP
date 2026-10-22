@@ -10,8 +10,8 @@ export declare function privyStubAlias(env?: Record<string, string | undefined>)
 /** The commit this build is from — VERCEL_GIT_COMMIT_SHA when it is one, "dev" otherwise. See next.config.mjs. */
 export declare function buildCommitOf(env?: Record<string, string | undefined>): string;
 
-/** One rule of `headers()`: the paths it matches, and the headers it adds. */
-type HeaderRule = { source: string; headers: { key: string; value: string }[] };
+/** One rule of `headers()`: the paths it matches, the request it must also be, and the headers it adds. */
+type HeaderRule = { source: string; has?: { type: string; key: string; value?: string }[]; headers: { key: string; value: string }[] };
 
 declare const nextConfig: Record<string, unknown> & {
   turbopack?: { resolveAlias: Record<string, string> };

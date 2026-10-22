@@ -7,7 +7,6 @@
 // first, no video byte before the loop plays, every clip's URL versioned by its
 // content so it can be cached for a year.
 
-import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,6 +24,8 @@ import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { CLIPS, clipOf } from "@/lib/docs/clips";
 import { DOC_GROUPS, DOC_PAGES, docNeighbours, docSlugOf, type DocSlug } from "@/lib/docs/pages";
+
+import { VERSIONED, clipProblems } from "../../../scripts/check-clips.mts";
 
 const PACKAGE = fileURLToPath(new URL("../../../", import.meta.url));
 
@@ -251,14 +252,15 @@ describe("a page's clip", () => {
   it("is the landing's app loop on the dashboard page, with its caption, playing only once the browser allows it", async () => {
     const html = await renderPage("dashboard");
     const video = html.match(/<video [^>]*>/)?.[0] ?? "";
-    // The loop is the landing's; its poster is the docs' own WebP of that loop's first frame.
+    // The loop is the landing's, at its exact URLs, so a reader who has seen the landing already has it;
+    // its poster is the docs' own WebP of that loop's first frame.
     expect(video).toMatch(/poster="\/docs\/clips\/dashboard\.webp\?v=[0-9a-f]{8}"/);
     expect(video).toContain("loop");
     expect(video).toContain("playsInline");
     // No autoplay in the HTML: the loop is started from the browser, which knows the reader's motion setting.
     expect(video).not.toMatch(/autoplay/i);
-    expect(html).toMatch(/<source src="\/landing\/app-loop\.webm\?v=[0-9a-f]{8}" type="video\/webm"\/>/);
-    expect(html).toMatch(/<source src="\/landing\/app-loop\.mp4\?v=[0-9a-f]{8}" type="video\/mp4"\/>/);
+    expect(html).toContain('<source src="/landing/app-loop.webm" type="video/webm"/>');
+    expect(html).toContain('<source src="/landing/app-loop.mp4" type="video/mp4"/>');
     expect(html).toContain("Example — nobody’s pension</figcaption>");
     // No button over a loop that is about to start: it appears once the browser has answered.
     expect(html).not.toContain("the clip");
@@ -320,14 +322,16 @@ describe("a page's clip", () => {
     }
   });
 
-  it("names every file by its content, so a clip re-rendered under the same name is never served stale", () => {
-    // /docs/clips/* is cached for a year without asking again (next.config.mjs): only a new address reaches a reader.
-    for (const [slug, files] of Object.entries(CLIPS)) {
-      for (const url of [files!.webm, files!.mp4, files!.poster]) {
-        const version = createHash("sha256").update(readFileSync(join(PACKAGE, "public", pathOf(url)))).digest("hex").slice(0, 8);
-        expect(url, `${slug}: ${pathOf(url)} changed since its version was written; run pnpm run docs:clip ${slug}`).toBe(`${pathOf(url)}?v=${version}`);
-      }
-    }
+  it("names every /docs/clips/ file by its content, so a clip re-rendered under the same name is never served stale", () => {
+    // Such a URL is cached for a year without asking again (next.config.mjs): only a new address reaches a reader.
+    // The same check runs before every build (pnpm run check:clips), since a deploy never runs these tests.
+    expect(clipProblems()).toEqual([]);
+  });
+
+  it("borrows the landing's loop at its exact URL, with no version, and versions everything under /docs/clips/", () => {
+    const urls = Object.values(CLIPS).flatMap((files) => [files!.webm, files!.mp4, files!.poster]);
+    expect(urls.filter((url) => !url.startsWith(VERSIONED))).toEqual(["/landing/app-loop.webm", "/landing/app-loop.mp4"]);
+    for (const url of urls.filter((url) => url.startsWith(VERSIONED))) expect(url).toMatch(/\?v=[0-9a-f]{8}$/);
   });
 
   it("has a WebP poster of the docs' own for every clip, under the year-long cache", () => {
