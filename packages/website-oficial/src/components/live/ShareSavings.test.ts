@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SharePanelFailed, ShareSavings } from "@/components/live/ShareSavings";
-import { SharePanel, VideoRow, type Video } from "@/components/live/SharePanel";
+import { DownloadButton, SharePanel, videoEntry, type Video } from "@/components/live/SharePanel";
 import { SharePreviewFrame } from "@/components/live/share-frame";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SAVED } from "@/lib/classes";
@@ -124,10 +124,22 @@ describe("the dialog's body", () => {
     for (const plate of Object.values(SHARE_PLATES)) expect(html).toContain(`src="${plate.thumb}"`);
   });
 
-  it("offers no video before this browser has said it can make one — the question is asynchronous", () => {
+  it("Download is the image's plain button until this browser says it can make the video — the question is asynchronous", () => {
     const html = panel(card(60_000_000n));
-    expect(html).not.toContain("data-share-video");
-    expect(actions(html)).not.toContain("video-make");
+    expect(html.match(/<button[^>]*data-share-action="download"[^>]*>/)?.[0]).not.toContain("aria-haspopup");
+    expect(html).not.toContain("data-share-video=");
+  });
+
+  it("four buttons at most, and nothing about a video beside them (owner, 10-23)", () => {
+    vi.stubGlobal("ClipboardItem", class {});
+    vi.stubGlobal("File", File);
+    // A sheet that would take an MP4 too: still no Share video.
+    vi.stubGlobal("navigator", { clipboard: { write: () => Promise.resolve() }, share: () => Promise.resolve(), canShare: () => true });
+    const html = panel(card(60_000_000n));
+    expect(actions(html)).toEqual(["share", "copy", "download", "x"]);
+    for (const gone of ["Make video", "Share video", "Download video", SHARE_COPY.downloadVideo]) expect(html).not.toContain(gone);
+    // The video's own voice is in the tree, silent, before anything is made: a screen reader hears what lands in it.
+    expect(html).toMatch(/<p role="status" aria-live="polite" class="sr-only" data-share-video-said=""><\/p>/);
   });
 
   it("three backgrounds, Grid first and chosen (owner, 10-22); dollars by default, SOL beside them", () => {
@@ -229,51 +241,78 @@ describe("a dialog whose code did not load", () => {
   });
 });
 
-describe("the video's row", () => {
-  const row = (video: Video | undefined, canShare = false, waiting = false): string =>
+/**
+ * THE VIDEO, INSIDE DOWNLOAD (owner, 10-23: "Dentro de Download"): no row of
+ * its own; where this browser can make it, Download is a menu of Image (PNG)
+ * and Video (MP4). The menu's entries are drawn in a portal, which a server
+ * render never opens: what they say and do is videoEntry's, read here, and the
+ * menu itself was driven in Chrome, WebKit and Firefox.
+ */
+describe("Download, and the video inside it", () => {
+  const button = (canVideo: boolean, disabled = false): string =>
     renderToStaticMarkup(
-      createElement(VideoRow, { video, progress: { percent: 0, show: null }, seconds: 12, canShare, waiting, onMake: () => undefined, onCancel: () => undefined, onDownload: () => undefined, onShare: () => undefined }),
+      createElement(DownloadButton, {
+        canVideo,
+        disabled,
+        video: undefined,
+        progress: { percent: 0, show: null },
+        seconds: 12,
+        open: false,
+        onOpenChange: () => undefined,
+        onImage: () => undefined,
+        onMake: () => undefined,
+        onSave: () => undefined,
+        onCancel: () => undefined,
+      }),
     );
-  const rowActions = (html: string): string[] => [...html.matchAll(/data-share-action="([a-z-]+)"/g)].map((match) => match[1]!);
+  const tag = (html: string): string => html.match(/<button[^>]*>/)?.[0] ?? "";
 
-  it("before: what it is — an MP4 that plays like a GIF — and Make video", () => {
-    const html = row(undefined);
-    expect(html).toContain('data-share-video="idle"');
-    expect(html).toContain(SHARE_COPY.video.about(12));
-    expect(rowActions(html)).toEqual(["video-make"]);
+  it("where the video can be made: a menu button, closed, that says it opens a menu", () => {
+    const html = button(true);
+    expect(tag(html)).toContain('data-share-action="download"');
+    expect(tag(html)).toContain('aria-haspopup="menu"');
+    expect(tag(html)).toContain('aria-expanded="false"');
+    expect(html).toContain(`>${SHARE_COPY.download}<`);
+    // The chevron says "menu"; under sm it takes the download icon's place, so three buttons still fit a phone.
+    expect(html).toMatch(/lucide-chevron-down/);
+    expect(html).toMatch(/<svg[^>]*class="[^"]*lucide-download[^"]*max-sm:hidden/);
   });
 
-  it("while it is made: a bar a screen reader can read, and Cancel", () => {
-    const html = row({ status: "making" });
-    expect(html).toContain('data-share-video="making"');
-    expect(html).toMatch(/role="progressbar" aria-label="[^"]+" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"/);
-    expect(rowActions(html)).toEqual(["video-cancel"]);
+  it("where it cannot: the image's own button, no menu of one entry", () => {
+    const html = button(false);
+    expect(tag(html)).toContain('data-share-action="download"');
+    expect(tag(html)).not.toContain("aria-haspopup");
+    expect(html).not.toMatch(/lucide-chevron-down/);
   });
 
-  it("made: its length and weight, Download video — and Share video only where the sheet takes one", () => {
-    const blob = new Blob([new Uint8Array(934_000)], { type: "video/mp4" });
-    expect(row({ status: "ready", blob })).toContain(SHARE_COPY.video.ready(12, "934 KB"));
-    expect(rowActions(row({ status: "ready", blob }))).toEqual(["video-download"]);
-    expect(rowActions(row({ status: "ready", blob }, true))).toEqual(["video-share", "video-download"]);
+  it("waits for the image, either way", () => {
+    expect(tag(button(true, true))).toMatch(/disabled=""/);
+    expect(tag(button(false, true))).toMatch(/disabled=""/);
   });
 
-  it("failed: said in words, and a retry — the image's actions are elsewhere and stay", () => {
-    const html = row({ status: "failed", network: false });
-    expect(html).toContain(SHARE_COPY.video.failed);
-    expect(rowActions(html)).toEqual(["video-make"]);
-    expect(html).toContain(SHARE_COPY.video.retry);
+  const blob = new Blob([new Uint8Array(934_000)], { type: "video/mp4" });
+
+  it("before it is made: Video (MP4), its length beside it, and choosing it makes it", () => {
+    expect(videoEntry(undefined, 12)).toEqual({ does: "make", label: "Video (MP4)", hint: "12 s", failed: null });
+    expect(SHARE_COPY.downloadImage).toBe("Image (PNG)");
   });
 
-  it("failed because the plate did not download: the network is named, not the browser (review, 10-22)", () => {
-    const html = row({ status: "failed", network: true });
-    expect(html).toContain(SHARE_COPY.video.failedNetwork);
-    expect(html).not.toContain(SHARE_COPY.video.failed);
-    expect(rowActions(html)).toEqual(["video-make"]);
+  it("made and saved: the same entry, which saves the one made — no second encode", () => {
+    expect(videoEntry({ status: "ready", blob, saved: true }, 10)).toEqual({ does: "save", label: "Video (MP4)", hint: "10 s", failed: null });
   });
 
-  it("while the card's link is asked for, Make video waits — the server's card may not be the page's (review, 10-22)", () => {
-    expect(row(undefined, false, true)).toMatch(/<button[^>]*disabled=""[^>]*data-share-action="video-make"/);
-    expect(row(undefined)).not.toMatch(/<button[^>]*disabled=""[^>]*data-share-action="video-make"/);
+  it("made after the click stopped counting: one click left, Download video, and its weight", () => {
+    expect(videoEntry({ status: "ready", blob, saved: false }, 12)).toEqual({ does: "save", label: SHARE_COPY.video.save, hint: "934 KB", failed: null });
+  });
+
+  it("failed: said in words under the entry, which offers Try again — the browser's fault or the network's (review, 10-22)", () => {
+    expect(videoEntry({ status: "failed", network: false }, 12)).toEqual({ does: "make", label: "Video (MP4)", hint: SHARE_COPY.video.retry, failed: SHARE_COPY.video.failed });
+    expect(videoEntry({ status: "failed", network: true }, 12).failed).toBe(SHARE_COPY.video.failedNetwork);
+  });
+
+  it("the copy: a menu's few words, and the old row's are gone", () => {
+    expect(Object.keys(SHARE_COPY.video).sort()).toEqual(["cancel", "failed", "failedNetwork", "length", "making", "makingSaid", "ready", "retry", "save"]);
+    expect(SHARE_COPY.video.ready(12, "1.1 MB")).toBe("Ready: 12 seconds, 1.1 MB.");
   });
 });
 

@@ -2,11 +2,12 @@
  * THE SHARE CARD AS A SHORT MP4 (owner, 10-22: "Vídeo corto MP4"): the plate's
  * motion with the card's words over it, made in this browser, to download and
  * attach — X, Telegram and Discord play a short soundless MP4 like a GIF. Only
- * a PNG can go on a clipboard, so the still keeps Copy; the video is Download,
- * and the system's sheet where it takes a video file (phones).
+ * a PNG can go on a clipboard, so the still keeps Copy; the video is one of
+ * Download's two files, and nothing else (owner, 10-23: "Dentro de Download" —
+ * no row and no share sheet of its own).
  *
  * BROWSER ONLY, AND ONLY ON REQUEST: SharePanel calls makeShareVideo from a
- * click, never on open. Nothing leaves the browser: the plate comes from this
+ * choice in Download's menu, never on open. Nothing leaves the browser: the plate comes from this
  * site (/share/, connect-src 'self'), and the MP4 is a Blob handed to a
  * download or the sheet.
  *
@@ -50,8 +51,8 @@
  * keyframes of the same picture, dropped, 39.7–40.3 dB and 39.6–39.8 dB.
  *
  * CANCEL: the AbortSignal closes both codecs and every held frame, and the
- * promise rejects with an AbortError. SharePanel aborts when the dialog
- * closes, or when the background or the unit changes under it.
+ * promise rejects with an AbortError. SharePanel aborts when the dialog or
+ * Download's menu closes, or when the background or the unit changes under it.
  *
  * A PLATE THAT DID NOT DOWNLOAD IS NOT THE BROWSER'S FAULT (review, 10-22):
  * it rejects with a PlateUnavailable, and the dialog says the network failed

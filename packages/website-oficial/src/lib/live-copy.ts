@@ -1019,8 +1019,14 @@ export const SHARE_COPY = {
   share: "Share image",
   copy: "Copy image",
   copyShort: "Copy",
-  /** The image's: the video has its own row, and its own "Download video". */
+  /**
+   * ONE DOWNLOAD, TWO FILES (owner, 10-23: "Dentro de Download"): where this
+   * browser can make the video, Download opens a menu of the two; elsewhere it
+   * is the image's own button, and says nothing more.
+   */
   download: "Download",
+  downloadImage: "Image (PNG)",
+  downloadVideo: "Video (MP4)",
   postOnX: "Post on X",
   /** The preview's motion is a loop that never ends: it can be stopped (WCAG 2.2.2). */
   pauseMotion: "Pause the motion",
@@ -1070,25 +1076,24 @@ export const SHARE_COPY = {
   shareFailed: "That did not share. Download the image instead.",
   drawFailed: "This browser could not draw the image.",
 
-  // ── the video (owner, 10-22: "Vídeo corto MP4"): made in this browser, on request
+  // ── the video (owner, 10-22: "Vídeo corto MP4"): made in this browser, on request —
+  // since 10-23 inside Download's menu ("Dentro de Download"), with no row and no sheet of its own
   video: {
-    title: "Video",
-    /** What it is, before it is made: how long, and where it plays as a loop. */
-    about: (seconds: number): string => `A ${seconds}-second MP4 of this card, moving. X, Telegram and Discord play it like a GIF.`,
-    make: "Make video",
-    making: (percent: number): string => `Making the video… ${percent}%`,
+    /** Beside "Video (MP4)" in the menu: how long it runs. */
+    length: (seconds: number): string => `${seconds} s`,
+    /** In the menu while it is made; the percent beside it is a number, not words. */
+    making: "Making the video…",
     /** For a screen reader, once: not every percent. */
     makingSaid: "Making the video.",
     cancel: "Cancel",
     ready: (seconds: number, size: string): string => `Ready: ${seconds} seconds, ${size}.`,
-    download: "Download video",
-    share: "Share video",
+    /** The one click left when the video outlived the click that asked for it (SharePanel's DOWNLOADED AT THE END says when). */
+    save: "Download video",
     /** Said in words: a video that silently never comes reads as one that worked. */
     failed: "This browser could not make the video. The image still works.",
     /** The plate did not download (offline, a flaky network): the network's fault, not the browser's — so Try again is worth a tap (review, 10-22). */
     failedNetwork: "Couldn’t load the video’s background. Check your connection and try again.",
     retry: "Try again",
-    shareFailed: "That did not share. Download the video instead.",
   },
 
   // ── the post's text: X adds the site's link after it ─────────────────────

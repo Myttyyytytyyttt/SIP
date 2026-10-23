@@ -19,12 +19,16 @@
  * GRID FIRST (owner, 10-22: "La primera tiene que ser la del grid"): the dialog
  * opens on it, and the picker lists it first (SHARE_BACKGROUNDS).
  *
- * THE IMAGE'S ACTIONS ARE THE ONES THIS BROWSER CAN CARRY OUT (live-share.ts shareCaps):
+ * FOUR BUTTONS, AND ONLY THE ONES THIS BROWSER CAN CARRY OUT (live-share.ts
+ * shareCaps; owner, 10-23: "Solo creo que deberíamos tener el download, share y
+ * copy image, ¿no? Y el post"):
  *   Share image     the system's sheet with the file — on a phone, straight into
- *                   X, Telegram or anything else. Only where it works.
+ *                   X, Telegram or anything else. Only where it works. The image
+ *                   only: the video is Download's.
  *   Copy image      a PNG on the clipboard, to paste into any post. Only where a
  *                   browser takes an image there.
- *   Download        always.
+ *   Download        always: the image — or, where this browser can make the
+ *                   video, a menu of the two files (THE VIDEO, below).
  *   Post on X       always: opens X's composer in a new tab with a short line
  *                   and a link — the card's own when there is one (below), the
  *                   site's otherwise — and copies the image where it can. A
@@ -50,19 +54,41 @@
  * sample's, drawn at build time (review, 10-22: the sample's dialog fetched
  * 775 KB of pictures nobody saw, and a Live one a render per pick).
  *
- * THE VIDEO (owner, 10-22: "Vídeo corto MP4"), in its own row, offered only
- * where this browser can make one (share-video.ts videoCaps). Made on request,
- * never on open: "Make video" → a progress bar and Cancel → "Download video",
- * and "Share video" where the sheet takes a video. Each is a tap of its own:
- * Safari lets a share sheet open only from a fresh tap, and a second or two of
- * encoding outlives the first one, so the sheet is never opened at the end of
- * the encode. A finished video is kept per background and unit, like the
- * pictures; one in flight is cancelled when the dialog closes, and when its
- * background or unit is changed under it. A video that cannot be made says so,
- * and the image's actions stay. While a Live card's link is being asked for,
- * Make video waits with Post on X (a few seconds at most): the server's card
- * may differ from the page's (a streak it could not prove), and adopting it
- * would drop a video made of the page's figures without a word (review, 10-22).
+ * THE VIDEO, INSIDE DOWNLOAD (owner, 10-22: "Vídeo corto MP4"; 10-23, of the
+ * row it had: "¿qué es esto del make video?" — and, asked where the moving card
+ * should go, "Dentro de Download"). No row and no sheet of its own: where this
+ * browser can make the video (share-video.ts videoCaps), Download opens a menu
+ * of two files, Image (PNG) and Video (MP4). Elsewhere Download stays the
+ * image's plain button, rather than a menu of one entry: that would be a click
+ * for nothing, and nothing in it could say why the other file is missing.
+ *
+ * MADE IN THE MENU, ON REQUEST, NEVER ON OPEN. Choosing Video keeps the menu
+ * open and turns the entry into its progress, with Cancel under it — focus
+ * moves there, since the entry it was on can no longer be chosen. When the
+ * file is done it downloads and the menu closes. Closing the menu stops it —
+ * Cancel, Escape, a click outside — as a change of background or unit and a
+ * closed dialog do: no video is made where nobody is looking at its progress,
+ * and none is left half made. A failure is said in the menu, its entry offers
+ * Try again, and the image stays a click away above it. A finished video is
+ * kept per background and unit, like the pictures: chosen again, it downloads
+ * at once. While a Live card's link is being asked for, Video waits with Post
+ * on X (a few seconds at most): the server's card may differ from the page's (a
+ * streak it could not prove), and adopting it would drop a video made of the
+ * page's figures without a word (review, 10-22).
+ *
+ * DOWNLOADED AT THE END, WHILE THE CLICK STILL COUNTS (measured 10-23). The
+ * file is saved a second or two after the click that asked for it, from no
+ * gesture of its own. On an idle page Chrome 155, and Playwright's WebKit 18
+ * and Firefox 131, count a click as recent for 5 s (navigator.userActivation),
+ * and all three saved a file started 5.5 s after the click, once they had
+ * stopped counting it. Safari itself could not be driven here, so the dialog
+ * does not lean on that: a video finished after the browser stopped counting
+ * the click (a slow phone) is not saved by itself — its entry becomes
+ * "Download video", focused, one click away.
+ *
+ * THE MENU IS NOT MODAL: a modal one hides the rest of the dialog from a screen
+ * reader (aria-hidden) while it is open — the very time the video's polite
+ * status, which lives in the dialog, has something to say.
  *
  * WHAT POST ON X DOES IS SAID BEFORE THE CLICK (review, 10-22). X opens in
  * front, so a "paste it" said after the click lands in the tab left behind, and
@@ -75,7 +101,7 @@
  * and says so the same way: SOL off, and a line under it.
  */
 
-import { Check, CircleAlert, Copy, Download, Film, RotateCcw, Share, X } from "lucide-react";
+import { Check, ChevronDown, CircleAlert, Copy, Download, Film, ImageIcon, LoaderCircle, RotateCcw, Share, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 
 import { renderShareCard, renderShareWords } from "@/components/live/share-canvas";
@@ -83,6 +109,7 @@ import { SharePreviewFrame } from "@/components/live/share-frame";
 import { PlateUnavailable, makeShareVideo, videoCaps } from "@/components/live/share-video";
 import { Button } from "@/components/ui/button";
 import { DialogFooter } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useFlash } from "@/hooks/use-flash";
 import { SAVED } from "@/lib/classes";
@@ -116,7 +143,7 @@ import { cn } from "@/lib/utils";
 /** How long a line under the actions stays. */
 const SAID_MS = 6_000;
 
-type Said = "copied" | "copiedForX" | "copiedLinked" | "copyFailed" | "noCopyForX" | "shareFailed" | "videoShareFailed";
+type Said = "copied" | "copiedForX" | "copiedLinked" | "copyFailed" | "noCopyForX" | "shareFailed";
 const SAID: Readonly<Record<Said, { readonly good: boolean; readonly words: string }>> = {
   copied: { good: true, words: SHARE_COPY.copied },
   copiedForX: { good: true, words: SHARE_COPY.copiedForX },
@@ -124,7 +151,6 @@ const SAID: Readonly<Record<Said, { readonly good: boolean; readonly words: stri
   copyFailed: { good: false, words: SHARE_COPY.copyFailed },
   noCopyForX: { good: false, words: SHARE_COPY.noCopyForX },
   shareFailed: { good: false, words: SHARE_COPY.shareFailed },
-  videoShareFailed: { good: false, words: SHARE_COPY.video.shareFailed },
 };
 
 /** A picture drawn, or the draw that failed. */
@@ -179,6 +205,13 @@ function saveFile(blob: Blob, name: string): void {
   window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
+/**
+ * Whether this browser has stopped counting the last click as recent
+ * (navigator.userActivation: 5 s on an idle page in Chrome, WebKit and
+ * Firefox, measured 10-23); false where it cannot say.
+ */
+const clickLapsed = (): boolean => (navigator as { userActivation?: { isActive?: unknown } }).userActivation?.isActive === false;
+
 /** "0.9 MB", "740 KB". */
 const sizeLabel = (bytes: number): string => (bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1_000))} KB`);
 
@@ -232,8 +265,15 @@ const drawCard = (card: ShareCardData, part: string): Promise<Blob> => {
 /** The words alone, for a unit: "usd". */
 const drawWords = (card: ShareCardData, unit: string): Promise<Blob> => (isUnit(unit) ? renderShareWords(card, unit) : Promise.reject(new Error(`no unit ${unit}`)));
 
-/** A video made, being made, or failed — by the network (the plate did not arrive: try again) or by the browser. */
-export type Video = { readonly status: "making" } | { readonly status: "ready"; readonly blob: Blob } | { readonly status: "failed"; readonly network: boolean };
+/**
+ * A video made, being made, or failed — by the network (the plate did not
+ * arrive: try again) or by the browser. A made one is `saved` once it has been
+ * handed to the browser's download; until then its entry says "Download video".
+ */
+export type Video =
+  | { readonly status: "making" }
+  | { readonly status: "ready"; readonly blob: Blob; readonly saved: boolean }
+  | { readonly status: "failed"; readonly network: boolean };
 
 /**
  * THE BAR OF THE VIDEO BEING MADE, MOVED BY HAND (measured 10-22). Its percent
@@ -250,8 +290,8 @@ export interface ProgressSink {
 
 /**
  * THE VIDEOS THIS DIALOG HAS MADE, by background and unit, for this card — and
- * the one being made, which a new request, a closed dialog or a change of
- * background or unit cancels (the caller's effect).
+ * the one being made, which a new request, a closed dialog or menu, or a change
+ * of background or unit cancels (the caller's effects).
  */
 function useShareVideos(card: ShareCardData) {
   const cardKey = JSON.stringify(card);
@@ -283,15 +323,16 @@ function useShareVideos(card: ShareCardData) {
     [set],
   );
 
+  /** Make the video of a background and unit: how it ended, or null when it was cancelled. */
   const make = useCallback(
-    (background: ShareBackground, unit: ShareUnit): void => {
+    (background: ShareBackground, unit: ShareUnit): Promise<Video | null> => {
       cancel();
       const key = keyOf(background, unit);
       const controller = new AbortController();
       making.current = { key, controller };
       progress.current.percent = 0;
       set(key, { status: "making" });
-      makeShareVideo({
+      return makeShareVideo({
         card: JSON.parse(cardKey) as ShareCardData,
         unit,
         background,
@@ -303,19 +344,33 @@ function useShareVideos(card: ShareCardData) {
           progress.current.show?.(percent);
         },
       }).then(
-        (blob) => {
-          if (controller.signal.aborted) return;
+        (blob): Video | null => {
+          if (controller.signal.aborted) return null;
           making.current = null;
-          set(key, { status: "ready", blob });
+          const made: Video = { status: "ready", blob, saved: false };
+          set(key, made);
+          return made;
         },
-        (error: unknown) => {
-          if (controller.signal.aborted) return;
+        (error: unknown): Video | null => {
+          if (controller.signal.aborted) return null;
           making.current = null;
-          set(key, { status: "failed", network: error instanceof PlateUnavailable });
+          const failed: Video = { status: "failed", network: error instanceof PlateUnavailable };
+          set(key, failed);
+          return failed;
         },
       );
     },
     [cancel, cardKey, keyOf, set],
+  );
+
+  /** A made video handed to the browser's download: its entry reads "Video (MP4)" again. */
+  const markSaved = useCallback(
+    (key: string): void =>
+      setVideos((prev) => {
+        const video = prev.get(key);
+        return video?.status === "ready" && !video.saved ? new Map(prev).set(key, { ...video, saved: true }) : prev;
+      }),
+    [],
   );
 
   // Figures changed: the old card's videos go, and one in flight stops.
@@ -329,19 +384,20 @@ function useShareVideos(card: ShareCardData) {
   useEffect(() => () => cancel(), [cancel]);
 
   const get = (background: ShareBackground, unit: ShareUnit): Video | undefined => videos.get(keyOf(background, unit));
-  return { make, cancel, get, keyOf, progress: progress.current };
+  return { make, cancel, markSaved, get, keyOf, progress: progress.current };
 }
 
-/** The bar and its percent, written by the sink while the video is made (ProgressSink says why). */
-function MakingBar({ sink }: { sink: ProgressSink }) {
-  const bar = useRef<HTMLDivElement>(null);
-  const fill = useRef<HTMLDivElement>(null);
+/** The video being made, in its menu entry: its percent and bar, written by the sink (ProgressSink says why). */
+function MakingProgress({ sink }: { sink: ProgressSink }) {
+  // Spans: the entry is a row of phrasing content.
+  const bar = useRef<HTMLSpanElement>(null);
+  const fill = useRef<HTMLSpanElement>(null);
   const label = useRef<HTMLSpanElement>(null);
   useLayoutEffect(() => {
     const show = (percent: number): void => {
       bar.current?.setAttribute("aria-valuenow", String(percent));
       if (fill.current !== null) fill.current.style.width = `${percent}%`;
-      if (label.current !== null) label.current.textContent = SHARE_COPY.video.making(percent);
+      if (label.current !== null) label.current.textContent = `${percent}%`;
     };
     sink.show = show;
     show(sink.percent);
@@ -350,15 +406,19 @@ function MakingBar({ sink }: { sink: ProgressSink }) {
     };
   }, [sink]);
   return (
-    <div className="flex items-center gap-3">
-      {/* Its own bar, not ui/progress: that one keeps the value off the bar's role, so a screen reader would hear no number. */}
-      <div ref={bar} role="progressbar" aria-label={SHARE_COPY.video.makingSaid} aria-valuemin={0} aria-valuemax={100} aria-valuenow={0} className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-        <div ref={fill} className="h-full w-0 rounded-full bg-emerald-500 transition-[width] duration-150 motion-reduce:transition-none" />
-      </div>
-      <span ref={label} aria-hidden className="shrink-0 text-xs text-muted-foreground tabular-nums">
-        {SHARE_COPY.video.making(0)}
+    <span className="flex w-full flex-col gap-1.5">
+      <span className="flex items-center gap-2">
+        <LoaderCircle aria-hidden className="motion-safe:animate-spin" />
+        <span className="flex-1">{SHARE_COPY.video.making}</span>
+        <span ref={label} aria-hidden className="text-xs text-muted-foreground tabular-nums">
+          0%
+        </span>
       </span>
-    </div>
+      {/* Its own bar, not ui/progress: that one keeps the value off the bar's role, so a screen reader would hear no number. */}
+      <span ref={bar} role="progressbar" aria-label={SHARE_COPY.video.makingSaid} aria-valuemin={0} aria-valuemax={100} aria-valuenow={0} className="block h-1.5 overflow-hidden rounded-full bg-muted">
+        <span ref={fill} className="block h-full w-0 rounded-full bg-emerald-500 transition-[width] duration-150 motion-reduce:transition-none" />
+      </span>
+    </span>
   );
 }
 
@@ -375,83 +435,145 @@ function Thumb({ plate, words }: { plate: SharePlate; words: string | null }) {
   );
 }
 
-/** THE VIDEO'S ROW: what it is, then its progress, then what to do with it. */
-export function VideoRow({
-  video,
-  progress,
-  seconds,
-  canShare,
-  waiting = false,
-  onMake,
-  onCancel,
-  onDownload,
-  onShare,
-}: {
+/** What the menu's Video entry says and does, by its video's state — while it is made, it is its progress instead (MakingProgress). */
+export interface VideoEntry {
+  /** Make it (keeping the menu open for its progress), or save the one already made. */
+  readonly does: "make" | "save";
+  readonly label: string;
+  /** Beside the label: its length, its weight once made, or Try again. */
+  readonly hint: string;
+  /** Why the last one failed, said under the entry. */
+  readonly failed: string | null;
+}
+
+export function videoEntry(video: Video | undefined, seconds: number): VideoEntry {
+  const make = { does: "make", label: SHARE_COPY.downloadVideo, hint: SHARE_COPY.video.length(seconds), failed: null } as const;
+  if (video?.status === "failed") return { ...make, hint: SHARE_COPY.video.retry, failed: video.network ? SHARE_COPY.video.failedNetwork : SHARE_COPY.video.failed };
+  if (video?.status !== "ready") return make;
+  // Made and not yet saved — it outlived the click that asked for it: the one click left (the header's DOWNLOADED AT THE END).
+  return video.saved ? { ...make, does: "save" } : { does: "save", label: SHARE_COPY.video.save, hint: sizeLabel(video.blob.size), failed: null };
+}
+
+/** A menu entry with room for a finger. */
+const ENTRY = "gap-2 px-2 py-1.5 max-sm:py-2.5";
+
+/**
+ * DOWNLOAD (owner, 10-23: "Dentro de Download"): the image's own button where
+ * this browser cannot make the video, the menu of the two files where it can
+ * (the header's THE VIDEO, INSIDE DOWNLOAD).
+ */
+export function DownloadButton({ canVideo, disabled, onImage, ...menu }: DownloadMenuProps & { canVideo: boolean }) {
+  if (canVideo) return <DownloadMenu disabled={disabled} onImage={onImage} {...menu} />;
+  return (
+    <Button type="button" variant="outline" disabled={disabled} onClick={onImage} data-share-action="download">
+      <Download aria-hidden />
+      {SHARE_COPY.download}
+    </Button>
+  );
+}
+
+interface DownloadMenuProps {
+  /** The image is still being drawn. */
+  disabled: boolean;
   video: Video | undefined;
   progress: ProgressSink;
   seconds: number;
-  canShare: boolean;
-  /** The card's link is still being asked for: Make video waits with Post on X. */
+  /** The card's link is still being asked for: Video waits with Post on X. */
   waiting?: boolean;
+  open: boolean;
+  /** Closing the menu cancels a video being made (SharePanel). */
+  onOpenChange: (open: boolean) => void;
+  onImage: () => void;
   onMake: () => void;
+  onSave: (blob: Blob) => void;
   onCancel: () => void;
-  onDownload: (blob: Blob) => void;
-  onShare: (blob: Blob) => void;
-}) {
-  const titleId = useId();
-  const status = video?.status ?? "idle";
-  // Said to a screen reader once per state, not once per percent.
-  const failedWords = video?.status === "failed" ? (video.network ? SHARE_COPY.video.failedNetwork : SHARE_COPY.video.failed) : "";
-  const said = status === "making" ? SHARE_COPY.video.makingSaid : video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : failedWords;
+}
+
+function DownloadMenu({ disabled, video, progress, seconds, waiting = false, open, onOpenChange, onImage, onMake, onSave, onCancel }: DownloadMenuProps) {
+  const failedId = useId();
+  const content = useRef<HTMLDivElement>(null);
+  const videoItem = useRef<HTMLDivElement>(null);
+  const cancelItem = useRef<HTMLDivElement>(null);
+  const making = video?.status === "making";
+  const entry = videoEntry(video, seconds);
+  const state = making ? "making" : video?.status === "failed" ? "failed" : video?.status === "ready" ? (video.saved ? "saved" : "unsaved") : "idle";
+
+  // FOCUS FOLLOWS THE VIDEO, inside the menu only: to Cancel while it is made (the entry it was on can no longer
+  // be chosen), back to the entry when it failed or waits for its one click. Never taken from outside the menu.
+  const was = useRef(state);
+  useEffect(() => {
+    if (was.current === state) return;
+    was.current = state;
+    const to = state === "making" ? cancelItem.current : state === "failed" || state === "unsaved" ? videoItem.current : null;
+    const at = document.activeElement;
+    if (to !== null && (at === null || at === document.body || content.current?.contains(at) === true)) to.focus();
+  }, [state]);
+
   return (
-    <section aria-labelledby={titleId} data-share-video={status} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center">
-      <div className="flex min-w-0 flex-1 items-start gap-3">
-        <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
-          <Film className="size-4" />
-        </span>
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <p id={titleId} className="text-sm leading-none font-medium">
-            {SHARE_COPY.video.title}
-          </p>
-          {video?.status === "making" ? (
-            <MakingBar sink={progress} />
-          ) : (
-            <p aria-hidden className={cn("text-xs", video?.status === "failed" ? "text-destructive" : video?.status === "ready" ? SAVED : "text-muted-foreground")}>
-              {video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : video?.status === "failed" ? failedWords : SHARE_COPY.video.about(seconds)}
-            </p>
-          )}
-          <p role="status" aria-live="polite" className="sr-only">
-            {said}
-          </p>
-        </div>
-      </div>
-      <div className="flex gap-2 *:flex-1 max-sm:*:h-10 sm:*:flex-none">
-        {video?.status === "making" ? (
-          <Button type="button" variant="outline" onClick={onCancel} data-share-action="video-cancel">
+    <DropdownMenu modal={false} open={open} onOpenChange={onOpenChange}>
+      <DropdownMenuTrigger asChild>
+        <Button type="button" variant="outline" disabled={disabled} data-share-action="download">
+          {/* Under sm the three buttons share a phone's width to the pixel: the chevron that says "menu" takes the icon's place. */}
+          <Download aria-hidden className="max-sm:hidden" />
+          {SHARE_COPY.download}
+          <ChevronDown aria-hidden data-icon="inline-end" className="size-3.5 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent ref={content} align="end" collisionPadding={8} className="w-60" data-share-menu="">
+        <DropdownMenuItem onSelect={onImage} className={ENTRY} data-share-action="download-image">
+          <ImageIcon aria-hidden />
+          {SHARE_COPY.downloadImage}
+        </DropdownMenuItem>
+        {/* One entry in every state, so the element — and the focus on it — stays. */}
+        {making ? (
+          <DropdownMenuItem
+            ref={videoItem}
+            disabled
+            textValue={SHARE_COPY.downloadVideo}
+            aria-label={SHARE_COPY.video.makingSaid}
+            className={cn(ENTRY, "data-disabled:opacity-100")}
+            data-share-action="download-video"
+            data-share-video={state}
+          >
+            <MakingProgress sink={progress} />
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem
+            ref={videoItem}
+            disabled={waiting && entry.does === "make"}
+            textValue={SHARE_COPY.downloadVideo}
+            aria-describedby={entry.failed === null ? undefined : failedId}
+            onSelect={(event) => {
+              if (video?.status === "ready") return onSave(video.blob);
+              // The menu stays open: the video's progress is shown in it.
+              event.preventDefault();
+              onMake();
+            }}
+            className={ENTRY}
+            data-share-action="download-video"
+            data-share-video={state}
+          >
+            {state === "failed" ? <RotateCcw aria-hidden /> : state === "unsaved" ? <Download aria-hidden /> : <Film aria-hidden />}
+            <span className="flex-1">{entry.label}</span>
+            {/* The length is for the eye (a reader would say "12 s"); Try again and a weight are read out. */}
+            <span aria-hidden={state === "idle" || state === "saved" ? true : undefined} className="text-xs text-muted-foreground tabular-nums">
+              {entry.hint}
+            </span>
+          </DropdownMenuItem>
+        )}
+        {making ? (
+          <DropdownMenuItem ref={cancelItem} onSelect={onCancel} className={ENTRY} data-share-action="video-cancel">
             <X aria-hidden />
             {SHARE_COPY.video.cancel}
-          </Button>
-        ) : video?.status === "ready" ? (
-          <>
-            {canShare ? (
-              <Button type="button" variant="outline" onClick={() => onShare(video.blob)} data-share-action="video-share">
-                <Share aria-hidden />
-                {SHARE_COPY.video.share}
-              </Button>
-            ) : null}
-            <Button type="button" variant="outline" onClick={() => onDownload(video.blob)} data-share-action="video-download">
-              <Download aria-hidden />
-              {SHARE_COPY.video.download}
-            </Button>
-          </>
-        ) : (
-          <Button type="button" variant="outline" onClick={onMake} disabled={waiting} data-share-action="video-make">
-            {status === "failed" ? <RotateCcw aria-hidden /> : <Film aria-hidden />}
-            {status === "failed" ? SHARE_COPY.video.retry : SHARE_COPY.video.make}
-          </Button>
-        )}
-      </div>
-    </section>
+          </DropdownMenuItem>
+        ) : null}
+        {entry.failed !== null && !making ? (
+          <div id={failedId} className="px-2 pt-0.5 pb-1.5 text-xs text-destructive">
+            {entry.failed}
+          </div>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -590,6 +712,44 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
     if (ready !== null) saveFile(ready, fileName);
   }
 
+  // ── the video, inside Download (the header's THE VIDEO, INSIDE DOWNLOAD) ──
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [videoSaid, setVideoSaid] = useState("");
+  /** Which request the video's status speaks for: a cancelled one's late answer says nothing. */
+  const videoRun = useRef(0);
+  const seconds = videoSeconds(plate);
+  const videoName = shareFileName(card, "mp4");
+
+  function onMenu(open: boolean): void {
+    setMenuOpen(open);
+    // Closed — Cancel, Escape, a click outside: the video being made goes with it.
+    if (!open) videos.cancel();
+  }
+
+  function saveVideo(blob: Blob, key: string): void {
+    saveFile(blob, videoName);
+    videos.markSaved(key);
+  }
+
+  function makeVideo(): void {
+    const run = (videoRun.current += 1);
+    const key = videos.keyOf(background, unit);
+    const name = videoName;
+    const length = seconds;
+    setVideoSaid(SHARE_COPY.video.makingSaid);
+    void videos.make(background, unit).then((done) => {
+      if (run !== videoRun.current) return;
+      if (done === null) return setVideoSaid("");
+      if (done.status !== "ready") return setVideoSaid(done.status === "failed" && done.network ? SHARE_COPY.video.failedNetwork : SHARE_COPY.video.failed);
+      setVideoSaid(SHARE_COPY.video.ready(length, sizeLabel(done.blob.size)));
+      // Past the click's window the browser may not take a download it did not see asked for: one click is left.
+      if (clickLapsed()) return;
+      saveFile(done.blob, name);
+      videos.markSaved(key);
+      setMenuOpen(false);
+    });
+  }
+
   function shareFile(blob: Blob, name: string, failed: Said): void {
     const file = new File([blob], name, { type: blob.type });
     // The site inside the text: with a file attached, most targets drop a separate `url`.
@@ -679,20 +839,6 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
       {card.state === "saved" && !units.includes("usd") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.noPrice}</p> : null}
       {card.state === "saved" && !units.includes("sol") ? <p className="-mt-2 text-xs text-muted-foreground">{SHARE_COPY.example.dollarsOnly}</p> : null}
 
-      {canVideo ? (
-        <VideoRow
-          video={videos.get(background, unit)}
-          progress={videos.progress}
-          seconds={videoSeconds(plate)}
-          canShare={caps.shareVideo}
-          waiting={linked.status === "pending"}
-          onMake={() => videos.make(background, unit)}
-          onCancel={() => videos.cancel()}
-          onDownload={(blob) => saveFile(blob, shareFileName(card, "mp4"))}
-          onShare={(blob) => shareFile(blob, shareFileName(card, "mp4"), "videoShareFailed")}
-        />
-      ) : null}
-
       <DialogFooter className="flex-col sm:flex-row sm:items-center">
         {/*
           One band, two voices: what an action did — a live region, always in
@@ -711,6 +857,10 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
           <p id={ids.xHint} className="text-muted-foreground" hidden={saying} data-share-x-hint={linkPath !== null ? "linked" : linked.status}>
             {xHint}
           </p>
+          {/* The video's own voice, for a screen reader: made, ready or failed — once per state, never per percent. */}
+          <p role="status" aria-live="polite" className="sr-only" data-share-video-said="">
+            {videoSaid}
+          </p>
         </div>
         {caps.share ? (
           <Button type="button" disabled={ready === null} onClick={() => ready !== null && shareFile(ready, fileName, "shareFailed")} className={cn("max-sm:h-10", OUTLINE_FROM_SM)} data-share-action="share">
@@ -726,10 +876,20 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
               <span className="max-sm:hidden">{SHARE_COPY.copy}</span>
             </Button>
           ) : null}
-          <Button type="button" variant="outline" disabled={ready === null} onClick={download} data-share-action="download">
-            <Download aria-hidden />
-            {SHARE_COPY.download}
-          </Button>
+          <DownloadButton
+            canVideo={canVideo}
+            disabled={ready === null}
+            video={videos.get(background, unit)}
+            progress={videos.progress}
+            seconds={seconds}
+            waiting={linked.status === "pending"}
+            open={menuOpen}
+            onOpenChange={onMenu}
+            onImage={download}
+            onMake={makeVideo}
+            onSave={(blob) => saveVideo(blob, videos.keyOf(background, unit))}
+            onCancel={() => videos.cancel()}
+          />
           {linked.status === "pending" ? (
             // Waiting for the card's link: a button that says so, not a link to the site that would be posted instead.
             <Button type="button" disabled className={caps.share ? OUTLINE_UNDER_SM : undefined} aria-describedby={ids.xHint} data-share-action="x">
