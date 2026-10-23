@@ -55,7 +55,7 @@ import type {
 } from "@/lib/live-types";
 import { carriesPriceLimits, floorRoom, lastInvestedDay, todaysPrices, usedInLast30Days } from "@/lib/invest-limits";
 import type { InvestmentPolicyJson, VaultStateJson } from "@/lib/vault-api";
-import { tradingWalletLabels } from "@/lib/wallet-labels";
+import { ownName, tradingWalletLabels } from "@/lib/wallet-labels";
 
 /** A plain SOL transfer under this is dust — a rent top-up or a dusting, not a saving worth a row. */
 export const DUST_LAMPORTS = 100_000n;
@@ -446,6 +446,7 @@ function walletsOf(
   importedWallets: ReadonlySet<string>,
   walletFloor: bigint | null,
   walletReserve: bigint | null,
+  names: Readonly<Record<string, string>>,
 ): WalletsRead {
   const bySnapshot = new Map(snapshot.wallets.map((wallet) => [wallet.wallet, wallet]));
   const canSettleOf = (lamports: bigint | null): boolean | null => {
@@ -462,6 +463,7 @@ function walletsOf(
   // actually owns, named as the Wallets tab names them (src/lib/wallet-labels.ts).
   // Then links found on chain for wallets Privy does not list here — the vault
   // saves from them all the same, so hiding them would understate the pension.
+  // A name the account gave a wallet wins over both (owner, 10-23).
   interface Candidate {
     readonly address: string;
     readonly label: string;
@@ -470,7 +472,10 @@ function walletsOf(
   }
   const candidates: Candidate[] = [];
   const seen = new Set<string>();
-  const labels = tradingWalletLabels(privyWallets.map((address) => ({ address, imported: importedWallets.has(address) })));
+  const labels = tradingWalletLabels(
+    privyWallets.map((address) => ({ address, imported: importedWallets.has(address) })),
+    names,
+  );
   for (const address of privyWallets) {
     if (seen.has(address)) continue;
     seen.add(address);
@@ -479,7 +484,7 @@ function walletsOf(
   for (const link of snapshot.links?.items ?? []) {
     if (seen.has(link.wallet)) continue;
     seen.add(link.wallet);
-    candidates.push({ address: link.wallet, label: "Linked wallet", source: "chain", link });
+    candidates.push({ address: link.wallet, label: ownName(names, link.wallet) ?? "Linked wallet", source: "chain", link });
   }
 
   const rows = candidates.slice(0, MAX_WALLET_ROWS).map((candidate): LiveWalletView => {
@@ -856,6 +861,12 @@ export interface LiveDashboardInput {
   readonly importedWallets?: readonly string[];
   /** Trading wallets the push saw change, as live-push.ts hands them over. None when absent. */
   readonly walletChanges?: readonly LiveWalletChange[];
+  /**
+   * The account's own names for its wallets, by address (owner, 10-23:
+   * components/wallets/wallet-names-context.tsx). Each one wins over the
+   * derived name everywhere a wallet is named. None when absent.
+   */
+  readonly walletNames?: Readonly<Record<string, string>>;
 }
 
 /** The whole screen, from one snapshot and the history loaded so far. */
@@ -867,7 +878,7 @@ export function toLiveDashboard(input: LiveDashboardInput): LiveDashboard {
   const usdc = tokenOf(snapshot, USDC_MINT);
   const policy = policyView(snapshot, usdcHeldOf(snapshot, usdc), nowMs);
   const holdings = holdingsOf(snapshot, vault, policy);
-  const wallets = walletsOf(snapshot, privyWallets, importedWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve);
+  const wallets = walletsOf(snapshot, privyWallets, importedWallets, rawFrom(snapshot.rents.walletFloor), vault.walletReserve, input.walletNames ?? {});
 
   // THE FEED IS THE VAULT'S HISTORY AND ONLY THE VAULT'S. A link page is a
   // wallet's slice, so listing it here would scatter rows into a column whose

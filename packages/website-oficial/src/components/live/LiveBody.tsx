@@ -110,7 +110,9 @@ import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
 import { useSolanaConfigOrNull } from "@/app/providers";
 import { useWalletsOpener } from "@/components/wallets-host";
+import { WalletName } from "@/components/wallets/WalletName";
 import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
+import { LABEL } from "@/lib/classes";
 import { whenLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
@@ -336,6 +338,8 @@ export function LiveBody({
       onManageWallets={onManageWallets}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
       live={{
+        // The lead wallet's name, renamable where the list's are (owner, 10-23).
+        ...(lead === null ? {} : { name: <WalletName address={lead.address} name={lead.label} className={LABEL} /> }),
         below: lead === null ? null : <LeadNotes wallet={lead} />,
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
         banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={retryAt} readyAt={readyAt} /> : null,

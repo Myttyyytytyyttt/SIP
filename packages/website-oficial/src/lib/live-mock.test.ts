@@ -279,6 +279,13 @@ describe("the wallet the column leads with", () => {
     expect(adapt(liveDashboard({ snapshot: liveSnapshot({ wallets: [] }), privyWallets: [] })).wallet).toBeNull();
     expect(adapt().wallet?.label).toBe("Trading wallet 1");
   });
+
+  it("carries the account's own name into the header, the feed's rows and the strip's tooltips (owner, 10-23)", () => {
+    const named = adapt(toLiveDashboard({ snapshot: liveSnapshot(), activity: liveActivity(DEFAULT_ENTRIES), privyWallets: [WALLET_A], walletNames: { [WALLET_A]: "Axiom main" } }));
+    expect(named.wallet?.label).toBe("Axiom main");
+    expect(named.activity.find((event) => event.kind === "saved")).toMatchObject({ from: "Axiom main" });
+    expect(named.trades[0]?.detail).toMatch(/^Axiom main · /);
+  });
 });
 
 describe("a window the loaded history does not cover has no total", () => {

@@ -482,6 +482,22 @@ describe("trading wallets", () => {
     expect(view.wallets[2]!.settlementNonce).toBe(2n);
   });
 
+  it("names a wallet by the account's own name wherever it is named, a chain-found link included (owner, 10-23)", () => {
+    const chainWallet = "ChainOn1yP1aceho1der1111111111111111111111";
+    const view = toLiveDashboard({
+      snapshot: snapshot({ links: { status: "exists", items: [{ wallet: chainWallet, address: "chain-link", epoch: "5", settlementNonce: "2", frontierSlot: "9" }] } }),
+      activity: null,
+      privyWallets: [WALLET_A, WALLET_B],
+      walletNames: { [WALLET_B]: "Axiom main", [chainWallet]: "Old bot" },
+    });
+    expect(view.wallets.map((wallet) => wallet.label)).toEqual(["Trading wallet 1", "Axiom main", "Old bot"]);
+    // Without names, the derived ones, exactly as before.
+    expect(toLiveDashboard({ snapshot: snapshot(), activity: null, privyWallets: [WALLET_A, WALLET_B] }).wallets.map((wallet) => wallet.label)).toEqual([
+      "Trading wallet 1",
+      "Trading wallet 2",
+    ]);
+  });
+
   it("names an imported wallet apart, as the Wallets tab does, never as another 'Trading wallet N'", () => {
     const imported = "Imp0rtedP1aceho1der11111111111111111111111";
     const view = toLiveDashboard({ snapshot: snapshot(), activity: null, privyWallets: [WALLET_A, WALLET_B, imported], importedWallets: [imported] });

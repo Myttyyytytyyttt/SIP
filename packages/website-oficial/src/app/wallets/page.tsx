@@ -21,6 +21,7 @@ import { ModeToggle } from "@/components/mode-toggle";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { SetupChecklist } from "@/components/wallets/SetupChecklist";
+import { WalletNamesHost } from "@/components/wallets/wallet-names-context";
 import { WalletsScreen } from "@/components/wallets/WalletsScreen";
 import { toSolanaPublicConfig, type ConfigProblem, type SolanaPublicConfig } from "@/lib/config";
 import { loadConfig } from "@/lib/load-config";
@@ -74,7 +75,10 @@ export default async function WalletsPage({
 function SolanaScreen({ config, initialSection }: { config: SolanaPublicConfig; initialSection: WalletsSection | undefined }) {
   return (
     <Providers config={config}>
-      <WalletsScreen frame="page" initialSection={initialSection} />
+      {/* The account's own wallet names (owner, 10-23): renamed here, renamed on the dashboard. */}
+      <WalletNamesHost>
+        <WalletsScreen frame="page" initialSection={initialSection} />
+      </WalletNamesHost>
     </Providers>
   );
 }

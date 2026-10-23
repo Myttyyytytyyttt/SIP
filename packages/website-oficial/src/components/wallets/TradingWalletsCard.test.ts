@@ -62,6 +62,7 @@ vi.mock("@/components/ui/button", async (importOriginal) => {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { CreateAndLinkNote, TradingWalletsCard } from "@/components/wallets/TradingWalletsCard";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { WalletNamesContext } from "@/components/wallets/wallet-names-context";
 import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { VaultWriteLock, WriteLockContext, type WriteLock } from "@/hooks/use-vault-actions";
 import { VaultScreenContext, type VaultScreenValue, type VaultView } from "@/hooks/use-vault-state";
@@ -430,5 +431,29 @@ describe("what the card says when the press stops", () => {
       stop: null,
     };
     expect(noteOf(landed)).toBe("");
+  });
+});
+
+describe("a trading wallet's own name (owner, 10-23)", () => {
+  const named = (names: Readonly<Record<string, string>>, available = true): string => {
+    const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: ready(), refresh: vi.fn(), api: { build: vi.fn() } as unknown as VaultApi };
+    const card = createElement(VaultWriteLock, null, createElement(TradingWalletsCard));
+    const withNames = createElement(WalletNamesContext.Provider, { value: { available, names, rename: vi.fn() } }, createElement(VaultScreenContext.Provider, { value }, card));
+    return renderToStaticMarkup(createElement(TooltipProvider, null, withNames));
+  };
+
+  it("shows the name the account gave a wallet, and keeps counting the others", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, true), embedded(TRADING_1, 1, true)]);
+    const html = named({ [TRADING_0]: "Axiom main" });
+    expect(html).toContain(">Axiom main<");
+    expect(html).toContain(">Trading wallet 2<");
+    expect(html).not.toContain(">Trading wallet 1<");
+  });
+
+  it("offers the pencil on a listed wallet when names can be saved, and never otherwise", () => {
+    mocked.user = userWith([phantom(), embedded(TRADING_0, 0, true)]);
+    expect(named({}).match(/data-wallet-rename/g)).toHaveLength(1);
+    expect(named({}, false)).not.toContain("data-wallet-rename");
+    expect(render(ready()).html).not.toContain("data-wallet-rename");
   });
 });

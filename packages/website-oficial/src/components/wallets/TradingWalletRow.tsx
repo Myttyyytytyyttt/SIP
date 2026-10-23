@@ -72,6 +72,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AddressLine } from "@/components/wallets/AddressLine";
 import { LinkControl } from "@/components/wallets/LinkControl";
+import { WalletName } from "@/components/wallets/WalletName";
 import { useExportTradingWallet } from "@/hooks/use-export-trading-wallet";
 import { useKeeperSeat } from "@/hooks/use-keeper-seat";
 import { LABEL } from "@/lib/classes";
@@ -157,7 +158,8 @@ export function TradingWalletRow({ row }: { row: TradingWalletRowData }) {
   return (
     <li className="space-y-2 py-3 first:pt-0 last:pb-0" data-seat={keeper.seat} data-status={statusKey}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className={LABEL}>{row.label}</div>
+        {/* Renamed here or on the dashboard, the same name in both (owner, 10-23). Not before Privy lists the wallet. */}
+        {row.listed ? <WalletName address={row.address} name={row.label} className={LABEL} /> : <div className={LABEL}>{row.label}</div>}
         <Badge variant={status.variant} className={status.className}>
           {status.badge}
         </Badge>

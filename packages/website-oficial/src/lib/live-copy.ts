@@ -359,6 +359,12 @@ export const LIVE_COPY = {
   badgeLinkUnreadable: "Link status unreadable",
   settlementCount: (count: string): string => `${count} ${count === "1" ? "settlement" : "settlements"}`,
   settlementCountUnknown: "settlements unknown",
+  /**
+   * A linked wallet that cannot settle yet, as its badge says it (owner, 10-23:
+   * the wallet card is two rows, so the reserve note rides in the badge, and
+   * reserveNoteShort is its tooltip and its words for a screen reader).
+   */
+  badgeCannotSettle: "Can’t settle yet",
   /** Why a linked wallet still saves nothing: it holds no more than it always keeps. */
   reserveNote: (reserve: string): string => `Holds no more than the ${reserve} SOL it always keeps, so nothing can be settled from it yet.`,
   /** The same, where the reserve figure is already on screen beside it. */
@@ -1216,4 +1222,25 @@ export const SHARE_COPY = {
       zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
     },
   },
+} as const;
+
+/**
+ * RENAMING A TRADING WALLET (owner, 10-23: "que el nombre de la trading wallet
+ * se pueda editar"): the pencil beside a wallet's name — in the live column and
+ * in Manage wallets' rows — the box it opens, and what a save that failed says.
+ * The rules a name must meet say their own words (lib/wallet-names.ts).
+ */
+export const RENAME_COPY = {
+  /** The pencil's accessible name: which wallet it renames. */
+  rename: (name: string): string => `Rename ${name}`,
+  /** The box's accessible name. */
+  input: "Wallet name",
+  /** Read with the box, so a keyboard knows how to finish. */
+  hint: "Enter saves, Escape cancels. Leave it empty to go back to the default name.",
+  /** The save did not happen; the old name is back on screen. */
+  failed: "Couldn’t save the name.",
+  /** Refused by the rate limit: no time promised, the box can be opened again. */
+  rateLimited: "Too many renames just now. Name not saved.",
+  /** The session needs renewing before a name can be saved. */
+  signIn: "Sign in again to save the name.",
 } as const;

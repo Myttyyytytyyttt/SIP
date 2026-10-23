@@ -173,6 +173,9 @@ importers:
       cn:
         specifier: ^0.2.6
         version: 0.2.6
+      jose:
+        specifier: 6.2.5
+        version: 6.2.5
       lucide-react:
         specifier: ^1.41.0
         version: 1.41.0(react@19.2.8)

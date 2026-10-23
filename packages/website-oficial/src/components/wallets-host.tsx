@@ -41,6 +41,7 @@ import { usePrivy } from "@privy-io/react-auth";
 import Providers from "@/app/providers";
 import { LastWriteHost } from "@/components/live/last-write-context";
 import { VaultScreen } from "@/components/wallets/VaultScreen";
+import { WalletNamesHost } from "@/components/wallets/wallet-names-context";
 import { pensionKeyOf } from "@/lib/pension-key";
 import { WalletsModal } from "@/components/wallets/WalletsModal";
 import { WalletsSetupModal } from "@/components/wallets/WalletsSetupModal";
@@ -193,10 +194,13 @@ export function WalletsHost({
         // still lazy, mounted on the first open and kept, so a second open is
         // instant.
         <Providers config={config}>
-          <SharedVaultScreen>
-            {children}
-            {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} section={section} onDisconnect={modalDisconnect} /> : null}
-          </SharedVaultScreen>
+          {/* The account's own wallet names (owner, 10-23), for the dashboard and the modal alike. */}
+          <WalletNamesHost>
+            <SharedVaultScreen>
+              {children}
+              {mounted ? <WalletsModal open={open} onOpenChange={onOpenChange} section={section} onDisconnect={modalDisconnect} /> : null}
+            </SharedVaultScreen>
+          </WalletNamesHost>
         </Providers>
       ) : (
         <>

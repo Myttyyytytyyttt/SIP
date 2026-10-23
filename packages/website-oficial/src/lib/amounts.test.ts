@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal, formatSolAtMost, formatSolAtLeast } from "@/lib/amounts";
+import { AmountError, formatSol, formatUnits, formatUsd, parseUnits, rawFrom, shareOfRaw, solToLamports, usdcRawForLamports, usdcToRaw, splitDecimal, formatSolAtMost, formatSolAtLeast, formatSolDown } from "@/lib/amounts";
 
 describe("token shares", () => {
   it("25 % and 50 % round down; All is the raw amount itself", () => {
@@ -146,5 +146,28 @@ describe("a SOL figure rounded up for a threshold", () => {
     expect(formatSolAtLeast(0n, 4)).toBe("0");
     expect(formatSolAtLeast(1_234_000_000_001n, 3)).toBe("1,234.001");
     expect(formatSolAtLeast(-1_140_000n, 4)).toBe("-0.0012");
+  });
+});
+
+describe("formatSolDown (owner, 10-23: a wallet's balance as x.xxx SOL)", () => {
+  it("keeps exactly three places, cut down: never SOL the wallet does not hold", () => {
+    expect(formatSolDown(2_433_206_523n, 3)).toBe("2.433");
+    expect(formatSolDown(2_433_999_999n, 3)).toBe("2.433");
+    expect(formatSolDown(60_000_000n, 3)).toBe("0.060");
+    expect(formatSolDown(1_000_000_000n, 3)).toBe("1.000");
+    expect(formatSolDown(1_234_567_000_000_000n, 3)).toBe("1,234,567.000");
+  });
+
+  it("says zero only for nothing, and <0.001 for dust", () => {
+    expect(formatSolDown(0n, 3)).toBe("0.000");
+    expect(formatSolDown(1n, 3)).toBe("<0.001");
+    expect(formatSolDown(999_999n, 3)).toBe("<0.001");
+    expect(formatSolDown(1_000_000n, 3)).toBe("0.001");
+  });
+
+  it("cuts toward zero for a negative amount, and takes other widths", () => {
+    expect(formatSolDown(-2_433_906_523n, 3)).toBe("-2.433");
+    expect(formatSolDown(2_433_906_523n, 0)).toBe("2");
+    expect(formatSolDown(2_433_906_523n, 9)).toBe("2.433906523");
   });
 });

@@ -58,6 +58,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WalletActivity } from "@/components/wallet-activity";
 import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 import { WalletsOpenerOverride, useWalletsClosed, useWalletsDisconnect, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
+import { useWalletNames } from "@/components/wallets/wallet-names-context";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
 import { useVaultFollowsLive } from "@/hooks/use-vault-follow";
@@ -346,7 +347,9 @@ function ConfiguredFrame({
     window.history.replaceState(setupState(setupEntryOf(window.history.state)), "", state.replaceUrlWith);
   }, [state.replaceUrlWith, state.kind, pathname, router]);
 
-  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets, importedWallets });
+  // The account's own wallet names (owner, 10-23), laid over the derived ones in the model.
+  const { names: walletNames } = useWalletNames();
+  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets, importedWallets, walletNames });
   const liveStage = live.view.kind === "ready" ? live.view.data.stage : null;
 
   // Once the setup has been on screen for this key — or was asked for — a read

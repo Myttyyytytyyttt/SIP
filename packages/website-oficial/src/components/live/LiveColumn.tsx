@@ -18,6 +18,10 @@
  *   any NUMBER of wallets rather than one — the list, when no single wallet
  *   can lead without guessing;
  *
+ *   a wallet's NAME that its account chose, and the pencil that changes it
+ *   (owner, 10-23: components/wallets/WalletName.tsx), in the list and on the
+ *   lead wallet alike;
+ *
  *   a history that could NOT BE READ — said over the rows, with the retry,
  *   never as "no activity yet";
  *
@@ -32,8 +36,8 @@ import { CopyButton } from "@/components/copy-button";
 import { RetryButton } from "@/components/live/RetryButton";
 import { Num } from "@/components/num";
 import { Badge } from "@/components/ui/badge";
-import { formatSol, formatUsd, usdcRawForLamports } from "@/lib/amounts";
-import { MONO } from "@/lib/classes";
+import { WalletName } from "@/components/wallets/WalletName";
+import { formatSol, formatSolDown, formatUsd, usdcRawForLamports } from "@/lib/amounts";
 import { relativeDayLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import type { LiveWalletView } from "@/lib/live-types";
@@ -77,45 +81,78 @@ export function LeadNotes({ wallet }: { readonly wallet: LiveWalletView }) {
 }
 
 /**
+ * A LINKED WALLET THAT CANNOT SETTLE YET says so in its badge (owner, 10-23:
+ * each wallet card is two rows, so the reserve note no longer gets a line of its
+ * own). Amber, in the place "Linked" would be; the note itself is its tooltip
+ * and is read with it by a screen reader. Every other wallet wears its link's
+ * own badge (LinkBadge).
+ */
+export function WalletStatusBadge({ wallet }: { readonly wallet: LiveWalletView }) {
+  if (wallet.canSettle !== false || wallet.linkStatus !== "this_vault") return <LinkBadge wallet={wallet} />;
+  return (
+    <Badge variant="outline" title={LIVE_COPY.reserveNoteShort} data-reserve="" className="border-amber-600/40 text-amber-700 dark:text-amber-400">
+      {LIVE_COPY.badgeCannotSettle}
+      <span className="sr-only">. {LIVE_COPY.reserveNoteShort}</span>
+    </Badge>
+  );
+}
+
+/**
+ * A wallet's balance at a glance (owner, 10-23: "aparece x.xxx SOL"): three
+ * places, cut DOWN so it never shows SOL the wallet does not hold, and "<0.001"
+ * rather than a 0 for dust (amounts.ts formatSolDown). Every lamport is in its
+ * tooltip; the dollars are what they were.
+ */
+function WalletBalance({ lamports, usdcRawPerSol }: { readonly lamports: bigint | null; readonly usdcRawPerSol: bigint | null }) {
+  if (lamports === null) return <Num className="text-xs">{LIVE_COPY.unknownFigure}</Num>;
+  const dollars = usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(lamports, usdcRawPerSol));
+  return (
+    <span className="truncate" title={`${formatSol(lamports)} SOL`}>
+      <Num className="text-xs">{formatSolDown(lamports, 3)} SOL</Num>
+      {dollars === null ? null : <> ≈ {dollars}</>}
+    </span>
+  );
+}
+
+/**
  * NO SINGLE WALLET TO LEAD WITH — none, several with none uniquely linked, or
  * one whose balance nobody could read — so the column lists them rather than
  * promoting one by guess: a card per wallet, under the column's own heading.
+ *
+ * TWO ROWS A CARD (owner, 10-23: "dejamos solo: Nombre, Estado, wallet y saldo
+ * de wallet, y que sean solo 2 filas"): the name — with its pencil when the
+ * account's names can be saved (WalletName) — and the status; then the address
+ * with its copy, and the balance. The settlement count is gone from here: the
+ * column's bar and the pension card already count settlements.
+ *
+ * THE LIST SCROLLS ITSELF, NOT THE PAGE (owner, 10-23: "si se añaden más
+ * wallets eventualmente se hace scroll pero solo de ese cuadrado"). Past about
+ * three cards it stops growing and scrolls inside its own box, the next card
+ * showing its top edge so the box reads as one that scrolls; overscroll stays in
+ * it, so reaching its end never drags the feed or the page along. The inset
+ * keeps a focused pencil's or badge's ring inside the box rather than clipped by
+ * its edge.
  */
 export function WalletList({ wallets, usdcRawPerSol }: { readonly wallets: readonly LiveWalletView[]; readonly usdcRawPerSol: bigint | null }) {
+  if (wallets.length === 0) return <p className="text-xs text-muted-foreground">{LIVE_COPY.noWalletsYet}</p>;
   return (
-    <div className="space-y-2">
-        {wallets.length === 0 ? (
-          <p className="text-xs text-muted-foreground">{LIVE_COPY.noWalletsYet}</p>
-        ) : (
-          <ul className="space-y-2">
-            {wallets.map((wallet) => {
-              const balance = wallet.lamports === null ? null : formatSol(wallet.lamports);
-              const dollars = wallet.lamports === null || usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(wallet.lamports, usdcRawPerSol));
-              const settlements = wallet.settlementNonce === null ? null : LIVE_COPY.settlementCount(wallet.settlementNonce.toString());
-              return (
-                <li key={wallet.address} className="space-y-1 rounded-md border p-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium">{wallet.label}</span>
-                    <LinkBadge wallet={wallet} />
-                  </div>
-                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <Num className="text-xs">{shortAddress(wallet.address)}</Num>
-                    <CopyButton value={wallet.address} />
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    <Num className={MONO}>{balance === null ? LIVE_COPY.unknownFigure : `${balance} SOL`}</Num>
-                    {dollars === null ? null : <> ≈ {dollars}</>}
-                    {settlements === null ? null : <> · {settlements}</>}
-                  </div>
-                  {wallet.canSettle === false && wallet.linkStatus === "this_vault" ? (
-                    <p className="text-xs text-amber-700 dark:text-amber-400">{LIVE_COPY.reserveNoteShort}</p>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
-        )}
-    </div>
+    <ul aria-label={LIVE_COPY.tradingWallets} data-wallet-list="" className="-mx-1 max-h-[15.5rem] space-y-1.5 overflow-y-auto overscroll-contain px-1 py-0.5">
+      {wallets.map((wallet) => (
+        <li key={wallet.address} className="space-y-0.5 rounded-md border px-2.5 py-1.5">
+          <div className="flex min-w-0 items-center justify-between gap-2">
+            <WalletName address={wallet.address} name={wallet.label} className="text-sm font-medium" />
+            <WalletStatusBadge wallet={wallet} />
+          </div>
+          <div className="flex min-w-0 items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span className="flex shrink-0 items-center gap-1">
+              <Num className="text-xs">{shortAddress(wallet.address)}</Num>
+              <CopyButton value={wallet.address} />
+            </span>
+            <WalletBalance lamports={wallet.lamports} usdcRawPerSol={usdcRawPerSol} />
+          </div>
+        </li>
+      ))}
+    </ul>
   );
 }
 

@@ -30,4 +30,15 @@ describe("tradingWalletLabels", () => {
     expect([...tradingWalletLabels([created("A"), created("A")])]).toStrictEqual([["A", "Trading wallet 1"]]);
     expect(tradingWalletLabels([]).size).toBe(0);
   });
+
+  it("lays the account's own names over the derived ones, and keeps counting the wallets it renamed (owner, 10-23)", () => {
+    const names = { A: "Axiom main", C: "Old Phantom" };
+    expect([...tradingWalletLabels([created("A"), created("B"), imported("C")], names)]).toStrictEqual([
+      ["A", "Axiom main"],
+      ["B", "Trading wallet 2"],
+      ["C", "Old Phantom"],
+    ]);
+    // A name for a wallet not in the list names nothing; an inherited key is never a name.
+    expect([...tradingWalletLabels([created("constructor")], { Z: "Gone" })]).toStrictEqual([["constructor", "Trading wallet 1"]]);
+  });
 });
