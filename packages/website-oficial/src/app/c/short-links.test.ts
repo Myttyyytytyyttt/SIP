@@ -49,7 +49,7 @@ const pictureOf = (of: string) => `/c/${of}/card.png?v=${SHARE_RENDER_VERSION}`;
 /** The card's links, long and short, its record in the (memory) store — and this instance's memory of it forgotten, so a page reads it. */
 async function kept(): Promise<{ long: ShareLinks; short: ShareLinks }> {
   const long = signShareLinks(shown, unitsOf(shown), KEY);
-  const short = await shortLinksOf(long, KEY);
+  const short = await shortLinksOf(long, KEY, { exact: "203.0.113.7", aggregate: "203.0.113.0/24" });
   forgetShareStore();
   return { long, short };
 }

@@ -12,9 +12,11 @@
  *
  * Rendered per request (a token is not a page the build knows, and random ones
  * must not fill a cache). A code is the same card forever, so its page asks
- * Vercel's CDN to keep it a year (next.config.mjs), and its record is read
- * once per instance either way. A store that cannot answer just now is an
- * error page, which no cache keeps: the next visit tries again.
+ * Vercel's CDN to keep it a year (next.config.mjs; best effort, per
+ * deployment), and its record is read once per instance either way. A store
+ * that cannot answer just now is an error page, a 500, which Vercel's CDN
+ * never keeps whatever the header says (it keeps 200, 404, 410, 301, 302, 307
+ * and 308 only): the next visit tries again.
  */
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
@@ -36,7 +38,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
 export default async function SharedCard({ params }: Props) {
   const { token } = await params;
   const shared = await openSharedCard(token);
-  // Not a 404: the link is fine, the store did not answer. Nothing caches an error, so the next visit reads again.
+  // Not a 404: the link is fine, the store did not answer. A 500 is never kept by the CDN, so the next visit reads again.
   if (shared.kind === "unavailable") throw new Error("This SaverFi link could not be opened just now. Try again in a minute.");
   if (shared.kind === "missing") notFound();
   return <SharedCardPage page={`/c/${token}`} card={shared.opened.card} unit={shared.opened.unit} />;

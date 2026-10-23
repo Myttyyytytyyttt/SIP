@@ -89,7 +89,7 @@ import {
 import type { SolanaServerSettings } from "./config";
 import { isCrossSite, isJsonContentType, readBodyCapped, type SolanaGate, type SolanaRouteHandler } from "./handlers";
 import { deriveAta, deriveLinkPda, deriveVaultPda } from "./pda";
-import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type WeightedLimiter } from "./rate-limit";
+import { CLIENT_AGGREGATE_FACTOR, clientIdentityFromHeaders, createWeightedLimiter, retryAfterSeconds, type ClientIdentity, type WeightedLimiter } from "./rate-limit";
 import {
   MAX_WALLET_LINKS,
   PYTH_SNAPSHOT_ADDRESSES,
@@ -334,6 +334,12 @@ function memoBySettings<T>(build: (settings: SolanaServerSettings) => T): (setti
 export interface SolanaRouteServed {
   readonly pool: RpcPool;
   readonly volumeOffered: boolean;
+  /**
+   * Who is asking, as the route's own buckets key it (the trusted header's IP
+   * and its network): for a route with a limit of its own beyond reads — the
+   * share card's store writes (web, 10-23). A bucket key, never a log field.
+   */
+  readonly client: ClientIdentity;
   refuse(status: number, code: SolanaBuildErrorCode, message: string, more?: Record<string, unknown>): Response;
   /** Takes `weight` from the process-wide reads budget: null when taken, otherwise the 429 to answer. */
   spendReads(weight: number): Response | null;
@@ -417,6 +423,7 @@ function createRoute(route: BuildRefusalEvent["route"], options: SolanaBuildHand
       const served: Served = {
         pool,
         volumeOffered,
+        client: identity,
         refuse: (status, code, message, more) => refuse(status, code, message, more),
         spendReads: (weight) => {
           const readsAt = now();

@@ -18,13 +18,16 @@ import {
   SHARE_STORE_MISS_MS,
   SHARE_STORE_READS_PER_MIN,
   SHARE_STORE_WRITE_MS,
+  SHARE_STORE_WRITES_PER_CLIENT,
   SHARE_STORE_WRITES_PER_DAY,
+  SHARE_STORE_WRITES_PER_NETWORK,
   ShareStoreError,
   blobShareStore,
   forgetShareStore,
   openSharedCard,
   shareStoreAuthOf,
   shortLinksOf,
+  shortLinksOffered,
 } from "@/lib/share-store";
 import { SHARE_SECRET_ENV, SHARE_SECRET_PREVIOUS_ENV, openShareToken, signShareLinks } from "@/lib/share-token";
 
@@ -47,6 +50,11 @@ const BLOB_TOKEN = "vercel_blob_rw_TESTSTORE_THISISNOTAREALTOKEN";
 const ENV = { [SHARE_SECRET_ENV]: SECRET };
 const NOW = Date.UTC(2026, 9, 23, 12, 0, 0);
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
+/** Who asks, as the route's buckets key it. */
+const CLIENT = { exact: "203.0.113.7", aggregate: "203.0.113.0/24" };
+/** A client of its own, in a network of its own. */
+const clientNo = (i: number) => ({ exact: `198.51.${i}.9`, aggregate: `198.51.${i}.0/24` });
 
 const page = toDashboardMock(liveDashboard(), { complete: false });
 const card = (over: Partial<ShareCardData> = {}): ShareCardData => ({
@@ -60,6 +68,8 @@ const card = (over: Partial<ShareCardData> = {}): ShareCardData => ({
 const linksOf = (shown: ShareCardData = card()): ShareLinks => signShareLinks(shown, unitsOf(shown), KEY);
 const allPaths = (links: ShareLinks): string[] => SHARE_BACKGROUNDS.flatMap((background) => Object.values(links[background]));
 const isShort = (links: ShareLinks): boolean => allPaths(links).every((path) => /^\/c\/[0-9A-Za-z]{8}$/.test(path));
+/** Some short: a card whose two variants drew one tag keeps that one long (share-code.ts). */
+const anyShort = (links: ShareLinks): boolean => allPaths(links).some((path) => /^\/c\/[0-9A-Za-z]{8}$/.test(path));
 
 let warnings: string[] = [];
 beforeEach(() => {
@@ -97,7 +107,7 @@ describe("/api/share's links: short once the record is kept", () => {
   it("a new card: one write, then six short links — which open to the long ones' cards", async () => {
     const store = memoryStore();
     const links = linksOf();
-    const short = await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW });
+    const short = await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW });
     expect(isShort(short)).toBe(true);
     expect(store.created).toEqual([shareRecordPath(shareCardIdOf(shareRecordOf(links)!, KEY))]);
     expect(JSON.parse(store.records.get(store.created[0]!)!)).toEqual(shareRecordOf(links));
@@ -113,8 +123,8 @@ describe("/api/share's links: short once the record is kept", () => {
 
   it("the same card twice: the same links, and still one write", async () => {
     const store = memoryStore();
-    const first = await shortLinksOf(linksOf(), KEY, { env: ENV, store, now: () => NOW });
-    const again = await shortLinksOf(linksOf(), KEY, { env: ENV, store, now: () => NOW + 1_000 });
+    const first = await shortLinksOf(linksOf(), KEY, CLIENT, { env: ENV, store, now: () => NOW });
+    const again = await shortLinksOf(linksOf(), KEY, CLIENT, { env: ENV, store, now: () => NOW + 1_000 });
     expect(again).toEqual(first);
     expect(store.created).toHaveLength(1);
     expect(store.refused).toEqual([]);
@@ -122,9 +132,9 @@ describe("/api/share's links: short once the record is kept", () => {
 
   it("asked by another instance (or after a deploy): the record is there already — read back, it is this card's, so the same short links", async () => {
     const store = memoryStore();
-    const first = await shortLinksOf(linksOf(), KEY, { env: ENV, store, now: () => NOW });
+    const first = await shortLinksOf(linksOf(), KEY, CLIENT, { env: ENV, store, now: () => NOW });
     forgetShareStore();
-    const elsewhere = await shortLinksOf(linksOf(), KEY, { env: ENV, store, now: () => NOW });
+    const elsewhere = await shortLinksOf(linksOf(), KEY, CLIENT, { env: ENV, store, now: () => NOW });
     expect(elsewhere).toEqual(first);
     expect([store.created.length, store.refused.length, store.reads.length]).toEqual([1, 1, 1]);
   });
@@ -133,16 +143,16 @@ describe("/api/share's links: short once the record is kept", () => {
     const store = memoryStore();
     const links = linksOf();
     store.records.set(shareRecordPath(shareCardIdOf(shareRecordOf(links)!, KEY)), JSON.stringify({ v: 1, t: ["x.y", null, null, null, null, null] }));
-    expect(await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW })).toBe(links);
+    expect(await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW })).toBe(links);
     expectQuietLogs([links]);
     expect(warnings.join("\n")).toContain('"kind":"write_conflict"');
   });
 
   it("no store: exactly the long links, as before — said once, naming the variables and no value", async () => {
     const links = linksOf();
-    expect(await shortLinksOf(links, KEY, { env: ENV, now: () => NOW })).toBe(links);
-    expect(await shortLinksOf(links, KEY, { env: { ...ENV, [BLOB_STORE_ID_ENV]: "store_abc" }, now: () => NOW })).toBe(links);
-    expect(await shortLinksOf(links, KEY, { env: ENV, store: null, now: () => NOW })).toBe(links);
+    expect(await shortLinksOf(links, KEY, CLIENT, { env: ENV, now: () => NOW })).toBe(links);
+    expect(await shortLinksOf(links, KEY, CLIENT, { env: { ...ENV, [BLOB_STORE_ID_ENV]: "store_abc" }, now: () => NOW })).toBe(links);
+    expect(await shortLinksOf(links, KEY, CLIENT, { env: ENV, store: null, now: () => NOW })).toBe(links);
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("web.share.short_links_off");
     expect(warnings[0]).toContain(BLOB_TOKEN_ENV);
@@ -154,17 +164,19 @@ describe("/api/share's links: short once the record is kept", () => {
   it("a store over its quota, unreachable or refusing: the long links, and the kind of failure in the log, once a minute", async () => {
     const store = memoryStore();
     const links = linksOf();
+    // A failed write still counts against whoever asked (a refused put may cost the store an operation too): one client per try here.
+    let asker = 0;
     for (const kind of ["store_suspended", "network", "forbidden"]) {
       store.failure = new ShareStoreError(kind);
-      expect(await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW })).toBe(links);
-      expect(await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW + 1_000 })).toBe(links);
+      expect(await shortLinksOf(links, KEY, clientNo((asker += 1)), { env: ENV, store, now: () => NOW })).toBe(links);
+      expect(await shortLinksOf(links, KEY, clientNo((asker += 1)), { env: ENV, store, now: () => NOW + 1_000 })).toBe(links);
     }
     expect(warnings.map((line) => JSON.parse(line).kind)).toEqual(["write_store_suspended", "write_network", "write_forbidden"]);
     expect(store.created).toEqual([]);
     expectQuietLogs([links]);
     // Back: the very next ask is short.
     store.failure = null;
-    expect(isShort(await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW + 2_000 }))).toBe(true);
+    expect(isShort(await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW + 2_000 }))).toBe(true);
   });
 
   it("a store that hangs: the long links within SHARE_STORE_WRITE_MS, so Post on X is never kept waiting by it", async () => {
@@ -172,34 +184,78 @@ describe("/api/share's links: short once the record is kept", () => {
     store.delayMs = 30_000;
     const links = linksOf();
     const started = Date.now();
-    expect(await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW })).toBe(links);
+    expect(await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW })).toBe(links);
     expect(Date.now() - started).toBeLessThan(SHARE_STORE_WRITE_MS + 1_000);
     expect(warnings.join("\n")).toContain('"kind":"write_timeout"');
   });
 
-  it(`at most ${SHARE_STORE_WRITES_PER_DAY} writes a day per instance: past them, long links — and none of them kept from the next day`, async () => {
+  it(`at most ${SHARE_STORE_WRITES_PER_DAY} writes a day per instance, whoever asks: past them, long links — and none of them kept from the next day`, async () => {
     const store = memoryStore();
     // Some short: a card whose two variants drew one tag keeps that one long (share-code.ts).
     const someShort = (links: ShareLinks): boolean => allPaths(links).some((path) => /^\/c\/[0-9A-Za-z]{8}$/.test(path));
+    // One client, in its own network, per write: only the instance's budget is spent here.
     for (let i = 0; i < SHARE_STORE_WRITES_PER_DAY; i += 1) {
-      expect(someShort(await shortLinksOf(linksOf(card({ usdText: `$${i + 1}.00`, usdCompact: `$${i + 1}` })), KEY, { env: ENV, store, now: () => NOW + i }))).toBe(true);
+      expect(someShort(await shortLinksOf(linksOf(card({ usdText: `$${i + 1}.00`, usdCompact: `$${i + 1}` })), KEY, clientNo(i), { env: ENV, store, now: () => NOW + i }))).toBe(true);
       expect(store.created).toHaveLength(i + 1);
     }
     const over = linksOf(card({ usdText: "$999.00", usdCompact: "$999" }));
-    expect(await shortLinksOf(over, KEY, { env: ENV, store, now: () => NOW + 1_000 })).toBe(over);
+    expect(await shortLinksOf(over, KEY, clientNo(200), { env: ENV, store, now: () => NOW + 1_000 })).toBe(over);
     expect(store.created).toHaveLength(SHARE_STORE_WRITES_PER_DAY);
     // A card already written costs nothing, budget or not.
-    expect(someShort(await shortLinksOf(linksOf(card({ usdText: "$1.00", usdCompact: "$1" })), KEY, { env: ENV, store, now: () => NOW + 2_000 }))).toBe(true);
+    expect(someShort(await shortLinksOf(linksOf(card({ usdText: "$1.00", usdCompact: "$1" })), KEY, clientNo(201), { env: ENV, store, now: () => NOW + 2_000 }))).toBe(true);
     expect(store.created).toHaveLength(SHARE_STORE_WRITES_PER_DAY);
-    expect(someShort(await shortLinksOf(over, KEY, { env: ENV, store, now: () => NOW + DAY }))).toBe(true);
+    expect(someShort(await shortLinksOf(over, KEY, clientNo(202), { env: ENV, store, now: () => NOW + DAY }))).toBe(true);
     expect(warnings.join("\n")).toContain('"kind":"write_budget"');
+  });
+
+  it(`at most ${SHARE_STORE_WRITES_PER_CLIENT} writes an hour per client: past them, its new cards keep long links — and nothing of the instance's is spent`, async () => {
+    const store = memoryStore();
+    const nth = (i: number): ShareLinks => linksOf(card({ usdText: `$${i + 1}.00`, usdCompact: `$${i + 1}` }));
+    for (let i = 0; i < SHARE_STORE_WRITES_PER_CLIENT; i += 1) expect(anyShort(await shortLinksOf(nth(i), KEY, CLIENT, { env: ENV, store, now: () => NOW + i }))).toBe(true);
+    const over = nth(SHARE_STORE_WRITES_PER_CLIENT);
+    expect(await shortLinksOf(over, KEY, CLIENT, { env: ENV, store, now: () => NOW + 1_000 })).toBe(over);
+    expect(store.created).toHaveLength(SHARE_STORE_WRITES_PER_CLIENT);
+    // A card it already has kept costs it nothing; another client is not held back by it.
+    expect(anyShort(await shortLinksOf(nth(0), KEY, CLIENT, { env: ENV, store, now: () => NOW + 2_000 }))).toBe(true);
+    expect(anyShort(await shortLinksOf(over, KEY, clientNo(7), { env: ENV, store, now: () => NOW + 3_000 }))).toBe(true);
+    // An hour on, it may again.
+    expect(anyShort(await shortLinksOf(nth(50), KEY, CLIENT, { env: ENV, store, now: () => NOW + HOUR }))).toBe(true);
+    expect(warnings.join("\n")).toContain('"kind":"write_client_budget"');
+    expectQuietLogs([over]);
+    expect(warnings.join("\n")).not.toContain(CLIENT.exact);
+  });
+
+  it(`and ${SHARE_STORE_WRITES_PER_NETWORK} an hour per network, so new addresses inside one mint no writes`, async () => {
+    const store = memoryStore();
+    const nth = (i: number): ShareLinks => linksOf(card({ usdText: `$${i + 1}.00`, usdCompact: `$${i + 1}` }));
+    // Four addresses' worth from one /24, each well inside its own allowance.
+    for (let i = 0; i < SHARE_STORE_WRITES_PER_NETWORK; i += 1) {
+      const neighbour = { exact: `203.0.113.${10 + Math.floor(i / 2)}`, aggregate: "203.0.113.0/24" };
+      expect(anyShort(await shortLinksOf(nth(i), KEY, neighbour, { env: ENV, store, now: () => NOW + i }))).toBe(true);
+    }
+    const over = nth(SHARE_STORE_WRITES_PER_NETWORK);
+    expect(await shortLinksOf(over, KEY, { exact: "203.0.113.200", aggregate: "203.0.113.0/24" }, { env: ENV, store, now: () => NOW + 1_000 })).toBe(over);
+    expect(store.created).toHaveLength(SHARE_STORE_WRITES_PER_NETWORK);
+  });
+});
+
+describe("whether short links are offered", () => {
+  it("with a store, yes; without one, no — said once, naming the variables and no value", () => {
+    expect(shortLinksOffered({ env: ENV, store: memoryStore() })).toBe(true);
+    expect(shortLinksOffered({ env: { ...ENV, [BLOB_TOKEN_ENV]: BLOB_TOKEN } })).toBe(true);
+    expect(shortLinksOffered({ env: ENV })).toBe(false);
+    expect(shortLinksOffered({ env: ENV, store: null })).toBe(false);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("web.share.short_links_off");
+    expect(warnings[0]).not.toContain(BLOB_TOKEN);
+    expect(sdk.current!.calls).toEqual([]);
   });
 });
 
 describe("/c/<code>: read once per instance, and only for a code this server could have made", () => {
   async function written(store = memoryStore()) {
     const links = linksOf();
-    const short = await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW });
+    const short = await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW });
     forgetShareStore();
     return { store, links, short, code: short.vault.usd!.slice(3) };
   }
@@ -234,7 +290,7 @@ describe("/c/<code>: read once per instance, and only for a code this server cou
     expect(await openSharedCard(code, { env: ENV, store, now: () => NOW })).toEqual({ kind: "missing" });
     expect(await openSharedCard(code, { env: ENV, store, now: () => NOW + SHARE_STORE_MISS_MS - 1 })).toEqual({ kind: "missing" });
     expect(store.reads).toHaveLength(1);
-    await shortLinksOf(links, KEY, { env: ENV, store, now: () => NOW });
+    await shortLinksOf(links, KEY, CLIENT, { env: ENV, store, now: () => NOW });
     forgetShareStore();
     expect(await openSharedCard(code, { env: ENV, store, now: () => NOW + SHARE_STORE_MISS_MS })).toMatchObject({ kind: "card" });
   });
@@ -334,7 +390,7 @@ describe("the private Blob store under it (the SDK in memory)", () => {
   it("end to end from the environment: BLOB_READ_WRITE_TOKEN set, links short through the SDK; one put, then a code opens with one get", async () => {
     const env = { ...ENV, [BLOB_TOKEN_ENV]: BLOB_TOKEN };
     const links = linksOf();
-    const short = await shortLinksOf(links, KEY, { env, now: () => NOW });
+    const short = await shortLinksOf(links, KEY, CLIENT, { env, now: () => NOW });
     expect(isShort(short)).toBe(true);
     forgetShareStore();
     expect(await openSharedCard(short.streaks.sol!.slice(3), { env, now: () => NOW })).toEqual({ kind: "card", opened: openShareToken(links.streaks.sol!.slice(3), ENV) });

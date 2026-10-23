@@ -17,9 +17,9 @@ import { createWeightedLimiter, deriveConfigPda, deriveVaultPda } from "@sip/sol
 import { Keypair } from "@solana/web3.js";
 import { describe, expect, it, vi } from "vitest";
 
-import { SHARE_BACKGROUNDS } from "@/lib/live-share";
-import { SHARE_MAX_BODY_BYTES, shareRoute, type ShareLinkAnswer } from "@/lib/share-server";
-import { ShareStoreError, forgetShareStore, openSharedCard } from "@/lib/share-store";
+import { SHARE_BACKGROUNDS, type ShareLinks } from "@/lib/live-share";
+import { SHARE_MAX_BODY_BYTES, shareRoute, type ShareLinkAnswer, type ShareShortAnswer } from "@/lib/share-server";
+import { SHARE_STORE_WRITES_PER_CLIENT, ShareStoreError, forgetShareStore, openSharedCard } from "@/lib/share-store";
 import { SHARE_SECRET_ENV, openShareToken } from "@/lib/share-token";
 
 import { memoryStore } from "../../../../test/fixtures/share-store-memory";
@@ -312,53 +312,126 @@ describe("/api/share", () => {
 });
 
 /**
- * SHORT LINKS (owner, 10-23: "que sean como /c/xxxxxxx y ya"): with a store,
- * every link the dialog is handed is saverfi.cash/c/<8 characters>, the card's
- * record written once; without one, or with one that fails, the long links,
- * exactly as before — the answer's shape the same either way.
+ * SHORT LINKS (owner, 10-23: "que sean como /c/xxxxxxx y ya"), WRITTEN ONLY
+ * WHEN ASKED FOR (review, 10-23): "link" writes nothing and says whether short
+ * links are offered; "short", handed the links "link" answered, keeps the card
+ * and answers them as saverfi.cash/c/<8 characters>. Without a store, "link"
+ * answers exactly as before; with one that fails, or a client past its writes,
+ * "short" answers the long links.
  */
 describe("/api/share's short links", () => {
-  it("with a store: every link is /c/<8 characters>, opening to the card the server read — and the same card twice is one write", async () => {
+  const IP = { "x-envoy-external-address": "198.51.100.4" };
+
+  it("\"link\" writes nothing, and offers short links; \"short\" keeps the card once and answers /c/<8 characters>, opening to the card the server read", async () => {
     forgetShareStore();
     const owner = someKey();
     const vault = deriveVaultPda(owner).toBase58();
     const store = memoryStore();
-    const { post } = setup({ accounts: new Map(vaultOf(owner, 11_420_734_512n)) }, { shareStore: store });
-    const first = await post({ action: "link", owner, streak: [] });
+    const { net, post } = setup({ accounts: new Map(vaultOf(owner, 11_420_734_512n)) }, { shareStore: store });
+    const first = await post({ action: "link", owner, streak: [] }, IP);
     expect(first.status).toBe(200);
-    const links = (first.json as unknown as ShareLinkAnswer).links;
+    const answer = first.json as unknown as ShareLinkAnswer;
+    expect(answer.short).toBe(true);
+    expect(store.created).toEqual([]);
+    for (const background of SHARE_BACKGROUNDS) expect(answer.links[background].sol!.length).toBeGreaterThan(40);
+    const reads = net.calls.mock.calls.length;
+
+    const kept = await post({ action: "short", links: answer.links }, IP);
+    expect(kept.status).toBe(200);
+    const links = (kept.json as unknown as ShareShortAnswer).links;
+    expect(Object.keys(kept.json)).toEqual(["links"]);
     for (const background of SHARE_BACKGROUNDS) {
       expect(Object.keys(links[background])).toEqual(["sol"]);
       expect(links[background].sol).toMatch(/^\/c\/[0-9A-Za-z]{8}$/);
       const opened = await openSharedCard(links[background].sol!.slice(3), { env: ENV, store });
       expect(opened).toMatchObject({ kind: "card", opened: { background, unit: "sol", card: { solText: "11.42", rate: "20%", day: "2026-10-22" } } });
     }
-    const again = await post({ action: "link", owner, streak: [] });
+    // Asked again — the same answer, and still one write; and "short" reads nothing of the chain.
+    const again = await post({ action: "short", links: answer.links }, IP);
     expect(again.json.links).toEqual(links);
     expect(store.created).toHaveLength(1);
-    // The record is the signed tokens: nothing of the pension's in it either.
+    expect(net.calls.mock.calls.length).toBe(reads);
+    // The record is the signed tokens: nothing of the pension's in it, nor in either answer.
     const record = [...store.records.values()][0]!;
     for (const secret of [owner, vault, "11420734512"]) {
-      expect(first.text).not.toContain(secret);
-      expect(record).not.toContain(secret);
+      for (const text of [first.text, kept.text, record]) expect(text).not.toContain(secret);
     }
   });
 
-  it("with no store, or one that fails: the long signed links, as before, in the same answer", async () => {
+  it("with no store: \"link\" answers as before — no short, nothing more — and \"short\" hands the long links back", async () => {
+    forgetShareStore();
+    const owner = someKey();
+    const { post } = setup({ accounts: new Map(vaultOf(owner, 11_420_734_512n)) }, { shareStore: null });
+    const answer = await post({ action: "link", owner, streak: [] });
+    expect(answer.status).toBe(200);
+    expect(Object.keys(answer.json)).toEqual(["card", "links", "streak"]);
+    const links = (answer.json as unknown as ShareLinkAnswer).links;
+    const kept = await post({ action: "short", links });
+    expect([kept.status, kept.json.links]).toEqual([200, links]);
+  });
+
+  it("with a store that fails: \"short\" answers the long links, signed, in the same shape", async () => {
     forgetShareStore();
     const owner = someKey();
     const failing = memoryStore();
     failing.failure = new ShareStoreError("store_suspended");
-    for (const shareStore of [null, failing]) {
-      const { post } = setup({ accounts: new Map(vaultOf(owner, 11_420_734_512n)) }, { shareStore });
-      const answer = await post({ action: "link", owner, streak: [] });
-      expect(answer.status).toBe(200);
-      for (const background of SHARE_BACKGROUNDS) {
-        const path = (answer.json as unknown as ShareLinkAnswer).links[background].sol!;
-        expect(path.length).toBeGreaterThan(40);
-        expect(openShareToken(path.slice(3), ENV)).toMatchObject({ background, unit: "sol" });
-      }
+    const { post } = setup({ accounts: new Map(vaultOf(owner, 11_420_734_512n)) }, { shareStore: failing });
+    const links = ((await post({ action: "link", owner, streak: [] })).json as unknown as ShareLinkAnswer).links;
+    const kept = await post({ action: "short", links });
+    expect(kept.status).toBe(200);
+    for (const background of SHARE_BACKGROUNDS) {
+      const path = (kept.json as unknown as ShareShortAnswer).links[background].sol!;
+      expect(path).toBe(links[background].sol);
+      expect(openShareToken(path.slice(3), ENV)).toMatchObject({ background, unit: "sol" });
     }
     expect(failing.created).toEqual([]);
+  });
+
+  it("only one card's links, as this server signed them, are kept: anything else is 400 and writes nothing", async () => {
+    forgetShareStore();
+    const [a, b] = [someKey(), someKey()];
+    const store = memoryStore();
+    const { post } = setup({ accounts: new Map([...vaultOf(a, 11_420_734_512n), ...vaultOf(b, 60_000_000n)]) }, { shareStore: store });
+    const linksA = ((await post({ action: "link", owner: a, streak: [] })).json as unknown as ShareLinkAnswer).links;
+    const linksB = ((await post({ action: "link", owner: b, streak: [] })).json as unknown as ShareLinkAnswer).links;
+    const token = linksA.grid.sol!;
+    const forged = `${token.slice(0, 15)}${token[15] === "A" ? "B" : "A"}${token.slice(16)}`;
+    for (const body of [
+      { action: "short", links: { ...linksA, grid: { sol: forged } } },
+      { action: "short", links: { ...linksA, vault: linksB.vault } },
+      { action: "short", links: { grid: linksA.grid } },
+      { action: "short", links: "nope" },
+      { action: "short" },
+      { action: "short", links: linksA, owner: a },
+    ]) {
+      const answer = await post(body);
+      expect([answer.status, answer.json.error?.code], JSON.stringify(body).slice(0, 80)).toEqual([400, "bad_request"]);
+    }
+    expect(store.created).toEqual([]);
+    expect((await post({ action: "nope" })).json.error?.message).toBe('action must be "link" or "short".');
+  });
+
+  it("one client keeps at most a few cards an hour: past them its links stay long, and its neighbour's are short", async () => {
+    forgetShareStore();
+    const owners = Array.from({ length: SHARE_STORE_WRITES_PER_CLIENT + 1 }, () => someKey());
+    const store = memoryStore();
+    const { post } = setup({ accounts: new Map(owners.flatMap((owner, i) => vaultOf(owner, 60_000_000n + BigInt(i) * 10_000_000n))) }, { shareStore: store });
+    const isShortLinks = (links: ShareLinks): boolean => SHARE_BACKGROUNDS.every((background) => /^\/c\/[0-9A-Za-z]{8}$/.test(links[background].sol!));
+    const shortened: boolean[] = [];
+    let last: ShareLinks | null = null;
+    for (const owner of owners) {
+      last = ((await post({ action: "link", owner, streak: [] }, IP)).json as unknown as ShareLinkAnswer).links;
+      shortened.push(isShortLinks(((await post({ action: "short", links: last }, IP)).json as unknown as ShareShortAnswer).links));
+    }
+    expect(shortened).toEqual([...Array.from({ length: SHARE_STORE_WRITES_PER_CLIENT }, () => true), false]);
+    expect(store.created).toHaveLength(SHARE_STORE_WRITES_PER_CLIENT);
+    const neighbour = await post({ action: "short", links: last }, { "x-envoy-external-address": "192.0.2.9" });
+    expect(isShortLinks((neighbour.json as unknown as ShareShortAnswer).links)).toBe(true);
+  });
+
+  it("without the secret, \"short\" is 404 share_links_off too", async () => {
+    const { post } = setup({ accounts: new Map() }, { env: SOLANA_ENV, shareStore: memoryStore() });
+    const answer = await post({ action: "short", links: {} });
+    expect([answer.status, answer.json.error?.code]).toEqual([404, "share_links_off"]);
   });
 });

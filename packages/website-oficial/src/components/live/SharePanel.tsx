@@ -39,9 +39,9 @@
  * THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"). A Live page's
  * dialog asks the server once, on open (lib/share-link-client.ts), for the card
  * as the server reads it from the chain and a signed link per background and
- * unit: saverfi.cash/c/<token> — or, once the server has kept the card in its
- * store, saverfi.cash/c/<8 characters> (owner, 10-23: "que sean como
- * /c/xxxxxxx y ya"; lib/share-store.ts) — whose preview on X is this card —
+ * unit: saverfi.cash/c/<token> — or saverfi.cash/c/<8 characters> once the
+ * server has kept the card in its store (owner, 10-23: "que sean como
+ * /c/xxxxxxx y ya"; THE SHORT LINK, below) — whose preview on X is this card —
  * nothing to paste — titled "SaverFi’s Vault" where this one says "My
  * pension" (review finding S1; owner, 10-23: the server signs a card for any
  * pension key, so its picture speaks in the third person), which the hint under the actions
@@ -92,6 +92,19 @@
  * reader (aria-hidden) while it is open — the very time the video's polite
  * status, which lives in the dialog, has something to say.
  *
+ * THE SHORT LINK, ASKED FOR ONCE THE CARD IS LOOKED AT, NEVER WAITED FOR
+ * (review, 10-23). Keeping a card costs a write in the store, its scarcest
+ * operation, so opening the dialog writes nothing: only where the server says
+ * it keeps short links, the dialog asks for them (useShortLinks) once per
+ * opening, after the card has been in view SHARE_KEEP_DWELL_MS — and again,
+ * for links that changed since, when Post on X or Share is reached for (the
+ * pointer on it, its focus, the press). Not only at the press: a phone has no
+ * hover, and a tap's press comes only a moment before its click — too little
+ * to count on for a request and a store write — so a dialog that asked only
+ * then would post the long link from most phones. Post on X stays a plain link
+ * and never waits: until the short link is in, it carries the long one, which
+ * works just as well.
+ *
  * WHAT POST ON X DOES IS SAID BEFORE THE CLICK (review, 10-22). X opens in
  * front, so a "paste it" said after the click lands in the tab left behind, and
  * the person posts the words without the picture. The line under the actions
@@ -134,10 +147,22 @@ import {
   type ShareBackground,
   type ShareCardData,
   type ShareLinkSource,
+  type ShareLinks,
   type ShareScope,
   type ShareUnit,
 } from "@/lib/live-share";
-import { SHARE_LINK_WAIT_MS, askShareLink, keptShareLink, shareLinkKey, shareLinkUrl, warmShareImage, type ShareLinkState } from "@/lib/share-link-client";
+import {
+  SHARE_KEEP_DWELL_MS,
+  SHARE_LINK_WAIT_MS,
+  askShareLink,
+  keepShareLinks,
+  keptShareLink,
+  keptShortLinks,
+  shareLinkKey,
+  shareLinkUrl,
+  warmShareImage,
+  type ShareLinkState,
+} from "@/lib/share-link-client";
 import { SHARE_PLATES, videoSeconds, type SharePlate } from "@/lib/share-plates";
 import { SHARE_RENDER_VERSION } from "@/lib/share-render-version";
 import { cn } from "@/lib/utils";
@@ -590,9 +615,9 @@ function useShareLink(card: ShareCardData, source: ShareLinkSource | undefined):
   const key = live === null ? (source?.kind ?? "none") : shareLinkKey(live, card);
   const initial = (): ShareLinkState => {
     if (source === undefined) return { status: "none" };
-    if (source.kind === "example") return { status: "ready", card: null, links: EXAMPLE_SHARE_LINKS };
+    if (source.kind === "example") return { status: "ready", card: null, links: EXAMPLE_SHARE_LINKS, short: false };
     const kept = keptShareLink(source, card);
-    return kept === undefined ? { status: "pending" } : kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links };
+    return kept === undefined ? { status: "pending" } : kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links, short: kept.short === true };
   };
   const [state, setState] = useState<ShareLinkState>(initial);
 
@@ -606,7 +631,7 @@ function useShareLink(card: ShareCardData, source: ShareLinkSource | undefined):
     let current = true;
     const kept = keptShareLink(asking, card);
     if (kept !== undefined) {
-      setState(kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links });
+      setState(kept === null ? { status: "failed" } : { status: "ready", card: kept.card, links: kept.links, short: kept.short === true });
       return;
     }
     setState({ status: "pending" });
@@ -617,7 +642,7 @@ function useShareLink(card: ShareCardData, source: ShareLinkSource | undefined):
     void askShareLink(asking, card).then((answer) => {
       if (!current) return;
       window.clearTimeout(timer);
-      setState(answer === null ? { status: "failed" } : { status: "ready", card: answer.card, links: answer.links });
+      setState(answer === null ? { status: "failed" } : { status: "ready", card: answer.card, links: answer.links, short: answer.short === true });
     });
     return () => {
       current = false;
@@ -628,9 +653,44 @@ function useShareLink(card: ShareCardData, source: ShareLinkSource | undefined):
   return state;
 }
 
+/**
+ * THE SAME LINKS, SHORT (the header's THE SHORT LINK): null until the server
+ * has kept the card — the long links are posted meanwhile. Asked for on its
+ * own once per opening, after the card has been in view SHARE_KEEP_DWELL_MS,
+ * and by `keep` whenever Post on X or Share is reached for. Only for a Live
+ * page's links, and only where the server said it keeps short ones.
+ */
+function useShortLinks(linked: ShareLinkState): { readonly links: ShareLinks | null; readonly keep: () => void } {
+  const asking = linked.status === "ready" && linked.short ? linked.links : null;
+  const key = asking === null ? "" : JSON.stringify(asking);
+  const [got, setGot] = useState<{ readonly key: string; readonly links: ShareLinks } | null>(null);
+  const links = asking === null ? null : got !== null && got.key === key ? got.links : (keptShortLinks(asking) ?? null);
+
+  const keep = useCallback(() => {
+    if (asking === null) return;
+    void keepShareLinks(asking).then((short) => {
+      if (short !== null) setGot({ key, links: short });
+    });
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps -- the key is the links' identity
+
+  // Once per opening, on its own: the first links that stay in view SHARE_KEEP_DWELL_MS.
+  const dwelt = useRef(false);
+  useEffect(() => {
+    if (asking === null || dwelt.current) return;
+    const timer = window.setTimeout(() => {
+      dwelt.current = true;
+      keep();
+    }, SHARE_KEEP_DWELL_MS);
+    return () => window.clearTimeout(timer);
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps -- the key is the links' identity
+
+  return { links, keep };
+}
+
 export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link?: ShareLinkSource }) {
   // THE CARD SHOWN IS THE SERVER'S ONCE IT ANSWERS: the figures the link was signed for.
   const linked = useShareLink(pageCard, link);
+  const short = useShortLinks(linked);
   const card = linked.status === "ready" && linked.card !== null ? linked.card : pageCard;
   const ids = { background: useId(), unit: useId(), xHint: useId() };
   const [background, setBackground] = useState<ShareBackground>(SHARE_BACKGROUNDS[0]);
@@ -688,13 +748,27 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
   const fileName = shareFileName(card);
   const text = sharePostText(card, unit);
   const plate = SHARE_PLATES[background];
-  // The page this card's link names, for what is shown: its background and unit.
-  const linkPath = linked.status === "ready" ? shareLinkFor(linked.links, background, unit) : null;
+  // The page this card's link names, for what is shown: its background and unit — the short one once it is in.
+  const linkPath = linked.status === "ready" ? shareLinkFor(short.links ?? linked.links, background, unit) : null;
   const postUrl = linkPath === null ? SHARE_SITE : shareLinkUrl(linkPath);
   /** The picture X will ask for, asked first — a Live card's, once Post on X is about to be pressed (the header says why). */
   const warm = (): void => {
     if (link?.kind === "live" && linkPath !== null) warmShareImage(shareImagePath(linkPath, SHARE_RENDER_VERSION));
   };
+  // A short link still to come: its picture, not the long one's, is the one X will ask for.
+  const shortComing = linked.status === "ready" && linked.short && short.links === null;
+  const reached = useRef(false);
+  /** Post on X reached for — pointer, focus, press: the short link asked for, and the picture of what will be posted drawn first. */
+  const reach = (): void => {
+    reached.current = true;
+    short.keep();
+    if (!shortComing) warm();
+  };
+  // The short link arrived after Post on X was reached for: its picture, now.
+  const shortIn = short.links !== null;
+  useEffect(() => {
+    if (shortIn && reached.current) warm();
+  }, [shortIn]); // eslint-disable-line react-hooks/exhaustive-deps -- once, when the short link arrives
 
   function copy(then: "copied" | "copiedForX" | "copiedLinked"): void {
     try {
@@ -768,6 +842,8 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
   // even while it is still being drawn: the clipboard takes the picture's promise (copy()).
   // With the card's own link there is nothing to paste: the image is copied as a bonus, and nothing is said where it cannot be.
   function postOnX(): void {
+    // What is posted is this link, whatever is still coming: its picture first.
+    reached.current = true;
     warm();
     if (linkPath !== null) {
       if (caps.copy) copy("copiedLinked");
@@ -865,7 +941,17 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
           </p>
         </div>
         {caps.share ? (
-          <Button type="button" disabled={ready === null} onClick={() => ready !== null && shareFile(ready, fileName, "shareFailed")} className={cn("max-sm:h-10", OUTLINE_FROM_SM)} data-share-action="share">
+          <Button
+            type="button"
+            disabled={ready === null}
+            onClick={() => ready !== null && shareFile(ready, fileName, "shareFailed")}
+            // The sheet's text carries the link too: reaching for it asks for the short one.
+            onPointerEnter={short.keep}
+            onPointerDown={short.keep}
+            onFocus={short.keep}
+            className={cn("max-sm:h-10", OUTLINE_FROM_SM)}
+            data-share-action="share"
+          >
             <Share aria-hidden />
             {SHARE_COPY.share}
           </Button>
@@ -905,8 +991,9 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
                 target="_blank"
                 rel="noopener noreferrer"
                 onClick={postOnX}
-                onPointerEnter={warm}
-                onFocus={warm}
+                onPointerEnter={reach}
+                onPointerDown={reach}
+                onFocus={reach}
                 aria-describedby={ids.xHint}
                 data-share-action="x"
               >

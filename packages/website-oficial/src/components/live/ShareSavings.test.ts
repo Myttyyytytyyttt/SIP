@@ -16,7 +16,7 @@ import { SAVED } from "@/lib/classes";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import { EXAMPLE_SHARE_LINKS, SHARE_BACKGROUNDS, shareCardOf, type ShareCardData, type ShareLinks } from "@/lib/live-share";
-import { askShareLink, forgetShareLinks } from "@/lib/share-link-client";
+import { askShareLink, forgetShareLinks, keepShareLinks } from "@/lib/share-link-client";
 import { SHARE_PLATES } from "@/lib/share-plates";
 
 import { liveDashboard } from "../../../test/fixtures/live-dashboard";
@@ -220,6 +220,21 @@ describe("Post on X with the card's own link", () => {
     // The name never splits across lines: a no-break space joins it.
     expect(hintOf(html)).toBe("Post on X shares it as “SaverFi’s\u00a0Vault”.");
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Live page's, where short links are kept: the long link until the short one is in hand — asked for after the dialog opens, never while it renders", async () => {
+    const page = card(60_000_000n);
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ card: page, links: signed(), streak: { claimed: 0, proven: null }, short: true }), { status: 200 }));
+    await askShareLink({ kind: "live", owner: OWNER, proof: [] }, page, { fetch });
+    const before = renderToStaticMarkup(createElement(SharePanel, { card: page, link: { kind: "live", owner: OWNER, proof: [] } }));
+    expect(hrefOf(before).searchParams.get("url")).toBe("https://saverfi.cash/c/grid-usd.mac");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // Once the server has kept the card, the dialog — opened again, too — posts the short one.
+    const short = Object.fromEntries(SHARE_BACKGROUNDS.map((background, i) => [background, { usd: `/c/aZ09bY${i}u`, sol: `/c/aZ09bY${i}s` }])) as unknown as ShareLinks;
+    await keepShareLinks(signed(), { fetch: vi.fn(async () => new Response(JSON.stringify({ links: short }), { status: 200 })) });
+    const after = renderToStaticMarkup(createElement(SharePanel, { card: page, link: { kind: "live", owner: OWNER, proof: [] } }));
+    expect(hrefOf(after).searchParams.get("url")).toBe("https://saverfi.cash/c/aZ09bY0u");
+    expect(hintOf(after)).toBe(SHARE_COPY.xHintLinked);
   });
 
   it("a Live page's, refused or off: the site and the image to paste, as before", async () => {

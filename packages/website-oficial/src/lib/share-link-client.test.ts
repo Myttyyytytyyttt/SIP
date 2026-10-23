@@ -7,7 +7,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { toDashboardMock } from "@/lib/live-mock";
 import { shareCardOf, type ShareCardData } from "@/lib/live-share";
-import { SHARE_LINK_KEEP_MS, askShareLink, forgetShareLinks, keptShareLink, shareLinkUrl, warmShareImage } from "@/lib/share-link-client";
+import {
+  SHARE_LINK_KEEP_MS,
+  SHARE_SHORT_RETRY_MS,
+  askShareLink,
+  forgetShareLinks,
+  keepShareLinks,
+  keptShareLink,
+  keptShortLinks,
+  shareLinkUrl,
+  warmShareImage,
+} from "@/lib/share-link-client";
 
 import { OWNER, liveDashboard } from "../../test/fixtures/live-dashboard";
 
@@ -64,6 +74,47 @@ describe("asking for a card's link", () => {
 
   it("a body that is not an answer is no link", async () => {
     expect(await askShareLink(source, card, { fetch: replying(200, { links: "nope" }) })).toBeNull();
+  });
+});
+
+/**
+ * THE SHORT LINK, A SECOND ASK (owner, 10-23; review, 10-23: no write per
+ * open): the long links go back as {"action":"short"}, once per links, and the
+ * answer is kept like the first; one with nothing short in it is believed a
+ * minute, then asked again.
+ */
+describe("asking for the short links", () => {
+  const long = { grid: { usd: "/c/aaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbb" }, streaks: { usd: "/c/cccccccccc.dddddddddddddddddddddd" }, vault: { usd: "/c/eeeeeeeeee.ffffffffffffffffffffff" } };
+  const short = { grid: { usd: "/c/aZ09bY18" }, streaks: { usd: "/c/aZ09bY2x" }, vault: { usd: "/c/aZ09bYq7" } };
+
+  it("posts the links it was handed, once; the short ones are then in hand", async () => {
+    const fetch = replying(200, { links: short });
+    expect(keptShortLinks(long)).toBeUndefined();
+    expect(await keepShareLinks(long, { fetch })).toEqual(short);
+    expect(JSON.parse(String((fetch.mock.calls[0] as unknown as [string, RequestInit])[1].body))).toEqual({ action: "short", links: long });
+    await keepShareLinks(long, { fetch });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(keptShortLinks(long)).toEqual(short);
+  });
+
+  it("the long links back (no room just now), a refusal, or junk: no short link — believed a minute, then asked again", async () => {
+    for (const fetch of [replying(200, { links: long }), replying(429, { error: { code: "rate_limited" } }), replying(200, { links: { grid: { usd: "https://elsewhere.example/" } } })]) {
+      forgetShareLinks();
+      expect(await keepShareLinks(long, { fetch, now: 0 })).toBeNull();
+      expect(keptShortLinks(long, 1)).toBeNull();
+      await keepShareLinks(long, { fetch, now: SHARE_SHORT_RETRY_MS - 1 });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(keptShortLinks(long, SHARE_SHORT_RETRY_MS)).toBeUndefined();
+      await keepShareLinks(long, { fetch, now: SHARE_SHORT_RETRY_MS });
+      expect(fetch).toHaveBeenCalledTimes(2);
+    }
+  });
+
+  it("other links are another ask", async () => {
+    const fetch = replying(200, { links: short });
+    await keepShareLinks(long, { fetch });
+    await keepShareLinks({ ...long, vault: { usd: "/c/gggggggggg.hhhhhhhhhhhhhhhhhhhhhh" } }, { fetch });
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
 

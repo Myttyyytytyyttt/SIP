@@ -105,11 +105,15 @@ const nextConfig = {
       // Blob store again on every visit — the store's reads are what is scarce.
       // Next sends a page rendered per request as "private, no-store", which
       // browsers keep obeying; this header is for Vercel's CDN alone, which
-      // never forwards it. Best effort, and nothing rests on it: a CDN that
-      // ignores it renders the page per visit, as a long link's, and the record
-      // is still read once per instance (src/lib/share-store.ts). Exactly 8
-      // characters: a long /c/<token> and /c/example are not matched. Its 404s
-      // may be kept too; its errors (a store that did not answer) never are.
+      // never forwards it. Best effort, and nothing rests on it: the CDN's
+      // cache is per deployment (each deploy starts it empty) and may let a
+      // page go sooner, and then the page renders per visit, as a long link's,
+      // with the record still read once per instance (src/lib/share-store.ts).
+      // Exactly 8 characters: a long /c/<token> and /c/example are not matched.
+      // The header rides on every status, but Vercel's CDN keeps only 200, 404,
+      // 410, 301, 302, 307 and 308 (its "cacheable response criteria"): so a
+      // 404 — a code no card was kept under — may be kept, and the 500 "try
+      // again" page of a store that did not answer never is (review, 10-23).
       { source: "/c/:code([0-9A-Za-z]{8})", headers: [{ key: "Vercel-CDN-Cache-Control", value: "max-age=31536000" }] },
     ];
   },

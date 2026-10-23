@@ -14,6 +14,7 @@ import {
   mayBeShareCode,
   openShareRecord,
   readShareRecord,
+  reissuedShareLinks,
   shareCardIdOf,
   shareCodeOf,
   shareRecordOf,
@@ -21,7 +22,7 @@ import {
   shortShareLinks,
   type ShareRecord,
 } from "@/lib/share-code";
-import { openShareToken, signShareLinks, SHARE_SECRET_ENV } from "@/lib/share-token";
+import { openShareToken, shareKeysOf, signShareLinks, SHARE_SECRET_ENV, SHARE_SECRET_PREVIOUS_ENV } from "@/lib/share-token";
 
 import { OWNER, VAULT, WALLET_A, liveDashboard } from "../../test/fixtures/live-dashboard";
 
@@ -216,6 +217,92 @@ describe("two variants with one tag", () => {
       const path = short[background][unit]!;
       if (path === links[background][unit]) continue;
       expect(openShareRecord(codeOfPath(path), record, [key]), `${background} ${unit}`).toMatchObject({ background, unit });
+    }
+  });
+});
+
+/**
+ * THE v1 TABLE IS PART OF EVERY CODE POSTED (review, 10-23): a tag names its
+ * variant by its place here, and a record is read only at this length. It is
+ * written out in share-code.ts, never derived from the dialog's backgrounds;
+ * this pins it, so changing it is a decision (a v2 table), not a side effect.
+ */
+describe("the variants a v1 record lists, in their order", () => {
+  it("is exactly this, written out", () => {
+    expect(SHARE_CODE_VARIANTS).toEqual([
+      ["grid", "usd"],
+      ["grid", "sol"],
+      ["streaks", "usd"],
+      ["streaks", "sol"],
+      ["vault", "usd"],
+      ["vault", "sol"],
+    ]);
+  });
+
+  it("covers every background the dialog offers today — a new one would keep its long links until a v2 table names it", () => {
+    for (const background of SHARE_BACKGROUNDS) for (const unit of ["usd", "sol"] as const) expect(SHARE_CODE_VARIANTS).toContainEqual([background, unit]);
+  });
+
+  it("a background the table does not name keeps its long links, and the others are short as ever", () => {
+    const links = linksOf(card());
+    // A background the table has never heard of, with links of its own.
+    const aurora = linksOf(card({ day: "2026-09-17" })).grid;
+    const extra = { ...links, aurora } as unknown as ShareLinks;
+    expect(shareRecordOf(extra)).toEqual(recordOf(links));
+    const short = shortShareLinks(extra, recordOf(links), KEY) as unknown as Record<string, Record<string, string>>;
+    expect(short.aurora).toEqual(aurora);
+    for (const [background, unit] of SHARE_CODE_VARIANTS) {
+      expect(short[background]![unit]).toMatch(/^\/c\/[0-9A-Za-z]{8}$/);
+      expect(openShareRecord(shareCodeOf(short[background]![unit]!.slice(3))!, recordOf(links), [KEY])).toMatchObject({ background, unit });
+    }
+  });
+});
+
+/**
+ * WHAT "short" KEEPS (review, 10-23: the write happens when the dialog asks for
+ * short links, with the links it was handed): exactly one card's set, as this
+ * server signs it — nothing forged, nothing mixed, nothing missing.
+ */
+describe("the links a short-link request may keep", () => {
+  const keys = shareKeysOf(ENV)!;
+
+  it("one card's set, as signed: given back exactly — for a card in both units, in SOL only, and with nothing saved", () => {
+    for (const shown of [card(), card({ usdText: null, usdCompact: null }), zero()]) {
+      const links = linksOf(shown);
+      expect(reissuedShareLinks(links, keys)).toEqual(links);
+    }
+  });
+
+  it("signed under the previous secret: the same card, signed again under the current one", () => {
+    const old = linksOf(card(), OTHER_KEY);
+    const rotating = shareKeysOf({ [SHARE_SECRET_ENV]: SECRET, [SHARE_SECRET_PREVIOUS_ENV]: OTHER })!;
+    expect(reissuedShareLinks(old, rotating)).toEqual(linksOf(card()));
+    expect(reissuedShareLinks(old, keys)).toBeNull();
+  });
+
+  it("anything else is refused: a forged or foreign token, two cards mixed, a variant missing or added, a short or sample link, junk", () => {
+    const links = linksOf(card());
+    const other = linksOf(card({ usdText: "$9.99", usdCompact: "$9.9" }));
+    const token = links.grid.usd!;
+    const forged = `${token.slice(0, 15)}${token[15] === "A" ? "B" : "A"}${token.slice(16)}`;
+    const short = shortShareLinks(links, recordOf(links), KEY);
+    for (const [why, given] of [
+      ["forged", { ...links, grid: { ...links.grid, usd: forged } }],
+      ["another secret's", linksOf(card(), OTHER_KEY)],
+      ["two cards", { ...links, vault: other.vault }],
+      ["swapped units", { ...links, grid: { usd: links.grid.sol, sol: links.grid.usd } }],
+      ["a background missing", { grid: links.grid, streaks: links.streaks }],
+      ["a unit missing", { ...links, streaks: { usd: links.streaks.usd } }],
+      ["a background added", { ...links, aurora: links.grid }],
+      ["a unit added", { ...links, grid: { ...links.grid, eur: links.grid.usd } }],
+      ["short links", short],
+      ["the sample's", { grid: { usd: "/c/example" }, streaks: { usd: "/c/example/streaks" }, vault: { usd: "/c/example/vault" } }],
+      ["nothing", {}],
+      ["not links", "nope"],
+      ["null", null],
+      ["an array", [links.grid.usd]],
+    ] as const) {
+      expect(reissuedShareLinks(given, keys), why).toBeNull();
     }
   });
 });

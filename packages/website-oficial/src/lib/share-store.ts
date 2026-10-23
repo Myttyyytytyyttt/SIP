@@ -1,7 +1,8 @@
 /**
  * WHERE A SHORT LINK IS KEPT, AND HOW A PAGE OPENS ONE (owner, 10-23:
  * "Cortos con Vercel Blob"; the format is lib/share-code.ts). /api/share keeps
- * a card's record here before it answers (shortLinksOf), and /c/<code> and its
+ * a card's record here when the dialog asks for its short links (the "short"
+ * action, share-server.ts — never when it merely opens), and /c/<code> and its
  * picture read it back (openSharedCard), in a PRIVATE Vercel Blob store: no
  * record has a public address, and only this server's credentials read one.
  *
@@ -11,32 +12,49 @@
  * one, exactly as before — said once in the log, naming the variables and
  * never a value. The SDK is loaded only once a store is there.
  *
- * NEVER BREAKS A SHARE. The record is written as /api/share's last step, held
- * to SHARE_STORE_WRITE_MS; a store that is missing, slow, refusing, over its
- * quota or past this instance's budget, and the dialog gets the long link,
- * which needs no store at all and works for as long as the secret does. A
- * short link is only ever handed out once its record is in the store.
+ * NEVER BREAKS A SHARE. A write is held to SHARE_STORE_WRITE_MS; a store that
+ * is missing, slow, refusing, over its quota, or a client or instance past its
+ * budget, and the dialog keeps the long link, which needs no store at all and
+ * works for as long as the secret does. A short link is only ever handed out
+ * once its record is in the store.
  *
- * WHAT IT COSTS, BOUNDED (Vercel Blob on Hobby: 2,000 writes and 10,000
- * uncached reads a month, and Blob blocked for 30 days past either):
- *   writes  one per distinct card — new figures, a new day — and none for a card
- *           this instance has written already; at most SHARE_STORE_WRITES_PER_DAY
- *           per instance. A card exists only for a vault on chain, so nobody can
- *           invent new ones by asking.
- *   reads   one per card per instance, and kept for the instance's life: a code
- *           is the same card forever. A record is stored with a year's cache, so
- *           Blob's own CDN answers a read again without an operation. A code this
- *           server never made is refused before any read (share-code.ts), and at
- *           most SHARE_STORE_READS_PER_MIN reads per minute per instance reach
- *           the store.
- *   pages   /c/<code> and its picture are cached at Vercel's CDN for a year
- *           (next.config.mjs, components/share-og.tsx): a code never changes.
+ * WHAT IT COSTS, AND WHAT IS NOT BOUNDED (review, 10-23: "no saturar nada").
+ * Vercel Blob on Hobby includes 2,000 advanced operations (a write is one) and
+ * 10,000 simple ones (a read that misses Blob's cache) a month; past either,
+ * Vercel blocks Blob — reads too — for 30 days, and on Pro the excess is
+ * billed instead (Vercel's Blob pricing page, as updated 2026-09-23).
+ *   writes  one per distinct card, asked for by the dialog once per opening at
+ *           most, or when Post on X or Share is reached for (SharePanel.tsx);
+ *           none for a card this instance has kept already. At most
+ *           SHARE_STORE_WRITES_PER_CLIENT an hour per client (its IP),
+ *           SHARE_STORE_WRITES_PER_NETWORK per network, and
+ *           SHARE_STORE_WRITES_PER_DAY per instance.
+ *   reads   one per card per instance, kept for the instance's life: a code is
+ *           the same card forever. A record asks Blob's CDN to keep it a year,
+ *           and a read that CDN answers costs no operation. A code this server never
+ *           made is refused before any read (share-code.ts), and at most
+ *           SHARE_STORE_READS_PER_MIN reads a minute per instance reach it.
+ *   pages   /c/<code> asks Vercel's CDN to keep it a year (next.config.mjs), its
+ *           picture too (components/share-og.tsx): best effort, and per
+ *           deployment — every deploy starts that cache empty.
+ * EVERY ONE OF THOSE BOUNDS IS PER INSTANCE, IN MEMORY. A fresh instance starts
+ * them anew, and nothing here counts across instances: that would take a shared
+ * store of its own, which costs operations too. So each instance alive in a day
+ * may write SHARE_STORE_WRITES_PER_DAY that day, a fresh one bringing its own:
+ * a month reaches Hobby's 2,000 only if more than three instances a day, on
+ * average, spend all of theirs — which nothing here prevents against someone
+ * who keeps many instances busy from many addresses. If
+ * the quota is ever crossed on Hobby, every short link already posted fails
+ * ("try again", never a 404) until the 30 days pass, while long links and new
+ * shares, which then fall back to long, keep working.
  *
  * A LOG LINE SAYS WHAT FAILED, NOT WITH WHAT: the kind of failure only, at most
- * once a minute per kind — never a token, a code, a path, or the store's
- * credentials.
+ * once a minute per kind — never a token, a code, a path, an address, or the
+ * store's credentials.
  */
 import "server-only";
+
+import type { ClientIdentity } from "@sip/solana-core/server";
 
 import type { Env } from "@/lib/config";
 import type { ShareLinks } from "@/lib/live-share";
@@ -57,12 +75,16 @@ export const BLOB_TOKEN_ENV = "BLOB_READ_WRITE_TOKEN";
 export const BLOB_STORE_ID_ENV = "BLOB_STORE_ID";
 export const BLOB_OIDC_TOKEN_ENV = "VERCEL_OIDC_TOKEN";
 
-/** The longest /api/share waits for the store before it answers with the long link: Post on X waits 4 s for the whole answer (share-link-client.ts). */
+/** The longest "short" waits for the store before it answers the long links. Nothing in the dialog waits on it: Post on X carries the long link meanwhile (SharePanel.tsx). */
 export const SHARE_STORE_WRITE_MS = 1_500;
 /** The longest a page or a picture waits for a record. */
 export const SHARE_STORE_READ_MS = 3_000;
-/** Records written per instance per day, at most. */
-export const SHARE_STORE_WRITES_PER_DAY = 100;
+/** Records written per instance per day, at most: 20 × 30 is 600 a month per instance, against Hobby's 2,000 (the header says why per instance). */
+export const SHARE_STORE_WRITES_PER_DAY = 20;
+/** Records one client (its IP, or IPv6 /64) may have written per hour, at most: a person posts a card or two, not a stream. */
+export const SHARE_STORE_WRITES_PER_CLIENT = 4;
+/** And its network (IPv4 /24, IPv6 /48), so rotating addresses inside it mints no budget: four clients' worth, as the reads buckets. */
+export const SHARE_STORE_WRITES_PER_NETWORK = 16;
 /** Records read from the store per instance per minute, at most (a read kept in memory is not one). */
 export const SHARE_STORE_READS_PER_MIN = 120;
 /** How long a code found missing is believed. */
@@ -73,6 +95,7 @@ export const SHARE_RECORD_MAX_AGE_S = 31_536_000;
 const RECORD_MAX_BYTES = 8_192;
 const MAX_KEPT = 5_000;
 const MINUTE = 60_000;
+const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
 // ── the store ────────────────────────────────────────────────────────────────
@@ -225,6 +248,8 @@ interface StoreState {
   /** A card's id → its record as read (null: not there), or being read. */
   readonly opened: Map<string, Opened>;
   readonly writes: Window;
+  /** A client's bucket key (its IP, its network) → the writes it had this hour. */
+  readonly clients: Map<string, Window>;
   readonly reads: Window;
   /** A log line's kind → when it was last said. */
   readonly said: Map<string, number>;
@@ -235,7 +260,7 @@ const STATE = Symbol.for("sip.web.share.store");
 /** Held on globalThis like the share route's own state, so every bundle in this process shares one. */
 function stateOf(): StoreState {
   const holder = globalThis as unknown as Record<symbol, StoreState | undefined>;
-  return (holder[STATE] ??= { written: new Map(), opened: new Map(), writes: { start: 0, used: 0 }, reads: { start: 0, used: 0 }, said: new Map() });
+  return (holder[STATE] ??= { written: new Map(), opened: new Map(), writes: { start: 0, used: 0 }, clients: new Map(), reads: { start: 0, used: 0 }, said: new Map() });
 }
 
 /** For tests: forget everything this instance kept. */
@@ -260,6 +285,31 @@ function keep<K, V>(map: Map<K, V>, key: K, value: V): void {
   map.set(key, value);
 }
 
+/**
+ * One more write for this client, within the hour: its own key first, then its
+ * network's — both or neither, so a client already refused spends nothing of
+ * its neighbours'. The keys are bucket names in memory, never in a log line.
+ */
+function spendClient(state: StoreState, client: ClientIdentity, now: number): boolean {
+  const windowOf = (key: string): Window => {
+    const found = state.clients.get(key) ?? { start: now, used: 0 };
+    keep(state.clients, key, found);
+    return found;
+  };
+  const own = windowOf(`client:${client.exact}`);
+  const network = windowOf(`network:${client.aggregate}`);
+  for (const window of [own, network]) {
+    if (now - window.start >= HOUR) {
+      window.start = now;
+      window.used = 0;
+    }
+  }
+  if (own.used >= SHARE_STORE_WRITES_PER_CLIENT || network.used >= SHARE_STORE_WRITES_PER_NETWORK) return false;
+  own.used += 1;
+  network.used += 1;
+  return true;
+}
+
 /** A line in the log, at most once a minute per kind ("off": once per process). Names, never values. */
 function say(kind: string, now: number): void {
   const state = stateOf();
@@ -277,7 +327,8 @@ function say(kind: string, now: number): void {
     return;
   }
   const outcome = kind.startsWith("read_") ? "the short link's page is asked to try again" : "the dialog was given the long links";
-  console.warn(JSON.stringify({ event: "web.share.short_link_store", kind, message: `The share link store did not answer as expected: ${outcome}.` }));
+  const what = kind.endsWith("budget") ? "A short link budget is spent" : "The share link store did not answer as expected";
+  console.warn(JSON.stringify({ event: "web.share.short_link_store", kind, message: `${what}: ${outcome}.` }));
 }
 
 const kindOfFailure = (error: unknown): string => (error instanceof ShareStoreError ? error.kind : "unexpected");
@@ -290,6 +341,18 @@ export interface ShortLinkOptions {
   /** Default: the deployment's (shareStoreOf); null: none. */
   readonly store?: ShareStore | null;
   readonly now?: () => number;
+}
+
+/**
+ * WHETHER THIS DEPLOYMENT KEEPS SHORT LINKS: a store is configured ("link"
+ * says so to the dialog, which only then asks for them). Without one, said
+ * once in the log — the variables' names, never a value.
+ */
+export function shortLinksOffered(options: ShortLinkOptions = {}): boolean {
+  const store = options.store === undefined ? shareStoreOf(options.env ?? process.env) : options.store;
+  if (store !== null) return true;
+  say("off", (options.now ?? Date.now)());
+  return false;
 }
 
 /**
@@ -310,11 +373,12 @@ async function keepRecord(store: ShareStore, path: string, body: string, signal:
 }
 
 /**
- * THE LINKS THE DIALOG IS HANDED: short, once the card's record is in the
- * store; the long ones, as signed, otherwise — never an error, never a wait
- * past SHARE_STORE_WRITE_MS.
+ * THE LINKS THE DIALOG IS HANDED WHEN IT ASKS FOR SHORT ONES: short, once the
+ * card's record is in the store; the long ones, as signed, otherwise — never an
+ * error, never a wait past SHARE_STORE_WRITE_MS. `client` is who asked, as the
+ * route's buckets key it: a card not yet kept costs it one of its writes.
  */
-export async function shortLinksOf(links: ShareLinks, key: Buffer, options: ShortLinkOptions = {}): Promise<ShareLinks> {
+export async function shortLinksOf(links: ShareLinks, key: Buffer, client: ClientIdentity, options: ShortLinkOptions = {}): Promise<ShareLinks> {
   const now = (options.now ?? Date.now)();
   const store = options.store === undefined ? shareStoreOf(options.env ?? process.env) : options.store;
   if (store === null) {
@@ -327,6 +391,11 @@ export async function shortLinksOf(links: ShareLinks, key: Buffer, options: Shor
   const body = JSON.stringify(record);
   const state = stateOf();
   if (state.written.get(id) !== body) {
+    // The client's budget before the instance's: a client already refused spends nothing of everyone's.
+    if (!spendClient(state, client, now)) {
+      say("write_client_budget", now);
+      return links;
+    }
     if (!spend(state.writes, SHARE_STORE_WRITES_PER_DAY, DAY, now)) {
       say("write_budget", now);
       return links;

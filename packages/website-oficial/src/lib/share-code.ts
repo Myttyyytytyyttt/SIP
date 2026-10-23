@@ -21,7 +21,7 @@
  * write; its six codes share the id and differ in the tag.
  *
  * WHAT A RECORD HOLDS: c/<id>.json, {"v":1,"t":[six tokens, or null]} — the
- * signed tokens, in SHARE_CODE_VARIANTS' order, and nothing else: no vault, no
+ * signed tokens, in SHARE_CODE_VARIANTS' frozen order, and nothing else: no vault, no
  * wallet, no address, nothing of whoever asked. A token says what the card
  * prints and no more (share-token.ts), so neither does the record.
  *
@@ -45,8 +45,8 @@ import "server-only";
 
 import { createHmac } from "node:crypto";
 
-import { SHARE_BACKGROUNDS, type ShareBackground, type ShareLinks, type ShareUnit } from "@/lib/live-share";
-import { cardOfPayload, verifyShareToken } from "@/lib/share-token";
+import { SHARE_BACKGROUNDS, unitsOf, type ShareBackground, type ShareCardData, type ShareLinks, type ShareUnit } from "@/lib/live-share";
+import { cardOfPayload, signShareLinks, verifyShareToken, type ShareKeys, type SharePayload } from "@/lib/share-token";
 
 /** What a short link's last segment is: anything else under /c/ is a long token, or nothing. */
 export const SHARE_CODE_SHAPE = /^[0-9A-Za-z]{8}$/;
@@ -60,12 +60,25 @@ const MAX_TOKEN_CHARS = 512;
 /** A long link this server signed: /c/<base64url>.<base64url>. */
 const LONG_LINK = /^\/c\/([A-Za-z0-9_-]{8,480}\.[A-Za-z0-9_-]{22})$/;
 
-const UNITS = ["usd", "sol"] as const satisfies readonly ShareUnit[];
-
-/** Every way a card can be posted, in the fixed order a record lists its tokens. */
-export const SHARE_CODE_VARIANTS: readonly (readonly [ShareBackground, ShareUnit])[] = SHARE_BACKGROUNDS.flatMap((background) =>
-  UNITS.map((unit) => [background, unit] as const),
-);
+/**
+ * EVERY WAY A CARD CAN BE POSTED, IN THE ORDER A v1 RECORD LISTS ITS TOKENS —
+ * frozen here, written out, never derived from the dialog's own list (review,
+ * 10-23). A posted code names its variant by its place in this table (its tag)
+ * and a record is read only at this length, so the table is part of every code
+ * already posted: derived from SHARE_BACKGROUNDS, a background added to the
+ * picker would have turned every posted short link into a 404 (a record of the
+ * old length), and a reorder would have pointed tags at other variants. A
+ * background the table does not name keeps its long link (shareRecordOf skips
+ * it) until a v2 table says otherwise; share-code.test.ts pins this one.
+ */
+export const SHARE_CODE_VARIANTS = [
+  ["grid", "usd"],
+  ["grid", "sol"],
+  ["streaks", "usd"],
+  ["streaks", "sol"],
+  ["vault", "usd"],
+  ["vault", "sol"],
+] as const satisfies readonly (readonly [ShareBackground, ShareUnit])[];
 
 /** One card's record in the store: its signed tokens, one per variant, null where it has none. */
 export interface ShareRecord {
@@ -135,7 +148,8 @@ export function shortShareLinks(links: ShareLinks, record: ShareRecord, key: Buf
   });
   const shorten = (each: Readonly<Partial<Record<ShareUnit, string>>>): Partial<Record<ShareUnit, string>> =>
     Object.fromEntries(Object.entries(each).map(([unit, path]) => [unit, short.get(path) ?? path]));
-  return { grid: shorten(links.grid), streaks: shorten(links.streaks), vault: shorten(links.vault) };
+  // Every background the links have, named in the table or not: one it does not name keeps its long links.
+  return Object.fromEntries(Object.entries(links).map(([background, each]) => [background, shorten(each)])) as unknown as ShareLinks;
 }
 
 /** A short link's halves, if `param` has a short link's shape; null for anything else (a long token, "example", junk). */
@@ -185,4 +199,56 @@ export function openShareRecord(code: ShareCode, record: ShareRecord, keys: read
     }
   }
   return null;
+}
+
+const isBackground = (value: string): value is ShareBackground => (SHARE_BACKGROUNDS as readonly string[]).includes(value);
+
+/**
+ * THE LINKS TO KEEP, FROM THE ONES THE DIALOG WAS HANDED (review, 10-23: the
+ * record is written when the dialog asks for short links, not when it opens —
+ * share-server.ts's "short" action). `given` is accepted only if it is exactly
+ * one card's set as /api/share signs it: every path a long link whose token a
+ * key in force signed, every background there, each variant printing what that
+ * card prints in it — so a request can keep only a card this server read from
+ * the chain, and never a mix of two. The answer is that set signed again under
+ * the current key, so no record is written under a key on its way out; null
+ * for anything else.
+ */
+export function reissuedShareLinks(given: unknown, keys: ShareKeys): ShareLinks | null {
+  if (given === null || typeof given !== "object" || Array.isArray(given)) return null;
+  const read: { readonly background: ShareBackground; readonly unit: ShareUnit; readonly payload: SharePayload }[] = [];
+  for (const [background, each] of Object.entries(given as Record<string, unknown>)) {
+    if (!isBackground(background) || each === null || typeof each !== "object" || Array.isArray(each)) return null;
+    for (const [unit, path] of Object.entries(each as Record<string, unknown>)) {
+      if ((unit !== "usd" && unit !== "sol") || typeof path !== "string") return null;
+      const token = LONG_LINK.exec(path)?.[1];
+      const payload = token === undefined ? null : verifyShareToken(token, keys.verify);
+      if (payload === null) return null;
+      read.push({ background, unit, payload });
+    }
+  }
+  if (read.length === 0) return null;
+  // The card they print: the rule, the day and the rest from any of them, each unit's figure from its own.
+  const opened = read.map(({ payload }) => cardOfPayload(payload).card);
+  const usd = opened.find((card) => card.usdText !== null);
+  const sol = opened.find((card) => card.solText !== null);
+  const card: ShareCardData = {
+    ...opened[0]!,
+    usdText: usd?.usdText ?? null,
+    usdCompact: usd?.usdCompact ?? null,
+    solText: sol?.solText ?? null,
+    solCompact: sol?.solCompact ?? null,
+  };
+  const again = signShareLinks(card, unitsOf(card), keys.sign);
+  const printed = (path: string, verify: readonly Buffer[]): string => JSON.stringify(verifyShareToken(path.slice(3), verify));
+  const asked = given as Partial<Record<ShareBackground, Partial<Record<ShareUnit, string>>>>;
+  for (const background of SHARE_BACKGROUNDS) {
+    for (const unit of ["usd", "sol"] as const) {
+      const want = again[background][unit];
+      const got = asked[background]?.[unit];
+      if ((want === undefined) !== (got === undefined)) return null;
+      if (want !== undefined && got !== undefined && printed(want, [keys.sign]) !== printed(got, keys.verify)) return null;
+    }
+  }
+  return again;
 }

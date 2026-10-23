@@ -9,11 +9,18 @@
  * adopts that card, so its preview, Copy, Download and the X preview all show
  * the same figures, and the link shows nothing the server did not read itself.
  *
- * SHORT WHEN IT CAN BE (owner, 10-23: "que sean como /c/xxxxxxx y ya"): once
- * the card's record is in the Blob store, each link is saverfi.cash/c/<8
- * characters> (lib/share-code.ts, lib/share-store.ts). No store, a slow one, a
- * full one, and the links are the long /c/<token> ones, as before: the answer's
- * shape is the same either way, and so is what the dialog does with it.
+ * SHORT WHEN IT CAN BE (owner, 10-23: "que sean como /c/xxxxxxx y ya"), AND
+ * ONLY WHEN ASKED (review, 10-23: a write on every open, with a price move able
+ * to make a new card each minute, was the store's scarcest operation spent on
+ * dialogs nobody posted from). "link" writes nothing: it answers the long links, plus
+ * `short: true` when this deployment has a Blob store. Then, once per opening
+ * at most or when Post on X or Share is reached for, the dialog sends those
+ * links back as {"action":"short","links":…}, and the answer is the same links,
+ * saverfi.cash/c/<8 characters> wherever the card's record is now kept
+ * (lib/share-code.ts reissuedShareLinks, lib/share-store.ts shortLinksOf). No
+ * store, and "link" answers exactly what it did before short links existed —
+ * no `short`, no second request; a slow, full or refusing store, or a client
+ * past its writes, and "short" answers the long links: the dialog posts those.
  *
  * THE FIGURES ARE READ, NEVER RECEIVED. One snapshot — the Live page's own
  * batch of four, through readLiveSnapshot and liveSnapshotJsonText, so the
@@ -33,8 +40,10 @@
  * never starve Live. The card per pension is kept a minute and a proven day a
  * day (both per instance), so a dialog opened twice reads once. The /c pages
  * and their images read nothing of the chain; a short link's, its record, once
- * per instance (lib/share-store.ts). A card's record is written once: at most
- * one store write per answer, none for a card already written.
+ * per instance (lib/share-store.ts). "short" reads nothing of the chain: it
+ * checks the tokens it is handed with the secret, and writes a card's record
+ * once — at most one store write per request, none for a card already kept,
+ * within each client's and each instance's writes (lib/share-store.ts).
  *
  * THE OWN BUDGET IS TAKEN AFTER THE CLIENT PAYS, STEP BY STEP (review, 10-22).
  * It was taken first, for the worst case: 49 for a request whose client paid
@@ -73,10 +82,11 @@ import { toLiveDashboard } from "@/lib/live-model";
 import { SHARE_STREAK_CAP, shareCardOf, unitsOf, type ShareCardData, type ShareLinks } from "@/lib/live-share";
 import type { LiveDashboard, LiveSnapshotJson } from "@/lib/live-types";
 import { solanaGate } from "@/lib/load-config";
-import { shortLinksOf, type ShareStore } from "@/lib/share-store";
+import { reissuedShareLinks } from "@/lib/share-code";
+import { shortLinksOf, shortLinksOffered, type ShareStore } from "@/lib/share-store";
 import { shareKeysOf, signShareLinks } from "@/lib/share-token";
 
-/** The largest body: an owner and 45 signatures of up to 88 characters each, with room to spare. */
+/** The largest body: an owner and 45 signatures of up to 88 characters each — or six links of up to 515 — with room to spare. */
 export const SHARE_MAX_BODY_BYTES = 6_144;
 /** Upstream calls /api/share may make per minute in one instance, across everyone, before it answers 429. */
 export const SHARE_READS_PER_MIN = 300;
@@ -85,6 +95,7 @@ export const SHARE_CARD_TTL_MS = 60_000;
 export const SHARE_PROOF_TTL_MS = 86_400_000;
 
 const FIELDS = ["action", "owner", "streak"] as const;
+const SHORT_FIELDS = ["action", "links"] as const;
 const HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" } as const;
 
 /** What the dialog is answered. */
@@ -93,6 +104,13 @@ export interface ShareLinkAnswer {
   readonly links: ShareLinks;
   /** How many days were claimed, and how many the chain proved — null when nothing was claimed. */
   readonly streak: { readonly claimed: number; readonly proven: number | null };
+  /** Present, and true, only when this deployment keeps short links: the dialog may then ask for them ("short"). */
+  readonly short?: true;
+}
+
+/** What "short" answers: the links it was handed, short wherever the card's record is kept. */
+export interface ShareShortAnswer {
+  readonly links: ShareLinks;
 }
 
 // ── per instance: the card a minute, a proven day a day, and the route's own budget
@@ -210,9 +228,26 @@ async function link(
 
   const card = shareCardOf(shareInputOf(data, streakDays));
   if (card.state === "unknown") return served.refuse(502, "unreadable", "SaverFi could not read this pension just now.");
-  // THE LINKS: signed, then short once the card's record is kept — the long ones if it cannot be.
-  const links = await shortLinksOf(signShareLinks(card, unitsOf(card), keys.sign), keys.sign, { env, store, now });
-  const answer: ShareLinkAnswer = { card, links, streak: { claimed, proven } };
+  // THE LINKS: signed, long. Nothing is written here — a store write waits for the dialog to ask ("short").
+  const links = signShareLinks(card, unitsOf(card), keys.sign);
+  const answer: ShareLinkAnswer = { card, links, streak: { claimed, proven }, ...(shortLinksOffered({ env, store, now }) ? { short: true as const } : {}) };
+  return json(200, answer);
+}
+
+/**
+ * "short": the links "link" answered, kept and made short. Only a set that is
+ * exactly one card's as this server signed it is taken (reissuedShareLinks);
+ * the answer is never an error for the store's sake — its failures, and a
+ * client or an instance past its writes, answer the long links.
+ */
+async function short(fields: Readonly<Record<string, unknown>>, served: SolanaRouteServed, env: Env, now: () => number, store: ShareStore | null | undefined): Promise<Response> {
+  const extra = Object.keys(fields).find((name) => !(SHORT_FIELDS as readonly string[]).includes(name));
+  if (extra !== undefined) return served.refuse(400, "bad_request", `Unexpected field ${extra.slice(0, 40)}.`);
+  const keys = shareKeysOf(env);
+  if (keys === null) return json(404, { error: { code: "share_links_off", message: "Share links are off on this deployment." } });
+  const links = reissuedShareLinks(fields.links, keys);
+  if (links === null) return served.refuse(400, "bad_request", "links must be one card's links, as /api/share signed them.");
+  const answer: ShareShortAnswer = { links: await shortLinksOf(links, keys.sign, served.client, { env, store, now }) };
   return json(200, answer);
 }
 
@@ -227,7 +262,11 @@ export function shareRoute(options: ShareRouteOptions = {}): SolanaRouteHandler 
   const now = rest.now ?? Date.now;
   const budget = (): WeightedLimiter => shareBudget ?? stateOf().budget;
   const route = createSolanaReadRoute("share", { ...rest, gate: () => solanaGate(env()), maxBodyBytes: SHARE_MAX_BODY_BYTES }, async (action, fields, served) =>
-    action === "link" ? link(fields, served, env(), now, budget(), shareStore) : served.refuse(400, "bad_request", 'action must be "link".'),
+    action === "link"
+      ? link(fields, served, env(), now, budget(), shareStore)
+      : action === "short"
+        ? short(fields, served, env(), now, shareStore)
+        : served.refuse(400, "bad_request", 'action must be "link" or "short".'),
   );
   return {
     POST: (request) => (shareKeysOf(env()) === null ? Promise.resolve(json(404, { error: { code: "share_links_off", message: "Share links are off on this deployment." } })) : route.POST(request)),
