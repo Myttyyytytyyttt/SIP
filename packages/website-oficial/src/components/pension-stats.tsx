@@ -76,7 +76,7 @@ const LOADED = "in the loaded history";
  *
  * A LIVE PENSION FILLS THE SAME EIGHT SLOTS WITH WHAT THE CHAIN RECORDS
  * (`stats.vocabulary`). It has no trades, only the settlements taken from
- * them, so the two tiles that count trades count settlements under that name;
+ * them, so the tile that averages per trade averages per settlement instead;
  * and where the sample shows volume a profit vault shows the gains its rule
  * measured. A tile whose figure the chain cannot answer is left out rather than
  * printed as a dash in a box — and every other word is the sample's own.
