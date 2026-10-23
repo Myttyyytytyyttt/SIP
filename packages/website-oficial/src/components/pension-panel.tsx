@@ -2,14 +2,13 @@ import type { ReactNode } from "react";
 
 import { CopyButton } from "@/components/copy-button";
 import { Figure } from "@/components/live/Figure";
-import { Num } from "@/components/num";
 import { PensionChart } from "@/components/pension-chart";
 import { PensionHoldings } from "@/components/pension-holdings";
 import { PensionStats, SaveCalendar } from "@/components/pension-stats";
-import { Card, CardContent, CardDescription, CardHeader } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { splitDecimal } from "@/lib/amounts";
 import { LABEL, SAVED } from "@/lib/classes";
-import { dateLabel, pct, usd, usdSigned } from "@/lib/format";
+import { usd, usdSigned } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
 import { shortAddress } from "@/lib/vault-copy";
@@ -52,6 +51,27 @@ const HERO_TAIL = { em: 0.6, className: "text-[0.6em] leading-none" } as const;
  */
 const HERO_FITS = 10;
 /**
+ * THE ROW SAYS ITS OWN WIDTH (10-23). Chrome reckons a wrapping flex row
+ * narrower than it then lays out in — 291.97 px for the sample's figure and
+ * button, which need 292.41 at 1440 — and the column around them took that
+ * width wherever nothing in it stood wider, so the button wrapped under the
+ * figure. The line under the figure stood wider until the owner had it removed
+ * (10-23); without it, swept every 4 px from 320 to 1680, the sample's button
+ * wrapped at 760–764, 1096–1136 and 1440–1480 px wide (1380–1404 at 800
+ * tall), just past the tight bands. `w-max` has the row measure itself exactly
+ * and the column hold that; `max-w-full` keeps it inside the column.
+ *
+ * UP TO 13 CHARACTERS (LONG_FITS), where the same sweep, 900 and 800 tall, on
+ * the sample and on a live page at 6, 9, 10, 11 and 13, found the button never
+ * wrapping and nothing leaving the card. At 14 ($10M, or 10 SOL with no price
+ * read) a row at its own width pushed the stats past the card in the tight
+ * bands and the button off it at 320 — so from there the row is the plain
+ * wrapping one, which wraps the button where it must and, reckoned short, at
+ * some widths where it need not.
+ */
+const LONG_FITS = 13;
+const ROW_EXACT = "w-max max-w-full";
+/**
  * THE HEADER'S TIGHT BANDS (review, 10-22; the rule is in globals.css). Right
  * after the panel's header takes one more thing into its row — the stats on
  * the right at @md, the save-days squares at @2xl — the column on the left is
@@ -59,7 +79,7 @@ const HERO_FITS = 10;
  * under a 48 px figure: the hero grew 32 px and the page under it moved, on the
  * sample at 704–752, 816–848, 1040–1088 and (taller than 860) 1392–1432 px
  * wide. There the figure is drawn a step smaller by scale — its box, and so the
- * header, the description and everything below, stays exactly where it was —
+ * header and everything below, stays exactly where it was —
  * and the button stands beside it, out of the flow.
  *
  * ONLY A FIGURE THAT WOULD WRAP. Measured at the narrowest a band leaves the
@@ -129,9 +149,6 @@ export function PensionPanel({
   className?: string;
 }) {
   const savedToday = stats.savedTodayUsd !== null && stats.savedTodayUsd > 0;
-  // What the rate is taken from, in the vault's own words: the sample measures
-  // volume, a live vault today measures profit.
-  const measure = rule.mode === "profit" ? "of trading gains" : "of every buy and sell";
   // A dollar here is SOL at the one price this page read. Said on the figure,
   // where the question arises, rather than on a line of its own.
   const priced = stats.pricedToday === true ? ACTIVITY_COPY.atTodaysPrice : undefined;
@@ -142,6 +159,7 @@ export function PensionPanel({
   const width = heroWidth(solHero ?? usd(stats.totalSavedUsd), solHero !== null);
   const long = share !== undefined && width > HERO_FITS;
   const tight = share !== undefined && !long && width > (stats.unrealizedUsd === null ? BAND_FITS.noGain : BAND_FITS.gain);
+  const exact = share !== undefined && width <= LONG_FITS;
   const figure = (
     <p
       className={long ? HERO_FIGURE_LONG : HERO_FIGURE}
@@ -199,26 +217,17 @@ export function PensionPanel({
              * 360, and a long one may in a tight band — wraps the button under
              * it rather than off the card.
              */
-            <div className="flex min-w-0 flex-wrap items-center gap-x-3" {...(tight ? HERO_ROW_TIGHT : {})}>
+            <div className={cn("flex min-w-0 flex-wrap items-center gap-x-3", exact && ROW_EXACT)} {...(tight ? HERO_ROW_TIGHT : {})}>
               {figure}
               {share}
             </div>
           )}
           {/*
-            THE RULE IS TODAY'S; THE TOTAL IS SINCE THE FIRST SAVE. A vault that
-            switched mode (09-25: profit, then volume at 1 %) saved under both,
-            and "1 % of every buy and sell, since Sep 18" claimed the whole total
-            for today's rule. So the rule says "now" and the date stands apart.
+            NO LINE OF EXPLANATION UNDER THE FIGURE (owner, 10-23: "quita esos
+            textos que aparecen de forma de subtítulo"). It said "Now 2 % of every
+            buy and sell · saving since Sep 18": the rule is on the strip's badge
+            and in the Savings rule panel, and the date added nothing to the total.
           */}
-          <CardDescription>
-            Now <Num>{pct(rule.rateBps)}</Num> {measure}
-            {stats.firstSaveAt ? (
-              <>
-                {" "}
-                · saving since <Num>{dateLabel(stats.firstSaveAt)}</Num>
-              </>
-            ) : null}
-          </CardDescription>
           {/* THE VAULT ITSELF, under what it holds (owner, 09-25): its address, a copy, and the explorer. */}
           {vault === undefined ? null : (
             <p className="flex items-center gap-1 text-xs text-muted-foreground">

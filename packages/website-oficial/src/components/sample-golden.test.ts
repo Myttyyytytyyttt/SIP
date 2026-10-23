@@ -22,6 +22,17 @@
 // was re-taken once more the same day for its `data-hero-row="tight"` (review:
 // the button wrapped under the figure at some widths; pension-panel.tsx).
 //
+// RE-TAKEN ON PURPOSE FOR THE TEXT TRIM (owner, 10-23: "títulos simples y
+// concisos ... quita esos textos que aparecen de forma de subtítulo", and the
+// chart's range selector "obstruyendo la línea"). pension-panel, pension-stats
+// and dashboard-main changed by exactly that: the line under the hero figure and
+// every stat tile's sub line gone, two tiles renamed ("Biggest save", "Yearly
+// pace"), and the range tabs moved off the plot onto a row above it — and by
+// one class on the figure's row, `w-max max-w-full`, because that line had been
+// what kept the share button beside the figure (ROW_EXACT, pension-panel.tsx).
+// The landing's app-loop video still shows the old subtitles; it was not
+// re-rendered.
+//
 // renderToString, NOT renderToStaticMarkup: the static renderer glues adjacent
 // text nodes together, so splitting one text run into two nodes — which once
 // moved the sample's glyphs by a sub-pixel — would pass unseen. renderToString

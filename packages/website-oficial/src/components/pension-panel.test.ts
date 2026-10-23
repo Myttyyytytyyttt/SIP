@@ -1,6 +1,5 @@
-// The hero's subtitle (owner, 09-25): the rule is today's, the total is since
-// the first save. A vault that switched mode saved under both, so the subtitle
-// never claims the whole total for today's rule.
+// The hero: the figure with nothing explained under it, the pill a live page
+// adds beside its label, and the share button on its line.
 
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -23,15 +22,19 @@ const render = (mode: "profit" | "volume", rateBps: number): string =>
     ),
   );
 
-describe("the hero's subtitle", () => {
-  it("says the rule is today's, and the date stands apart as when saving began", () => {
-    const text = render("volume", 100).replace(/<[^>]+>/g, "");
-    expect(text).toContain("Now 1% of every buy and sell · saving since Sep 18, 2026");
-    expect(text).not.toMatch(/every buy and sell, since/);
-  });
-
-  it("names a profit rule the same way", () => {
-    expect(render("profit", 2_500).replace(/<[^>]+>/g, "")).toContain("Now 25% of trading gains · saving since");
+/**
+ * NOTHING UNDER THE FIGURE (owner, 10-23: "quita esos textos que aparecen de
+ * forma de subtítulo"). The line that said "Now 1% of every buy and sell ·
+ * saving since Sep 18" is gone for either rule, with a first save on record.
+ */
+describe("the hero's figure", () => {
+  it.each([
+    ["volume", 100],
+    ["profit", 2_500],
+  ] as const)("has no line of explanation under it (%s)", (mode, rateBps) => {
+    const html = render(mode, rateBps);
+    expect(html).not.toContain('data-slot="card-description"');
+    expect(html.replace(/<[^>]+>/g, "")).not.toMatch(/saving since|Now \d+%/);
   });
 });
 
@@ -91,7 +94,7 @@ describe("the share slot", () => {
   it("puts the button right after the figure, on its line", () => {
     const html = panel(createElement("button", { "data-share-savings": "" }));
     // The sample's figure: marked for the header's tight bands (below).
-    expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3" data-hero-row="tight">${FIGURE.source}<button data-share-savings=""></button></div>`));
+    expect(html).toMatch(new RegExp(`<div class="flex min-w-0 flex-wrap items-center gap-x-3 w-max max-w-full" data-hero-row="tight">${FIGURE.source}<button data-share-savings=""></button></div>`));
   });
 
   it("is not there at all without `share`: the figure stands alone", () => {
@@ -188,10 +191,11 @@ describe("the header's tight bands", () => {
         }),
       ),
     );
-    return html.match(/<div class="flex min-w-0 flex-wrap items-center gap-x-3"[^>]*>/)?.[0] ?? null;
+    return html.match(/<div class="flex min-w-0 flex-wrap items-center gap-x-3[^"]*"[^>]*>/)?.[0] ?? null;
   };
-  const TIGHT = '<div class="flex min-w-0 flex-wrap items-center gap-x-3" data-hero-row="tight">';
-  const PLAIN = '<div class="flex min-w-0 flex-wrap items-center gap-x-3">';
+  // Every figure here is 13 characters or fewer: its row says its own width (below).
+  const TIGHT = '<div class="flex min-w-0 flex-wrap items-center gap-x-3 w-max max-w-full" data-hero-row="tight">';
+  const PLAIN = '<div class="flex min-w-0 flex-wrap items-center gap-x-3 w-max max-w-full">';
 
   it("marks the sample's own figure, beside stats that carry a gain", () => {
     expect(mock.stats.unrealizedUsd).not.toBeNull();
@@ -214,5 +218,45 @@ describe("the header's tight bands", () => {
 
   it("has no row to mark without a button", () => {
     expect(rowOf({}, false)).toBeNull();
+  });
+});
+
+/**
+ * THE ROW SAYS ITS OWN WIDTH (10-23; ROW_EXACT in pension-panel.tsx). Chrome
+ * reckons a wrapping flex row narrower than it lays out in, and with the line
+ * under the figure gone nothing wider held the column open: the sample's
+ * button wrapped under its figure at 1440, one of 24 widths. Up to 13
+ * characters the row measures itself (swept: never wraps, nothing leaves the
+ * card); from 14 it is the plain wrapping row, which may wrap the button but
+ * never pushes the stats out.
+ */
+describe("the figure's row width", () => {
+  const rowOf = (stats: Partial<typeof mock.stats>): string =>
+    renderToStaticMarkup(
+      createElement(
+        TooltipProvider,
+        null,
+        createElement(PensionPanel, {
+          stats: { ...mock.stats, ...stats },
+          curve: mock.curve,
+          holdings: mock.holdings,
+          days: mock.days,
+          rule: mock.rule,
+          now: mock.now,
+          share: createElement("button", { "data-share-savings": "" }),
+        }),
+      ),
+    ).match(/<div class="flex min-w-0 flex-wrap items-center gap-x-3[^"]*"/)?.[0] ?? "";
+
+  it("is the row's own up to 13 characters: the sample's, a live page's, a long dollar figure, a no-price SOL", () => {
+    expect(rowOf({})).toContain("w-max max-w-full");
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: 29.82 })).toContain("w-max max-w-full");
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: 1_234_567.89 })).toContain("w-max max-w-full");
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: null, totalSavedSol: "1.234567890", pricedToday: false })).toContain("w-max max-w-full");
+  });
+
+  it("is the plain wrapping row from 14: $10M, or 10 SOL with no price read", () => {
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: 12_345_678.9 })).toBe('<div class="flex min-w-0 flex-wrap items-center gap-x-3"');
+    expect(rowOf({ unrealizedUsd: null, totalSavedUsd: null, totalSavedSol: "12.345678901", pricedToday: false })).toBe('<div class="flex min-w-0 flex-wrap items-center gap-x-3"');
   });
 });

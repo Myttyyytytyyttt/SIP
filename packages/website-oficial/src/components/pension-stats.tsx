@@ -40,13 +40,33 @@ function lastSpan(count: number): string {
   return `${two} ${four}`;
 }
 
+/**
+ * A LABEL AND A FIGURE, NOTHING UNDER THEM (owner, 10-23: "títulos simples y
+ * concisos y así no hay subtexto de forma innecesaria"). Each tile used to
+ * carry a grey line under its figure — "$632.50 this month", "180 trades",
+ * "longest 12", "over a year" — and together they read as filler. What a
+ * reader needs to read the figure right went into the label instead ("Biggest
+ * save", "Yearly pace"); a note that only qualifies it goes on hover.
+ *
+ * EVERY LABEL ON ONE LINE, down to a 375 px phone, where a two-column tile
+ * leaves 122 px for it (measured): a label that wraps makes its row taller
+ * than the others, and the grid ragged. "Avg per settlement" took 133 and
+ * wrapped at 320–396 px wide and in three wider bands (swept every 4 px to
+ * 1680); "Avg settlement" takes 106, and wraps only under 344.
+ */
 interface Tile {
   readonly label: string;
   readonly value: ReactNode;
-  readonly sub: ReactNode;
-  /** What the value is, where the figure alone could be misread: "at today's SOL price". */
+  /** What the value is, where the figure alone could be misread: "at today's SOL price", "in the loaded history". On hover only. */
   readonly title?: string;
 }
+
+/**
+ * A LIVE FIGURE TAKEN OVER THE LOADED PAGES, NOT THE PENSION'S LIFE: a record
+ * over a page is not a lifetime's. Said on hover now that the tile has no sub
+ * line to say it in.
+ */
+const LOADED = "in the loaded history";
 
 /**
  * Eight facts about the saving, as a tile grid, and under them a quiet
@@ -78,64 +98,25 @@ export function PensionStats({
   const live = stats.vocabulary === "settlements";
   const priced = stats.pricedToday === true ? ACTIVITY_COPY.atTodaysPrice : undefined;
   const titled = (title: string | undefined): { readonly title?: string } => (title === undefined ? {} : { title });
+  // Both notes on one hover when a figure needs both: "at today's SOL price · in the loaded history".
+  const partial = live && stats.complete !== true;
+  const noted = (...notes: readonly (string | undefined)[]): { readonly title?: string } => titled(notes.filter((note) => note !== undefined).join(" · ") || undefined);
 
   const candidates: readonly (Tile | null)[] = [
-    stats.savedThisWeekUsd === null
-      ? null
-      : {
-          label: "This week",
-          value: <Num>{usd(stats.savedThisWeekUsd)}</Num>,
-          sub:
-            stats.savedThisMonthUsd === null ? (
-              ""
-            ) : (
-              <>
-                <Num>{usd(stats.savedThisMonthUsd)}</Num> this month
-              </>
-            ),
-          ...titled(priced),
-        },
+    stats.savedThisWeekUsd === null ? null : { label: "This week", value: <Num>{usd(stats.savedThisWeekUsd)}</Num>, ...titled(priced) },
     stats.avgSavedPerTradeUsd === null
       ? null
-      : {
-          label: live ? "Avg per settlement" : "Avg per trade",
-          value: <Num>{usd(stats.avgSavedPerTradeUsd)}</Num>,
-          sub:
-            stats.trades === null ? (
-              ""
-            ) : (
-              <>
-                <Num>{count(stats.trades)}</Num> {live ? (stats.trades === 1 ? "settlement" : "settlements") : "trades"}
-              </>
-            ),
-          ...titled(priced),
-        },
+      : { label: live ? "Avg settlement" : "Avg per trade", value: <Num>{usd(stats.avgSavedPerTradeUsd)}</Num>, ...titled(priced) },
     stats.volumeUsd === null
       ? null
       : {
           // What the rate was taken from. On a profit vault that is the gains, not the volume.
           label: live && mode === "profit" ? "Gains measured" : "Volume",
           value: <Num>{usdCompact(stats.volumeUsd)}</Num>,
-          sub:
-            stats.volumeThisMonthUsd === null ? (
-              ""
-            ) : (
-              <>
-                <Num>{usdCompact(stats.volumeThisMonthUsd)}</Num> this month
-              </>
-            ),
           ...titled(priced),
         },
-    stats.bestTradeSavedUsd === null
-      ? null
-      : {
-          label: "Biggest",
-          value: <Num>{usd(stats.bestTradeSavedUsd)}</Num>,
-          // Over what is loaded, unless everything is: a record over a page is not a lifetime's.
-          // Short enough not to wrap: a second line here makes the whole first row of tiles taller.
-          sub: !live ? "put aside by one trade" : stats.complete === true ? "by one settlement" : "in the loaded history",
-          ...titled(priced),
-        },
+    // "Biggest" alone could be the biggest trade; its sub said "put aside by one trade". A save is one settlement on a live page.
+    stats.bestTradeSavedUsd === null ? null : { label: "Biggest save", value: <Num>{usd(stats.bestTradeSavedUsd)}</Num>, ...noted(priced, partial ? LOADED : undefined) },
     stats.currentStreakDays === null
       ? null
       : {
@@ -145,29 +126,8 @@ export function PensionStats({
               <Num>{count(stats.currentStreakDays)}</Num> <Word>{stats.currentStreakDays === 1 ? "day" : "days"}</Word>
             </>
           ),
-          sub:
-            stats.longestStreakDays === null ? (
-              ""
-            ) : (
-              <>
-                longest <Num>{count(stats.longestStreakDays)}</Num>
-              </>
-            ),
         },
-    {
-      label: "Investments",
-      value: <Num>{count(stats.investments)}</Num>,
-      sub:
-        live && stats.complete !== true ? (
-          "in the loaded history"
-        ) : stats.thresholdUsd === null ? (
-          ""
-        ) : (
-          <>
-            every <Num>{usd(stats.thresholdUsd)}</Num>
-          </>
-        ),
-    },
+    { label: "Investments", value: <Num>{count(stats.investments)}</Num>, ...noted(partial ? LOADED : undefined) },
     stats.activeDays === null
       ? null
       : {
@@ -177,9 +137,9 @@ export function PensionStats({
               <Num>{count(stats.activeDays)}</Num> <Word>of</Word> <Num>{count(days.length)}</Num>
             </>
           ),
-          sub: "days with a save",
         },
-    stats.projectedYearUsd === null ? null : { label: "At this pace", value: <Num>{usd(stats.projectedYearUsd)}</Num>, sub: "over a year", ...titled(priced) },
+    // "At this pace" needed its "over a year" to be read as a year's figure; the label says it now.
+    stats.projectedYearUsd === null ? null : { label: "Yearly pace", value: <Num>{usd(stats.projectedYearUsd)}</Num>, ...titled(priced) },
   ];
   const tiles = candidates.filter((tile): tile is Tile => tile !== null);
 
@@ -199,7 +159,6 @@ export function PensionStats({
             <dd className="text-lg font-medium whitespace-nowrap" {...titled(tile.title)}>
               {tile.value}
             </dd>
-            <dd className="text-xs text-muted-foreground">{tile.sub}</dd>
           </div>
         ))}
       </dl>
