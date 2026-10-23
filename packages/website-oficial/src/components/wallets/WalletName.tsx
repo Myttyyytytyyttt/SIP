@@ -27,7 +27,9 @@
  * card does not move when the read lands and the pencil appears. Signed out
  * (the sample) it is exactly what the row showed before. A save refused for
  * the day's budget takes the pencil away as it answers (10-23), and its words
- * still stand in the name's place for their seconds.
+ * still stand in the name's place for their seconds. Another wallet's box open
+ * at that moment stays open, and ending it says "Renaming paused." in its
+ * name's place: what was typed is never dropped without a word.
  *
  * AN INPUT METHOD'S ENTER IS NOT A SAVE. Japanese, Chinese and Korean typing
  * confirm a word with Enter, and Escape drops the word being composed: while a
@@ -105,11 +107,17 @@ export function WalletName({
         fail(refusalWords(outcome.message));
         return;
       }
+      // The pencil went while this box was open: another wallet's save found the day spent, or the session
+      // ended. What was typed is refused in words, as the server would refuse it, not dropped in silence.
+      if (!available) {
+        fail({ message: account ? RENAME_COPY.paused : RENAME_COPY.signIn, detail: null });
+        return;
+      }
       void rename(address, outcome.name).then((result) => {
         if (!result.ok) fail(result);
       });
     },
-    [address, draft, fail, name, names, rename],
+    [account, address, available, draft, fail, name, names, rename],
   );
 
   // Focused with every character selected, so the first key typed replaces the name.
@@ -146,11 +154,8 @@ export function WalletName({
       </span>
     ) : null;
 
-  if (!available) {
-    const plain = failing ?? <span className={cn("min-w-0 truncate", className)}>{name}</span>;
-    return account ? <span className="flex h-6 min-w-0 items-center">{plain}</span> : plain;
-  }
-
+  // An open box stays open whatever happens to the pencil meanwhile (review, 10-23): it ends as every edit
+  // ends, and its save says why it could not be made (finish).
   if (editing) {
     return (
       <span className="flex h-6 min-w-0 flex-1 items-center">
@@ -180,6 +185,11 @@ export function WalletName({
         </span>
       </span>
     );
+  }
+
+  if (!available) {
+    const plain = failing ?? <span className={cn("min-w-0 truncate", className)}>{name}</span>;
+    return account ? <span className="flex h-6 min-w-0 items-center">{plain}</span> : plain;
   }
 
   return (

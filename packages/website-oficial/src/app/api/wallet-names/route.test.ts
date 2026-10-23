@@ -2,8 +2,8 @@
 // signature): off without a store — by the short links' rule, since it is their store too — then the gate,
 // cross-site, the client's buckets, the Privy session — checked against a local key set, so nothing reaches
 // Privy — and the names, kept in an in-memory store with the Blob store's contract (etags and create-only first
-// saves included), behind this instance's copies and the daily budgets that keep the WHOLE store, short links
-// included, inside Hobby's month. No network.
+// saves included), behind this instance's copies and the daily budgets that keep the names' share of the store, and
+// its writes with the short links', inside Hobby's month. No network.
 
 import { SIP_PROGRAM_ID } from "@sip/solana-core/client";
 import { createWeightedLimiter } from "@sip/solana-core/server";
@@ -19,6 +19,7 @@ import {
   WALLET_NAMES_PLANNED_INSTANCES,
   WALLET_NAMES_READS_PER_DAY,
   WALLET_NAMES_READS_PER_USER,
+  WALLET_NAMES_REREADS_PER_DAY,
   WALLET_NAMES_WRITES_PER_DAY,
   WALLET_NAMES_WRITES_PER_USER,
   walletNamesBudgets,
@@ -31,6 +32,7 @@ import { WalletNamesConflict, memoryWalletNamesStore, walletNamesPath, type Wall
 const APP_ID = "cmtrt36tb00080dlbrda5aqam";
 const ALICE = "did:privy:alice00000000000000000000a";
 const BOB = "did:privy:bob0000000000000000000000b";
+const CAROL = "did:privy:carol000000000000000000000c";
 const NOW = Date.UTC(2026, 9, 23, 12, 0, 0);
 const ENV = {
   SIP_SOLANA_RPC_URLS: "https://upstream.invalid/?api-key=NAMESROUTESECRET",
@@ -82,9 +84,11 @@ function routeWith(over: Partial<WalletNamesRouteOptions> = {}) {
       aggregate: createWeightedLimiter({ capacity: 120 }),
       readsPerUser: createWeightedLimiter({ capacity: 20 }),
       readsGlobal: createWeightedLimiter({ capacity: 60 }),
+      rereadsGlobal: createWeightedLimiter({ capacity: 60 }),
       writesPerUser: createWeightedLimiter({ capacity: 10 }),
       writesGlobal: createWeightedLimiter({ capacity: 20 }),
       paused: new Map(),
+      readsSpent: new Map(),
       ...over.budgets,
     },
   });
@@ -419,14 +423,19 @@ describe("the month, at the budgets' production sizes (Hobby: 10,000 reads and 2
     expect(writes).toBeLessThanOrEqual(WALLET_NAMES_WRITES_PER_DAY * 32);
   });
 
-  it("keeps the whole store — short links and names, each spent to the brim at the planned instances — clearly inside the month", () => {
+  it("keeps the store's writes — short links and names, each spent to the brim at the planned instances — clearly inside the month, and the names' reads to a fifth of it", () => {
     const { reads, writes } = spentFlatOut();
     const N = WALLET_NAMES_PLANNED_INSTANCES;
     // The short links' writes: a fixed daily window, so at most 32 windows in 31 days (share-store.ts, not changed here).
     const shareWrites = 32 * SHARE_STORE_WRITES_PER_DAY;
     expect(N * (shareWrites + writes)).toBeLessThanOrEqual(0.8 * HOBBY_WRITES);
-    // The names' reads; the short links' are about one CDN miss per record, so at most one per write.
-    expect(N * (reads + shareWrites)).toBeLessThanOrEqual(0.35 * HOBBY_READS);
+    // The names' own reads, a fifth of the month. The short links' reads are not summed here: share-store.ts caps
+    // them a minute, not a month, so any figure for them is an assumption about Blob's CDN, not a bound (review, 10-23).
+    expect(N * reads).toBeLessThanOrEqual(0.2 * HOBBY_READS);
+  });
+
+  it("keeps two thirds of an instance's reads for accounts it holds no copy of: refreshing a copy takes at most a third", () => {
+    expect(3 * WALLET_NAMES_REREADS_PER_DAY).toBeLessThanOrEqual(WALLET_NAMES_READS_PER_DAY);
   });
 
   it("gives the names the small end: a flood of names alone needs over three times the instances a flood of short links does", () => {
@@ -539,6 +548,55 @@ describe("the budgets", () => {
     const refused = await route.GET(get(await tokenFor(BOB)));
     expect(refused.status).toBe(429);
     expect(await codeOf(refused)).toBe("names_budget");
+  });
+
+  it("lets refreshing copies — several accounts saving an unchanged name over and over — take only the re-reads' share, so an account with no copy here still reads its names", async () => {
+    const { store, read } = countingStore();
+    const { route } = routeWith({ store, budgets: walletNamesBudgets() });
+    const named = someWallet();
+    await store.write(CAROL, { [named]: "Carol's" }, null);
+    // Each account's first save of "no name" reads the store; every one after it is a save the copy calls unchanged,
+    // which the store confirms: a re-read. Five accounts at six reads each once spent this instance's whole day.
+    for (let index = 0; index < 5; index += 1) {
+      const token = await tokenFor(`did:privy:loop${String(index).padStart(21, "0")}`);
+      for (let i = 0; i < 2 * WALLET_NAMES_READS_PER_USER; i += 1) expect((await route.PUT(put(token, { address: someWallet(), name: null }))).status).toBe(200);
+    }
+    expect(read).toHaveBeenCalledTimes(5 + WALLET_NAMES_REREADS_PER_DAY);
+    expect(await (await route.GET(get(await tokenFor(CAROL)))).json()).toEqual({ names: { [named]: "Carol's" } });
+  });
+
+  it("charges no account for a read this instance cannot make, past the one read that finds its day spent", async () => {
+    let clock = NOW;
+    const { route } = routeWith({
+      now: () => clock,
+      budgets: {
+        readsGlobal: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440, idleMs: 30 * 86_400_000 }),
+        // Two reads and next to no refill: a token taken here would still be missing a day later.
+        readsPerUser: createWeightedLimiter({ capacity: 2, refillPerMinute: 1 / 14_400, idleMs: 30 * 86_400_000 }),
+      },
+    });
+    const bob = await tokenFor(BOB, Math.floor((NOW + 2 * 86_400_000) / 1_000));
+    expect((await route.GET(get(await tokenFor(ALICE)))).status).toBe(200);
+    for (let i = 0; i < 5; i += 1) expect(await codeOf(await route.GET(get(bob)))).toBe("names_budget");
+    // A day on, the instance has a read again, and Bob — charged for the first refusal only — one of his.
+    clock += 86_400_000;
+    expect((await route.GET(get(bob))).status).toBe(200);
+  });
+
+  it("charges no account for a save this instance cannot make, past the one save that finds its day spent", async () => {
+    let clock = NOW;
+    const { route } = routeWith({
+      now: () => clock,
+      budgets: {
+        writesGlobal: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440, idleMs: 30 * 86_400_000 }),
+        writesPerUser: createWeightedLimiter({ capacity: 2, refillPerMinute: 1 / 14_400, idleMs: 30 * 86_400_000 }),
+      },
+    });
+    const bob = await tokenFor(BOB, Math.floor((NOW + 2 * 86_400_000) / 1_000));
+    expect((await route.PUT(put(await tokenFor(ALICE), { address: someWallet(), name: "a" }))).status).toBe(200);
+    for (let i = 0; i < 5; i += 1) expect(await codeOf(await route.PUT(put(bob, { address: someWallet(), name: `b${i}` })))).toBe("names_budget");
+    clock += 86_400_000;
+    expect((await route.PUT(put(bob, { address: someWallet(), name: "b" }))).status).toBe(200);
   });
 
   it("logs refusals by status and code only", async () => {

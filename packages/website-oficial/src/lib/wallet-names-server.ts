@@ -36,13 +36,30 @@
  *     (WALLET_NAMES_WRITES_PER_USER) and to this instance
  *     (WALLET_NAMES_WRITES_PER_DAY), each a day. The client's own buckets come
  *     first, as on every /api route (SIP_TRUSTED_CLIENT_IP_HEADER).
+ *   - A RE-READ — an account this instance already holds a copy of: a reload
+ *     past the copy's minutes, or a save the copy calls unchanged — is also
+ *     charged to the re-reads' share (WALLET_NAMES_REREADS_PER_DAY), a third of
+ *     the instance's day (review, 10-23). Past it, the copy answers, of any age.
+ *     So refreshing copies, an abuser's loop of unchanged saves included, takes
+ *     at most a third of the day's reads, and the other two thirds are left for
+ *     the accounts this instance holds no copy of — the ones that, refused,
+ *     show the default names. The share adds no read to the sums below.
+ *   - AN INSTANCE'S BUDGET FOUND SPENT COSTS ONE TOKEN, TO THE ACCOUNT THAT
+ *     FINDS IT. A bucket cannot be read without spending it, so the account's
+ *     is charged before the instance's: the request that finds the instance's
+ *     empty has spent its account's token (a re-read, a token of the re-reads'
+ *     share too), and the instance's is then known spent until it refills, so
+ *     every request meanwhile is refused before anything is charged.
  *   - ONE INSTANCE, SPENT FLAT OUT FOR A 31-DAY MONTH (a full bucket, then 31
  *     days of refill: 32 days' worth): 32 × 5 = 160 saves and 32 × 30 = 960
- *     reads. The short links' own, at their budgets: 32 × 20 = 640 writes
- *     (SHARE_STORE_WRITES_PER_DAY, a fixed daily window, 32 of them at most);
- *     their reads are capped a minute, not a month, and rest on Blob's CDN
- *     answering a record's repeat reads — about one miss per record, as the
- *     function runs in one region (share-store.ts).
+ *     reads. The short links' own writes, at their budget: 32 × 20 = 640
+ *     (SHARE_STORE_WRITES_PER_DAY, a fixed daily window, 32 of them at most).
+ *     Their reads have NO monthly bound in code (review, 10-23): 120 a minute per
+ *     instance (SHARE_STORE_READS_PER_MIN), and a code found missing is read
+ *     again when asked once 5 minutes have passed (SHARE_STORE_MISS_MS). How
+ *     small they stay rests on each instance's memory of the records it read
+ *     and on Blob's CDN answering repeats, neither a monthly bound: theirs to
+ *     bound in share-store.ts, not these sums'.
  *   - N, THE INSTANCES SPENT TO THE BRIM EACH DAY, on average over the month.
  *     At this traffic Vercel keeps about one instance per function warm in the
  *     project's one region (Fluid compute, its default, serves concurrent
@@ -51,11 +68,10 @@
  *     WALLET_NAMES_PLANNED_INSTANCES = 2; a day of many deploys brings more, and
  *     the quota sees the month's average.
  *   - THE MONTH AT N = 2, everything spent by an abuser: writes 2 × (640 + 160)
- *     = 1,600 of 2,000; reads 2 × 960 = 1,920 for the names, plus about one
- *     miss per short-link record (at most 2 × 640 = 1,280), of 10,000. A flood
- *     of names alone reaches a quota only at N ≥ 10.4 (reads; 12.5 for writes),
- *     more than three times the N ≥ 3.125 at which the short links' own writes
- *     do.
+ *     = 1,600 of 2,000; reads 2 × 960 = 1,920 of 10,000 for the names, plus the
+ *     short links', which have no monthly bound (above). A flood of names alone
+ *     reaches a quota only at N ≥ 10.4 (reads; 12.5 for writes), more than three
+ *     times the N ≥ 3.125 at which the short links' own writes do.
  *   - SPENT, THE NAMES DEGRADE AND NOTHING ELSE DOES. A read past its budget is
  *     the copy, of any age — names a little stale rather than none; an account
  *     this instance holds no copy of is refused names_budget, and the browser
@@ -63,6 +79,18 @@
  *     names_budget, and from then until it refills that account's answers —
  *     everyone's, when it was this instance's budget — say `paused`: the pencil
  *     hides (components/wallets/wallet-names-context.tsx).
+ *   - WHAT THESE NUMBERS DO NOT STOP (review, 10-23), written down so nobody
+ *     relies on more. Reads: once an instance's reads are spent — by ordinary
+ *     sign-ins after a deploy, or by free accounts made to spend them, each
+ *     account it holds no copy of costing one — every further such account sees
+ *     its default names until a read refills, one every 48 minutes; the names
+ *     stay in the store, and a page load once a read is back shows them. Saves:
+ *     two accounts, four saves and one, pause renaming on that instance for
+ *     everyone, one save back every 4.8 hours. Both are the price of the month
+ *     above, and raising either is the owner's call: at 100 reads a day the
+ *     names alone would be 2 × 3,200 = 6,400 of the 10,000; the saves fit at
+ *     most 11 a day beside the short links' 1,280 at N = 2 (2 × 32 × 11 = 704
+ *     of the 720 left).
  *   - A save that changes nothing writes nothing.
  * These are counters in one instance's memory, as the short links' are: they
  * bound what each instance spends, not how many instances there are — which is
@@ -112,6 +140,12 @@ export const WALLET_NAMES_COPIES_MAX = 5_000;
 export const WALLET_NAMES_READS_PER_USER = 6;
 /** Store reads this instance makes a day, across everyone: 960 in a 31-day month at most, of the store's 10,000 (the header's sums). */
 export const WALLET_NAMES_READS_PER_DAY = 30;
+/**
+ * Of those, the most a day may refresh a copy this instance already holds (review, 10-23): a third. A refresh
+ * only makes a copy younger, and past this share the copy answers; a first read is the difference between an
+ * account's names and the default ones, so at least the other 20 are kept for accounts with no copy here.
+ */
+export const WALLET_NAMES_REREADS_PER_DAY = 10;
 /** Saves one account may make: this many at once, and this many a day after — three wallets named and a typo put right. */
 export const WALLET_NAMES_WRITES_PER_USER = 4;
 /** Saves this instance makes a day, across everyone: 160 in a 31-day month at most, of the store's 2,000 (the header's sums). */
@@ -152,10 +186,14 @@ export interface WalletNamesBudgets {
   readonly aggregate: WeightedLimiter;
   readonly readsPerUser: WeightedLimiter;
   readonly readsGlobal: WeightedLimiter;
+  /** The re-reads' share of readsGlobal: a re-read is charged to both. */
+  readonly rereadsGlobal: WeightedLimiter;
   readonly writesPerUser: WeightedLimiter;
   readonly writesGlobal: WeightedLimiter;
   /** Until when (ms) a save is known to be refused: by account (its user id), or for everyone ("global"). Learnt from a refusal, since a bucket cannot be read without spending it. */
   readonly paused: Map<string, number>;
+  /** Until when (ms) this instance's reads ("reads") or re-reads ("rereads") are known to be spent, learnt the same way: a read refused by either then charges its account nothing. */
+  readonly readsSpent: Map<string, number>;
 }
 
 /** One account's names as this instance last read or saved them, and when (ms). */
@@ -179,9 +217,11 @@ export function walletNamesBudgets(): WalletNamesBudgets {
     aggregate: createWeightedLimiter({ capacity: CLIENT_AGGREGATE_FACTOR * WALLET_NAMES_PER_CLIENT_PER_MIN }),
     readsPerUser: daily(WALLET_NAMES_READS_PER_USER),
     readsGlobal: daily(WALLET_NAMES_READS_PER_DAY),
+    rereadsGlobal: daily(WALLET_NAMES_REREADS_PER_DAY),
     writesPerUser: daily(WALLET_NAMES_WRITES_PER_USER),
     writesGlobal: daily(WALLET_NAMES_WRITES_PER_DAY),
     paused: new Map(),
+    readsSpent: new Map(),
   };
 }
 
@@ -337,21 +377,51 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
   };
 
   /**
+   * ONE STORE READ, CHARGED — or how long until it could be, and whose budget
+   * says so. A share of this instance's known to be spent refuses it before
+   * anything is charged; then the account's bucket, then the re-reads' share
+   * (a `reread` only), then the instance's: narrowest first, so a refusal by a
+   * wider one has spent only narrower tokens, and is remembered (readsSpent).
+   */
+  const chargeRead = (held: WalletNamesBudgets, userId: string, reread: boolean, at: number): { readonly waitMs: number; readonly account: boolean } | null => {
+    const shares: readonly (readonly [string, WeightedLimiter])[] = reread
+      ? [
+          ["rereads", held.rereadsGlobal],
+          ["reads", held.readsGlobal],
+        ]
+      : [["reads", held.readsGlobal]];
+    for (const [share] of shares) {
+      const until = held.readsSpent.get(share) ?? 0;
+      if (until > at) return { waitMs: until - at, account: false };
+    }
+    const mine = held.readsPerUser.take(userId, 1, at);
+    if (mine > 0) return { waitMs: mine, account: true };
+    for (const [share, bucket] of shares) {
+      const wait = bucket.take(GLOBAL, 1, at);
+      if (wait > 0) {
+        held.readsSpent.set(share, at + wait);
+        return { waitMs: wait, account: false };
+      }
+    }
+    return null;
+  };
+
+  /**
    * AN ACCOUNT'S NAMES FOR ONE REQUEST. "copy": this instance's copy while it is
    * young, the store otherwise. "store": the store, whatever the copy's age. A
-   * store read is charged to the account first, then to everyone; with either
-   * spent, a copy of any age answers (`fromCopy`), and only an account with no
-   * copy here is refused. A store failure throws, and leaves the copy as it was.
+   * store read is charged as chargeRead says — a re-read when this instance
+   * holds a copy; with a budget spent, a copy of any age answers (`fromCopy`),
+   * and only an account with no copy here is refused. A store failure throws,
+   * and leaves the copy as it was.
    */
   const namesOf = async (userId: string, held: WalletNamesBudgets, store: WalletNamesStore, mode: "copy" | "store"): Promise<{ readonly stored: StoredNames; readonly fromCopy: boolean } | Response> => {
     const copy = copies().get(userId) ?? null;
     const at = now();
     if (mode === "copy" && copy !== null && at - copy.at < WALLET_NAMES_COPY_MS) return { stored: copy, fromCopy: true };
-    const mine = held.readsPerUser.take(userId, 1, at);
-    const wait = mine > 0 ? mine : held.readsGlobal.take(GLOBAL, 1, at);
-    if (wait > 0) {
+    const refused = chargeRead(held, userId, copy !== null, at);
+    if (refused !== null) {
       if (copy !== null) return { stored: copy, fromCopy: true };
-      return limited(wait, mine > 0 ? "This account's wallet names were read as often as they may be today." : "Wallet names are paused for now.", "names_budget");
+      return limited(refused.waitMs, refused.account ? "This account's wallet names were read as often as they may be today." : "Wallet names are paused for now.", "names_budget");
     }
     const stored = await store.read(userId);
     remember(userId, stored);
@@ -407,8 +477,12 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
         if (current === null && cleaned.name !== null && Object.keys(read.names).length >= WALLET_NAMES_MAX) {
           return refuse(409, "too_many_names", `An account keeps at most ${WALLET_NAMES_MAX} wallet names.`);
         }
-        // Charged only for a save that will be made: the account first, then everyone's.
+        // Charged for a save that will be made: the account first, then everyone's. Only the save that finds
+        // everyone's spent has paid its account's token for nothing; until it refills (`paused`), a save is
+        // refused before either is charged.
         const at = now();
+        const everyoneUntil = held.paused.get(GLOBAL) ?? 0;
+        if (everyoneUntil > at) return limited(everyoneUntil - at, "Renaming wallets is paused for now.", "names_budget");
         const mine = held.writesPerUser.take(userId, 1, at);
         if (mine > 0) return spent(held, userId, mine, "This account has renamed its wallets as often as it may today.");
         const everyone = held.writesGlobal.take(GLOBAL, 1, at);
