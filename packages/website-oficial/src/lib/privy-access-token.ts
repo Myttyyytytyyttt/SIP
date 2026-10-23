@@ -61,6 +61,24 @@ function remoteSetOf(appId: string): JWTVerifyGetKey {
   return set;
 }
 
+/**
+ * WHAT THE TOKEN ITSELF GOT WRONG — the only failures that are 401: a bad
+ * signature, a key Privy never published, the wrong issuer, audience, type or
+ * algorithm, a malformed token. Listed by name, so every failure not named
+ * here — jose's bare JOSEError for a key set answered with a 503, above all —
+ * counts as Privy being unreachable, never as the session having ended.
+ */
+const TOKEN_FAULTS = [
+  errors.JWSSignatureVerificationFailed,
+  errors.JWTClaimValidationFailed,
+  errors.JWTInvalid,
+  errors.JWSInvalid,
+  errors.JOSEAlgNotAllowed,
+  errors.JOSENotSupported,
+  errors.JWKSNoMatchingKey,
+  errors.JWKSMultipleMatchingKeys,
+] as const;
+
 /** The bearer token of a request, or null. Case-insensitive scheme, one token, nothing else. */
 export function bearerTokenOf(request: Request): string | null {
   const header = request.headers.get("authorization");
@@ -95,12 +113,10 @@ export async function verifyPrivyAccessToken(token: string | null, options: Veri
     return { ok: true, userId };
   } catch (error) {
     if (error instanceof errors.JWTExpired) return { ok: false, status: 401, code: "token_expired" };
-    // The key set itself could not be had — a timeout, an answer that is not a key set, or no answer at all
-    // (fetch throws a TypeError, which is no JOSE error). Nothing about the token was decided.
-    if (error instanceof errors.JWKSTimeout || error instanceof errors.JWKSInvalid || !(error instanceof errors.JOSEError)) {
-      return { ok: false, status: 503, code: "auth_unavailable" };
-    }
-    // A bad signature, a key Privy never published, the wrong issuer, audience or algorithm, a malformed token.
-    return { ok: false, status: 401, code: "token_invalid" };
+    if (TOKEN_FAULTS.some((fault) => error instanceof fault)) return { ok: false, status: 401, code: "token_invalid" };
+    // Anything else is the key set that could not be had, and nothing about the token was decided: a
+    // timeout, no answer at all (fetch throws a TypeError, no JOSE error), and — as a bare JOSEError —
+    // an answer that is not 200 (a 5xx, a 429, a redirect) or not JSON.
+    return { ok: false, status: 503, code: "auth_unavailable" };
   }
 }

@@ -102,14 +102,21 @@ export function WalletStatusBadge({ wallet }: { readonly wallet: LiveWalletView 
  * places, cut DOWN so it never shows SOL the wallet does not hold, and "<0.001"
  * rather than a 0 for dust (amounts.ts formatSolDown). Every lamport is in its
  * tooltip; the dollars are what they were.
+ *
+ * THE DOLLARS SHOW WHOLE OR NOT AT ALL. A big balance on a phone ("1,999.999
+ * SOL ≈ $200,077.42") is wider than the room beside the address, and an
+ * ellipsis in the middle of a dollar figure reads as a different figure. So
+ * the dollars are the second item of a one-line row that wraps and clips: when
+ * they do not fit beside the SOL they wrap out of sight, and the SOL stays
+ * whole. Both are still in the tooltip, and a screen reader still reads both.
  */
 function WalletBalance({ lamports, usdcRawPerSol }: { readonly lamports: bigint | null; readonly usdcRawPerSol: bigint | null }) {
   if (lamports === null) return <Num className="text-xs">{LIVE_COPY.unknownFigure}</Num>;
   const dollars = usdcRawPerSol === null ? null : formatUsd(usdcRawForLamports(lamports, usdcRawPerSol));
   return (
-    <span className="truncate" title={`${formatSol(lamports)} SOL`}>
-      <Num className="text-xs">{formatSolDown(lamports, 3)} SOL</Num>
-      {dollars === null ? null : <> ≈ {dollars}</>}
+    <span className="flex h-4 min-w-0 flex-wrap justify-end gap-x-1 overflow-hidden" title={`${formatSol(lamports)} SOL${dollars === null ? "" : ` ≈ ${dollars}`}`}>
+      <Num className="min-w-0 truncate text-xs">{formatSolDown(lamports, 3)} SOL</Num>
+      {dollars === null ? null : <span>≈ {dollars}</span>}
     </span>
   );
 }

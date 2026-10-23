@@ -5,8 +5,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 const blob = vi.hoisted(() => {
-  class BlobPreconditionFailedError extends Error {}
+  // The SDK's shapes: every error is a BlobError, its message prefixed "Vercel Blob: ".
+  class BlobError extends Error {
+    constructor(message: string) {
+      super(`Vercel Blob: ${message}`);
+    }
+  }
+  class BlobPreconditionFailedError extends BlobError {
+    constructor() {
+      super("Precondition failed: ETag mismatch.");
+    }
+  }
   return {
+    BlobError,
     BlobPreconditionFailedError,
     get: vi.fn(),
     put: vi.fn(),
@@ -45,9 +56,9 @@ describe("blobWalletNamesStore", () => {
     expect(await blobWalletNamesStore().read(USER)).toEqual({ names: {}, etag: '"bad"' });
   });
 
-  it("saves over the etag it read, and a first save with nothing to match", async () => {
-    blob.put.mockResolvedValue({});
-    await blobWalletNamesStore().write(USER, { [WALLET]: "Axiom" }, '"e1"');
+  it("saves over the etag it read and answers the new one; a first save may only create the document", async () => {
+    blob.put.mockResolvedValue({ etag: '"e2"' });
+    expect(await blobWalletNamesStore().write(USER, { [WALLET]: "Axiom" }, '"e1"')).toBe('"e2"');
     const [path, body, options] = blob.put.mock.calls.at(-1)!;
     expect(path).toBe(walletNamesPath(USER));
     expect(JSON.parse(body as string)).toEqual({ v: 1, names: { [WALLET]: "Axiom" } });
@@ -55,15 +66,22 @@ describe("blobWalletNamesStore", () => {
     expect(options).not.toHaveProperty("allowOverwrite");
 
     await blobWalletNamesStore().write(USER, {}, null);
-    expect(blob.put.mock.calls.at(-1)![2]).toMatchObject({ allowOverwrite: true });
+    expect(blob.put.mock.calls.at(-1)![2]).toMatchObject({ allowOverwrite: false });
     expect(blob.put.mock.calls.at(-1)![2]).not.toHaveProperty("ifMatch");
   });
 
-  it("turns a moved etag into a conflict the route re-reads on, and passes any other failure on", async () => {
+  it("turns a moved etag, or a first save that found a document, into a conflict the route re-reads on", async () => {
     blob.put.mockRejectedValueOnce(new blob.BlobPreconditionFailedError());
     await expect(blobWalletNamesStore().write(USER, {}, '"old"')).rejects.toBeInstanceOf(WalletNamesConflict);
+    blob.put.mockRejectedValueOnce(new blob.BlobError("This blob already exists, use `allowOverwrite: true` if you want to overwrite it."));
+    await expect(blobWalletNamesStore().write(USER, {}, null)).rejects.toBeInstanceOf(WalletNamesConflict);
+  });
+
+  it("passes any other failure on", async () => {
     blob.put.mockRejectedValueOnce(new Error("store down"));
     await expect(blobWalletNamesStore().write(USER, {}, '"old"')).rejects.toThrow("store down");
+    blob.put.mockRejectedValueOnce(new blob.BlobError("Bad request"));
+    await expect(blobWalletNamesStore().write(USER, {}, null)).rejects.toThrow("Bad request");
   });
 
   it("never lists or deletes: the store also holds the share links", () => {

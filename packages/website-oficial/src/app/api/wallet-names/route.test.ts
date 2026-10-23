@@ -1,7 +1,8 @@
 // /api/wallet-names as wired in this app (owner, 10-23: a trading wallet's name, saved to the account, no
 // signature): off without a store, then the gate, cross-site, the client's buckets, the Privy session — checked
 // against a local key set, so nothing reaches Privy — and the names, kept in an in-memory store with the Blob
-// store's contract (etags included). No network.
+// store's contract (etags and create-only first saves included), behind this instance's copies and the daily
+// budgets that keep the store inside Hobby's month. No network.
 
 import { SIP_PROGRAM_ID } from "@sip/solana-core/client";
 import { createWeightedLimiter } from "@sip/solana-core/server";
@@ -10,7 +11,18 @@ import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTVerifyG
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WALLET_NAMES_MAX, WALLET_NAME_COPY } from "@/lib/wallet-names";
-import { WALLET_NAMES_MAX_BODY_BYTES, walletNamesRoute, type WalletNamesRouteOptions } from "@/lib/wallet-names-server";
+import {
+  WALLET_NAMES_COPY_MS,
+  WALLET_NAMES_MAX_BODY_BYTES,
+  WALLET_NAMES_READS_PER_DAY,
+  WALLET_NAMES_READS_PER_USER,
+  WALLET_NAMES_WRITES_PER_DAY,
+  WALLET_NAMES_WRITES_PER_USER,
+  walletNamesBudgets,
+  walletNamesRoute,
+  type WalletNamesCopies,
+  type WalletNamesRouteOptions,
+} from "@/lib/wallet-names-server";
 import { WalletNamesConflict, memoryWalletNamesStore, walletNamesPath, type WalletNamesStore } from "@/lib/wallet-names-store";
 
 const APP_ID = "cmtrt36tb00080dlbrda5aqam";
@@ -48,7 +60,7 @@ let lastIp = 0;
 const freshIp = (): string => `198.51.100.${(lastIp = (lastIp % 250) + 1)}`;
 const someWallet = (): string => Keypair.generate().publicKey.toBase58();
 
-/** The route with its own budgets, store and keys, so no test spends another's. */
+/** The route with its own budgets, copies, store and keys, so no test spends another's. */
 function routeWith(over: Partial<WalletNamesRouteOptions> = {}) {
   const store = memoryWalletNamesStore();
   const refusals: { status: number; code: string }[] = [];
@@ -58,16 +70,27 @@ function routeWith(over: Partial<WalletNamesRouteOptions> = {}) {
     keys,
     now: () => NOW,
     onRefusal: (event) => refusals.push(event),
+    copies: new Map(),
+    ...over,
     budgets: {
       exact: createWeightedLimiter({ capacity: 30 }),
       aggregate: createWeightedLimiter({ capacity: 120 }),
-      writesPerUser: createWeightedLimiter({ capacity: 10, refillPerMinute: 10 / 60 }),
-      writesGlobal: createWeightedLimiter({ capacity: 20, refillPerMinute: 20 / 60 }),
+      readsPerUser: createWeightedLimiter({ capacity: 20 }),
       readsGlobal: createWeightedLimiter({ capacity: 60 }),
+      writesPerUser: createWeightedLimiter({ capacity: 10 }),
+      writesGlobal: createWeightedLimiter({ capacity: 20 }),
+      ...over.budgets,
     },
-    ...over,
   });
   return { route, store, refusals };
+}
+
+/** A memory store that counts what it is asked: each read and each save is one of the month's operations. */
+function countingStore() {
+  const store = memoryWalletNamesStore();
+  const read = vi.spyOn(store, "read");
+  const write = vi.spyOn(store, "write");
+  return { store, read, write };
 }
 
 const get = (token: string | null, headers: Record<string, string> = {}) =>
@@ -197,18 +220,30 @@ describe("the names, saved to the account", () => {
     const token = await tokenFor(ALICE);
     const [mine, theirs] = [someWallet(), someWallet()];
     await route.PUT(put(token, { address: theirs, name: "Before" }));
-    // The other device's save lands between this request's read and its write.
+    // Another instance saves for the same account: this instance's copy is now older than the store.
+    const stored = await store.read(ALICE);
+    await store.write(ALICE, { ...stored.names, [theirs]: "Theirs" }, stored.etag);
+    const response = await route.PUT(put(token, { address: mine, name: "Mine" }));
+    expect(await response.json()).toEqual({ names: { [theirs]: "Theirs", [mine]: "Mine" } });
+    expect((await store.read(ALICE)).names).toEqual({ [theirs]: "Theirs", [mine]: "Mine" });
+  });
+
+  it("keeps both of two first saves that cross: the first may only create the document", async () => {
+    const store = memoryWalletNamesStore();
+    const { route } = routeWith({ store });
+    const [mine, theirs] = [someWallet(), someWallet()];
+    // The other device's very first save lands between this request's read (no document yet) and its write.
     const realRead = store.read.bind(store);
     let raced = false;
     vi.spyOn(store, "read").mockImplementation(async (userId) => {
       const read = await realRead(userId);
       if (!raced) {
         raced = true;
-        await store.write(userId, { ...read.names, [theirs]: "Theirs" }, read.etag);
+        await store.write(userId, { [theirs]: "Theirs" }, null);
       }
       return read;
     });
-    const response = await route.PUT(put(token, { address: mine, name: "Mine" }));
+    const response = await route.PUT(put(await tokenFor(ALICE), { address: mine, name: "Mine" }));
     expect(await response.json()).toEqual({ names: { [theirs]: "Theirs", [mine]: "Mine" } });
   });
 
@@ -218,7 +253,7 @@ describe("the names, saved to the account", () => {
       read: async () => {
         throw new Error(`store store_test said no for ${ALICE}`);
       },
-      write: async () => undefined,
+      write: async () => '"never"',
     } satisfies WalletNamesStore;
     const token = await tokenFor(ALICE);
     const response = await routeWith({ store: failing }).route.GET(get(token));
@@ -233,7 +268,7 @@ describe("the names, saved to the account", () => {
   });
 
   it("gives up after a second lost race rather than looping", async () => {
-    const store = { read: async () => ({ names: {}, etag: '"v1"' }), write: async () => Promise.reject(new WalletNamesConflict()) } satisfies WalletNamesStore;
+    const store = { read: async () => ({ names: {}, etag: '"v1"' }), write: async (): Promise<string> => Promise.reject(new WalletNamesConflict()) } satisfies WalletNamesStore;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const response = await routeWith({ store }).route.PUT(put(await tokenFor(ALICE), { address: someWallet(), name: "x" }));
     expect(response.status).toBe(503);
@@ -286,7 +321,125 @@ describe("what a save may carry", () => {
   });
 });
 
-describe("the budgets: a save is an advanced operation, and Hobby's store has 2,000 a month", () => {
+describe("this instance's copy: the store is read as seldom as it can be", () => {
+  it("answers a reload, a second tab and a save from its copy, and reads the store again only once the copy is old", async () => {
+    const { store, read, write } = countingStore();
+    let clock = NOW;
+    const { route } = routeWith({ store, now: () => clock });
+    const token = await tokenFor(ALICE);
+    const wallet = someWallet();
+    for (let i = 0; i < 5; i += 1) expect((await route.GET(get(token))).status).toBe(200);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect((await route.PUT(put(token, { address: wallet, name: "Main" }))).status).toBe(200);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(await (await route.GET(get(token))).json()).toEqual({ names: { [wallet]: "Main" } });
+    expect(read).toHaveBeenCalledTimes(1);
+    clock += WALLET_NAMES_COPY_MS;
+    expect(await (await route.GET(get(token))).json()).toEqual({ names: { [wallet]: "Main" } });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows another instance's save once its copy is old, and confirms with the store a save its copy calls unchanged", async () => {
+    const store = memoryWalletNamesStore();
+    let clock = NOW;
+    const here = routeWith({ store, now: () => clock }).route;
+    const there = routeWith({ store, now: () => clock }).route;
+    const token = await tokenFor(ALICE);
+    const wallet = someWallet();
+    await here.PUT(put(token, { address: wallet, name: "Old" }));
+    await there.PUT(put(token, { address: wallet, name: "New" }));
+    // Here still holds "Old"; a save of "Old" from here must not be answered as already done.
+    expect(await (await here.PUT(put(token, { address: wallet, name: "Old" }))).json()).toEqual({ names: { [wallet]: "Old" } });
+    expect((await store.read(ALICE)).names).toEqual({ [wallet]: "Old" });
+    await there.PUT(put(token, { address: wallet, name: "Newer" }));
+    clock += WALLET_NAMES_COPY_MS;
+    expect(await (await here.GET(get(token))).json()).toEqual({ names: { [wallet]: "Newer" } });
+  });
+
+  it("past the account's reads, answers its copy of any age, and refuses only when it holds no copy", async () => {
+    const { store, read } = countingStore();
+    const copies: WalletNamesCopies = new Map();
+    let clock = NOW;
+    const { route } = routeWith({ store, copies, now: () => clock, budgets: { readsPerUser: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440 }) } });
+    const token = await tokenFor(ALICE);
+    expect((await route.GET(get(token))).status).toBe(200);
+    clock += 3 * WALLET_NAMES_COPY_MS;
+    expect((await route.GET(get(token))).status).toBe(200);
+    expect(read).toHaveBeenCalledTimes(1);
+    // The copy gone (dropped as least recently used, say), and the account's reads spent: told when to retry.
+    copies.clear();
+    const refused = await route.GET(get(token));
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).not.toBeNull();
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the month, at the budgets' production sizes (Hobby: 10,000 reads and 2,000 saves a month, store-wide)", () => {
+  const MINUTE = 60_000;
+  const DAY = 24 * 60 * MINUTE;
+  /** A session that outlives the simulated day. */
+  const dayToken = (userId: string): Promise<string> => tokenFor(userId, Math.floor((NOW + 2 * DAY) / 1_000));
+
+  it("holds one instance, spent flat out every minute of a 31-day month, inside the month", () => {
+    const budgets = walletNamesBudgets();
+    let reads = 0;
+    let writes = 0;
+    for (let at = NOW; at < NOW + 31 * DAY; at += MINUTE) {
+      if (budgets.readsGlobal.take("global", 1, at) === 0) reads += 1;
+      if (budgets.writesGlobal.take("global", 1, at) === 0) writes += 1;
+    }
+    // A full bucket at the start, then a day's refill for each of the 31 days.
+    expect(reads).toBeLessThanOrEqual(WALLET_NAMES_READS_PER_DAY * 32);
+    expect(writes).toBeLessThanOrEqual(WALLET_NAMES_WRITES_PER_DAY * 32);
+    expect(WALLET_NAMES_READS_PER_DAY * 32).toBeLessThan(10_000);
+    expect(WALLET_NAMES_WRITES_PER_DAY * 32).toBeLessThan(2_000);
+  });
+
+  it("lets a script reading one account all day cost a day of that account's reads, and answers it all the same", async () => {
+    const { store, read } = countingStore();
+    let clock = NOW;
+    const { route } = routeWith({ store, now: () => clock, budgets: walletNamesBudgets() });
+    const token = await dayToken(ALICE);
+    for (; clock < NOW + DAY; clock += MINUTE) {
+      const response = await route.GET(get(token));
+      expect(response.status).toBe(200);
+    }
+    expect(read.mock.calls.length).toBeLessThanOrEqual(2 * WALLET_NAMES_READS_PER_USER);
+  });
+
+  it("lets a script saving the same name all day cost one save and a day of the account's reads", async () => {
+    const { store, read, write } = countingStore();
+    let clock = NOW;
+    const { route } = routeWith({ store, now: () => clock, budgets: walletNamesBudgets() });
+    const token = await dayToken(ALICE);
+    const wallet = someWallet();
+    for (; clock < NOW + DAY; clock += MINUTE) {
+      expect((await route.PUT(put(token, { address: wallet, name: "Same" }))).status).toBe(200);
+    }
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(read.mock.calls.length).toBeLessThanOrEqual(2 * WALLET_NAMES_READS_PER_USER);
+  });
+
+  it("lets a crowd of accounts renaming all day save no more than the instance's day", async () => {
+    const { store, write } = countingStore();
+    let clock = NOW;
+    const { route } = routeWith({ store, now: () => clock, budgets: walletNamesBudgets() });
+    const crowd = await Promise.all(Array.from({ length: 12 }, (_, index) => dayToken(`did:privy:crowd${String(index).padStart(21, "0")}`)));
+    const statuses = new Set<number>();
+    for (; clock < NOW + DAY; clock += 30 * MINUTE) {
+      for (const token of crowd) statuses.add((await route.PUT(put(token, { address: someWallet(), name: "x" }))).status);
+    }
+    expect(write.mock.calls.length).toBeLessThanOrEqual(2 * WALLET_NAMES_WRITES_PER_DAY);
+    expect(write.mock.calls.length).toBeGreaterThanOrEqual(WALLET_NAMES_WRITES_PER_DAY);
+    expect([...statuses].sort()).toEqual([200, 429]);
+    // No one account took the day: each is held to its own.
+    expect(WALLET_NAMES_WRITES_PER_USER).toBeLessThan(WALLET_NAMES_WRITES_PER_DAY);
+  });
+});
+
+describe("the budgets", () => {
   it("limits one client, with a retry-after, before it is verified", async () => {
     const { route } = routeWith({ budgets: { exact: createWeightedLimiter({ capacity: 2 }) } });
     const token = await tokenFor(ALICE);
@@ -302,7 +455,7 @@ describe("the budgets: a save is an advanced operation, and Hobby's store has 2,
   });
 
   it("limits one account's saves, from any address", async () => {
-    const { route } = routeWith({ budgets: { writesPerUser: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 60 }) } });
+    const { route } = routeWith({ budgets: { writesPerUser: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 1_440 }) } });
     const alice = await tokenFor(ALICE);
     expect((await route.PUT(put(alice, { address: someWallet(), name: "a" }))).status).toBe(200);
     expect((await route.PUT(put(alice, { address: someWallet(), name: "b" }))).status).toBe(200);
@@ -312,8 +465,8 @@ describe("the budgets: a save is an advanced operation, and Hobby's store has 2,
     expect((await route.GET(get(alice))).status).toBe(200);
   });
 
-  it("limits everyone's saves together, so no crowd of accounts can empty the store's month", async () => {
-    const { route } = routeWith({ budgets: { writesGlobal: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 60 }) } });
+  it("limits this instance's saves, across every account", async () => {
+    const { route } = routeWith({ budgets: { writesGlobal: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 1_440 }) } });
     expect((await route.PUT(put(await tokenFor(ALICE), { address: someWallet(), name: "a" }))).status).toBe(200);
     expect((await route.PUT(put(await tokenFor(BOB), { address: someWallet(), name: "b" }))).status).toBe(200);
     const third = await route.PUT(put(await tokenFor("did:privy:carol000000000000000000000c"), { address: someWallet(), name: "c" }));
@@ -321,11 +474,10 @@ describe("the budgets: a save is an advanced operation, and Hobby's store has 2,
     expect(await codeOf(third)).toBe("rate_limited");
   });
 
-  it("limits everyone's reads together", async () => {
-    const { route } = routeWith({ budgets: { readsGlobal: createWeightedLimiter({ capacity: 1 }) } });
-    const token = await tokenFor(ALICE);
-    expect((await route.GET(get(token))).status).toBe(200);
-    expect((await route.GET(get(token))).status).toBe(429);
+  it("limits this instance's store reads, across every account", async () => {
+    const { route } = routeWith({ budgets: { readsGlobal: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440 }) } });
+    expect((await route.GET(get(await tokenFor(ALICE)))).status).toBe(200);
+    expect((await route.GET(get(await tokenFor(BOB)))).status).toBe(429);
   });
 
   it("logs refusals by status and code only", async () => {

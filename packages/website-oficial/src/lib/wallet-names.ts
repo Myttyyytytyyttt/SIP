@@ -21,11 +21,22 @@ export const WALLET_NAMES_MAX = 50;
 /**
  * WHAT A NAME MAY NOT CARRY: control characters and line breaks, which would
  * break the one-line rows it is drawn in, and the invisible characters that
- * turn text around or hide in it (bidi overrides and isolates, zero-width
- * space, BOM) — a name that reads differently from what it holds. The joiners
+ * turn text around or hide in it — a name that reads differently from what it
+ * holds. That is EVERY format character (\p{Cf}: the bidi marks, overrides and
+ * isolates, the Arabic letter mark, zero-width space, soft hyphen, invisible
+ * operators, BOM, tag characters…), named as a class rather than one by one so
+ * none is missed, and the letters that draw nothing (the Hangul fillers, the
+ * blank Braille cell), which would make a name that looks empty. The joiners
  * (U+200C, U+200D) stay: emoji sequences and several scripts need them.
  */
-const FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u200B\u200E\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/u;
+const FORBIDDEN = /[\p{Cc}\p{Zl}\p{Zp}\u115F\u1160\u2800\u3164\uFFA0]|(?![\u200C\u200D])\p{Cf}/u;
+
+/**
+ * The one place tag characters are text: a subdivision flag (🏴 + its region's
+ * letters in tags + the cancel tag, as in England's flag). Taken out before the
+ * check, so the flag passes and a tag anywhere else does not.
+ */
+const SUBDIVISION_FLAG = /\u{1F3F4}[\u{E0030}-\u{E0039}\u{E0061}-\u{E007A}]{2,7}\u{E007F}/gu;
 
 /** The words the input says when it refuses a name. */
 export const WALLET_NAME_COPY = {
@@ -42,7 +53,7 @@ export type CleanedWalletName =
 export function cleanWalletName(raw: string): CleanedWalletName {
   const name = raw.normalize("NFC").trim();
   if (name === "") return { ok: true, name: null };
-  if (FORBIDDEN.test(name)) return { ok: false, message: WALLET_NAME_COPY.forbidden };
+  if (FORBIDDEN.test(name.replace(SUBDIVISION_FLAG, ""))) return { ok: false, message: WALLET_NAME_COPY.forbidden };
   if ([...name].length > WALLET_NAME_MAX_CHARS) return { ok: false, message: WALLET_NAME_COPY.tooLong };
   return { ok: true, name };
 }

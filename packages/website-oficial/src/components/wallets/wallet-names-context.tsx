@@ -14,13 +14,17 @@
  * A RENAME SHOWS AT ONCE, and is taken back if the save fails: the name is set
  * here before the request, the server's answer replaces the list when it comes,
  * and a refusal puts the old name back — only for that wallet, and only while
- * nothing has renamed it since.
+ * nothing has renamed it since. A wallet whose save is still on its way keeps
+ * the name it shows whatever another wallet's answer says, so two renames in a
+ * row never flicker the first one back to its old name.
  *
  * NO STORE, NO PENCIL. `available` turns true only when the server answered the
  * read: a deployment without a store (503 names_off), a session the server
  * would not believe, or no answer at all leaves the derived names and no
  * pencil. Outside a host — the sample, a unit test — it is the same: nothing to
- * read, nothing offered.
+ * read, nothing offered. `account` is true from the sign-in on, before the read
+ * lands, so a name keeps the height the pencil will give it and nothing moves
+ * when it appears.
  *
  * Nothing is written to the browser's storage: the names are the account's,
  * and a shared computer keeps none of them after the session ends.
@@ -31,11 +35,20 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 
 import { RENAME_COPY } from "@/lib/live-copy";
 import type { ApiFailure } from "@/lib/vault-api";
+import { WALLET_NAME_COPY } from "@/lib/wallet-names";
 import { readWalletNames, saveWalletName } from "@/lib/wallet-names-client";
 
-export type RenameResult = { readonly ok: true } | { readonly ok: false; readonly message: string };
+/** A failed save in the words that stand in the name's place, and the sentence behind them when there is one. */
+export interface RenameFailure {
+  readonly message: string;
+  readonly detail: string | null;
+}
+
+export type RenameResult = { readonly ok: true } | ({ readonly ok: false } & RenameFailure);
 
 export interface WalletNamesValue {
+  /** Whether a login's names are read here: from the sign-in on, before the read lands. */
+  readonly account: boolean;
   /** Whether a name can be saved here: the pencil shows only then. */
   readonly available: boolean;
   /** The account's own names, by address. Every other wallet shows its derived name. */
@@ -48,9 +61,10 @@ const NO_NAMES: Readonly<Record<string, string>> = Object.freeze({});
 
 /** Outside a host: no names, no pencil. */
 const NONE: WalletNamesValue = Object.freeze({
+  account: false,
   available: false,
   names: NO_NAMES,
-  rename: async (): Promise<RenameResult> => ({ ok: false, message: RENAME_COPY.failed }),
+  rename: async (): Promise<RenameResult> => ({ ok: false, message: RENAME_COPY.failed, detail: null }),
 });
 
 /** Exported for tests, which hand a list its names without Privy; the app mounts WalletNamesHost. */
@@ -71,13 +85,62 @@ function withName(names: Readonly<Record<string, string>>, address: string, name
   return next;
 }
 
-/** A refusal in the words the pencil shows for a moment: the server's own for a name it would not keep. */
-function failureWords(failure: ApiFailure | null): string {
-  if (failure === null) return RENAME_COPY.signIn;
-  if (failure.status === 429) return RENAME_COPY.rateLimited;
-  if (failure.status === 401) return RENAME_COPY.signIn;
-  if ((failure.code === "bad_request" || failure.code === "too_many_names") && failure.message !== "") return failure.message;
-  return RENAME_COPY.failed;
+/** One save, as its answer finds it. */
+export interface SaveAnswer {
+  readonly address: string;
+  /** What it saved: a name, or null for the default. */
+  readonly name: string | null;
+  /** The wallet's own name when the save began (null: its default). */
+  readonly before: string | null;
+  /** This save's number, and the newest save's: they are equal when no save began after it. */
+  readonly save: number;
+  readonly newest: number;
+  /** Whether it is still this wallet's latest save — no rename of the same wallet began after it. */
+  readonly latest: boolean;
+  /** The wallets with a save still on its way (this one left out when this was its latest). */
+  readonly pending: ReadonlySet<string>;
+  /** The server's names after the save; null when it failed. */
+  readonly answer: Readonly<Record<string, string>> | null;
+}
+
+/**
+ * WHAT ONE SAVE'S ANSWER DOES TO THE NAMES ON SCREEN (`shown`), kept out of the
+ * hook so the races can be tested without a DOM.
+ *   - The newest save's answer is the whole list, the latest there is — except
+ *     that a wallet with a save still on its way keeps the name it shows.
+ *   - An older answer, arriving late, sets its own wallet only, and only while
+ *     no newer rename of that wallet began.
+ *   - A failure puts the wallet's old name back, unless a newer rename of it is
+ *     on its way or already put another name there.
+ */
+export function namesAfterAnswer(shown: Readonly<Record<string, string>>, settled: SaveAnswer): Readonly<Record<string, string>> {
+  const { address, name, before, save, newest, latest, pending, answer } = settled;
+  if (answer !== null) {
+    if (save === newest) {
+      let next = answer;
+      for (const other of pending) next = withName(next, other, shown[other] ?? null);
+      return next;
+    }
+    return latest ? withName(shown, address, answer[address] ?? null) : shown;
+  }
+  const stillOurs = latest || (!pending.has(address) && (shown[address] ?? null) === name);
+  return stillOurs ? withName(shown, address, before) : shown;
+}
+
+/** A refusal of what was typed, by the rule it broke (lib/wallet-names.ts says the rule; this says it short). */
+export function refusalWords(rule: string): RenameFailure {
+  if (rule === WALLET_NAME_COPY.tooLong) return { message: RENAME_COPY.tooLong, detail: rule };
+  if (rule === WALLET_NAME_COPY.forbidden) return { message: RENAME_COPY.forbidden, detail: rule };
+  return { message: RENAME_COPY.failed, detail: rule };
+}
+
+/** A refused save in the words the pencil shows for a moment; the server's own sentence, when it gave one, behind them. */
+function failureWords(failure: ApiFailure | null): RenameFailure {
+  if (failure === null || failure.status === 401) return { message: RENAME_COPY.signIn, detail: null };
+  if (failure.status === 429) return { message: RENAME_COPY.rateLimited, detail: null };
+  if (failure.code === "too_many_names") return { message: RENAME_COPY.tooManyNames, detail: failure.message === "" ? null : failure.message };
+  if (failure.code === "bad_request" && failure.message !== "") return refusalWords(failure.message);
+  return { message: RENAME_COPY.failed, detail: null };
 }
 
 /** Mounted inside Providers, wherever the wallets are managed: the dashboard's frame and /wallets. */
@@ -99,11 +162,14 @@ export function WalletNamesHost({ children }: { readonly children: ReactNode }) 
     setNamesState(next);
   }, []);
   const saves = useRef(0);
+  // The latest save still on its way, by wallet: its answer, and no other's, decides that wallet's name.
+  const pending = useRef(new Map<string, number>());
 
   // ONE READ PER LOGIN. A new user starts from nothing, never from the last one's names.
   useEffect(() => {
     setNames(NO_NAMES);
     setAvailable(false);
+    pending.current.clear();
     if (userId === null) return undefined;
     let live = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -131,29 +197,30 @@ export function WalletNamesHost({ children }: { readonly children: ReactNode }) 
   const rename = useCallback(
     async (address: string, name: string | null): Promise<RenameResult> => {
       const who = owner.current;
-      if (who === null) return { ok: false, message: RENAME_COPY.signIn };
+      if (who === null) return { ok: false, message: RENAME_COPY.signIn, detail: null };
       const save = (saves.current += 1);
+      pending.current.set(address, save);
       const before = namesNow.current[address] ?? null;
       setNames(withName(namesNow.current, address, name));
 
       const token = await tokenOf.current().catch(() => null);
       const result = token === null ? null : await saveWalletName(token, address, name);
       // Signed out, or someone else signed in, while it was saving: nothing of this answer is theirs.
-      if (owner.current !== who) return { ok: false, message: RENAME_COPY.failed };
-
-      if (result !== null && result.ok) {
-        // The server's whole list when this is the latest save; only this wallet's otherwise, so an
-        // older answer arriving late never undoes a newer rename still on its way.
-        setNames(save === saves.current ? result.body.names : withName(namesNow.current, address, result.body.names[address] ?? null));
-        return { ok: true };
-      }
-      // Back to the name it had — unless something renamed it again since.
-      if ((namesNow.current[address] ?? null) === name) setNames(withName(namesNow.current, address, before));
-      return { ok: false, message: failureWords(result) };
+      if (owner.current !== who) return { ok: false, message: RENAME_COPY.failed, detail: null };
+      // Whether this is still the latest save for this wallet: a newer one's answer decides it otherwise.
+      const latest = pending.current.get(address) === save;
+      if (latest) pending.current.delete(address);
+      const answer = result !== null && result.ok ? result.body.names : null;
+      setNames(namesAfterAnswer(namesNow.current, { address, name, before, save, newest: saves.current, latest, pending: new Set(pending.current.keys()), answer }));
+      if (result !== null && result.ok) return { ok: true };
+      return { ok: false, ...failureWords(result) };
     },
     [setNames],
   );
 
-  const value = useMemo<WalletNamesValue>(() => ({ available: available && userId !== null, names: userId === null ? NO_NAMES : names, rename }), [available, userId, names, rename]);
+  const value = useMemo<WalletNamesValue>(
+    () => ({ account: userId !== null, available: available && userId !== null, names: userId === null ? NO_NAMES : names, rename }),
+    [available, userId, names, rename],
+  );
   return <WalletNamesContext.Provider value={value}>{children}</WalletNamesContext.Provider>;
 }

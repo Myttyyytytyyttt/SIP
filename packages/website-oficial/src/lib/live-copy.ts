@@ -1228,7 +1228,14 @@ export const SHARE_COPY = {
  * RENAMING A TRADING WALLET (owner, 10-23: "que el nombre de la trading wallet
  * se pueda editar"): the pencil beside a wallet's name — in the live column and
  * in Manage wallets' rows — the box it opens, and what a save that failed says.
- * The rules a name must meet say their own words (lib/wallet-names.ts).
+ *
+ * A FAILURE STANDS IN THE NAME'S OWN PLACE for a few seconds, beside the status
+ * badge, and the card never grows a line for it — so every failure is a few
+ * words that fit there whole at the column's narrowest (the phone's sheet, next
+ * to "Can’t settle yet": about 20 characters), never a sentence cut by an
+ * ellipsis. The old name is back on screen, so "not saved" goes without saying.
+ * Where there is more to say — the rule a name broke, in its own words
+ * (lib/wallet-names.ts) — it is the failure's tooltip and is read with it.
  */
 export const RENAME_COPY = {
   /** The pencil's accessible name: which wallet it renames. */
@@ -1238,9 +1245,15 @@ export const RENAME_COPY = {
   /** Read with the box, so a keyboard knows how to finish. */
   hint: "Enter saves, Escape cancels. Leave it empty to go back to the default name.",
   /** The save did not happen; the old name is back on screen. */
-  failed: "Couldn’t save the name.",
-  /** Refused by the rate limit: no time promised, the box can be opened again. */
-  rateLimited: "Too many renames just now. Name not saved.",
+  failed: "Name not saved.",
+  /** Refused by the rate limit: no time promised, the pencil can be pressed again. */
+  rateLimited: "Too many renames.",
   /** The session needs renewing before a name can be saved. */
-  signIn: "Sign in again to save the name.",
+  signIn: "Sign in again.",
+  /** Longer than a name may be (WALLET_NAME_COPY.tooLong says by how much). */
+  tooLong: "Name too long.",
+  /** A line break or an invisible character (WALLET_NAME_COPY.forbidden). */
+  forbidden: "Hidden characters.",
+  /** The account keeps as many names as it may. */
+  tooManyNames: "Too many names.",
 } as const;

@@ -17,15 +17,27 @@
  * (lib/wallet-names-store.ts). Without a store the route is 503 names_off before
  * anything else, and the browser shows the default names with no pencil.
  *
- * WHAT IT COSTS, AND WHY THE BUDGETS ARE SMALL. Every save is a put, an
- * "advanced operation"; on Vercel's Hobby plan the whole store gets 2,000 a
- * month, and running out shuts the store — the share links included — for the
- * rest of the period. So a save is charged three ways before it is made: the
- * client's own buckets (as every /api route charges, keyed on
- * SIP_TRUSTED_CLIENT_IP_HEADER), the account's (WALLET_NAMES_WRITES_PER_USER an
- * hour), and this instance's (WALLET_NAMES_WRITES_GLOBAL an hour, across
- * everyone). A save that changes nothing writes nothing. Reads are one get each,
- * from a budget of their own.
+ * WHAT IT COSTS, AND WHY THE BUDGETS ARE A MONTH'S. On Vercel's Hobby plan the
+ * whole store — these names and the share links alike — gets 10,000 "simple
+ * operations" a month (every read here is one: it skips the CDN) and 2,000
+ * "advanced" ones (every save), and an account past either cannot use Blob at
+ * all for 30 days. So:
+ *   - THIS INSTANCE KEEPS A COPY of each account's names, from its last read or
+ *     save, and answers from it for WALLET_NAMES_COPY_MS: a reload, a second tab,
+ *     the dashboard then /wallets, a rename — none of them reads the store again.
+ *   - A STORE READ is charged to the account (WALLET_NAMES_READS_PER_USER) and to
+ *     this instance (WALLET_NAMES_READS_PER_DAY); a save to the account
+ *     (WALLET_NAMES_WRITES_PER_USER) and to this instance
+ *     (WALLET_NAMES_WRITES_PER_DAY). Daily, not hourly: sized so one instance,
+ *     spent every day of a month, stays inside the month's operations. The
+ *     client's own buckets come first, as on every /api route
+ *     (SIP_TRUSTED_CLIENT_IP_HEADER).
+ *   - A READ PAST ITS BUDGET IS THE COPY, of any age: names a little stale rather
+ *     than none. Only an account this instance holds no copy of is refused.
+ *   - A save that changes nothing writes nothing.
+ * These are counters in one instance's memory: they bound what one instance
+ * spends, not what several running at once do together. On Pro, with a spend
+ * limit, they can grow.
  *
  * NOTHING PERSONAL IN THE LOGS: no token, no user id, no address, no name — a
  * refusal logs its status and code, a store failure the error's class.
@@ -49,20 +61,27 @@ import { readPrivyAppId, type ConfigProblem, type Env } from "@/lib/config";
 import { solanaGate } from "@/lib/load-config";
 import { bearerTokenOf, verifyPrivyAccessToken, type AccessCheck } from "@/lib/privy-access-token";
 import { WALLET_NAMES_MAX, cleanWalletName } from "@/lib/wallet-names";
-import { WalletNamesConflict, blobWalletNamesStore, walletNamesStoreConfigured, type WalletNamesStore } from "@/lib/wallet-names-store";
+import { WalletNamesConflict, blobWalletNamesStore, walletNamesStoreConfigured, type StoredNames, type WalletNamesStore } from "@/lib/wallet-names-store";
 
 /** The largest PUT body: an address and a 32-character name are under 300 bytes. */
 export const WALLET_NAMES_MAX_BODY_BYTES = 1_024;
 /** Requests one client (IPv4 address, IPv6 /64) may make a minute, reads and saves together. Its network gets CLIENT_AGGREGATE_FACTOR times as many. */
 export const WALLET_NAMES_PER_CLIENT_PER_MIN = 30;
-/** Saves one account may make: this many at once, and this many an hour after. */
+/** How long this instance answers an account's names from its own copy before it reads the store again. */
+export const WALLET_NAMES_COPY_MS = 5 * 60_000;
+/** Accounts whose copy this instance keeps, at most: the least recently used is dropped first. */
+export const WALLET_NAMES_COPIES_MAX = 5_000;
+/** Store reads one account may cause: this many at once, and this many a day after. A signed-in page reads once, and the copy answers most. */
+export const WALLET_NAMES_READS_PER_USER = 20;
+/** Store reads this instance makes a day, across everyone: at most 6,400 in a 31-day month, of the store's 10,000. */
+export const WALLET_NAMES_READS_PER_DAY = 200;
+/** Saves one account may make: this many at once, and this many a day after. */
 export const WALLET_NAMES_WRITES_PER_USER = 10;
-/** Saves this instance makes an hour, across everyone. Hobby's store allows 2,000 a month in all. */
-export const WALLET_NAMES_WRITES_GLOBAL = 20;
-/** Reads this instance makes a minute, across everyone. */
-export const WALLET_NAMES_READS_GLOBAL = 60;
+/** Saves this instance makes a day, across everyone: at most 1,280 in a 31-day month, of the store's 2,000. */
+export const WALLET_NAMES_WRITES_PER_DAY = 40;
 
-const HOUR_MS = 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+const PER_DAY = 1 / (24 * 60);
 const GLOBAL = "global";
 const FIELDS = ["address", "name"] as const;
 const HEADERS = { "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store" } as const;
@@ -84,30 +103,53 @@ export type WalletNamesErrorCode =
   | "names_unavailable"
   | Exclude<AccessCheck, { ok: true }>["code"];
 
-interface Budgets {
+export interface WalletNamesBudgets {
   readonly exact: WeightedLimiter;
   readonly aggregate: WeightedLimiter;
+  readonly readsPerUser: WeightedLimiter;
+  readonly readsGlobal: WeightedLimiter;
   readonly writesPerUser: WeightedLimiter;
   readonly writesGlobal: WeightedLimiter;
-  readonly readsGlobal: WeightedLimiter;
 }
 
+/** One account's names as this instance last read or saved them, and when (ms). */
+interface HeldNames extends StoredNames {
+  readonly at: number;
+}
+
+/** This instance's copies, by Privy user id, least recently used first. Memory only: never written anywhere. */
+export type WalletNamesCopies = Map<string, HeldNames>;
+
 const BUDGETS = Symbol.for("sip.web.wallet-names.budgets");
+const COPIES = Symbol.for("sip.web.wallet-names.copies");
+
+/** A bucket of `capacity` that refills `capacity` a day, remembered the day it takes to refill: one forgotten sooner would come back full. */
+const daily = (capacity: number): WeightedLimiter => createWeightedLimiter({ capacity, refillPerMinute: capacity * PER_DAY, idleMs: DAY_MS });
+
+/** A fresh set of the route's budgets, at their production sizes. Exported so a test can spend one. */
+export function walletNamesBudgets(): WalletNamesBudgets {
+  return {
+    exact: createWeightedLimiter({ capacity: WALLET_NAMES_PER_CLIENT_PER_MIN }),
+    aggregate: createWeightedLimiter({ capacity: CLIENT_AGGREGATE_FACTOR * WALLET_NAMES_PER_CLIENT_PER_MIN }),
+    readsPerUser: daily(WALLET_NAMES_READS_PER_USER),
+    readsGlobal: daily(WALLET_NAMES_READS_PER_DAY),
+    writesPerUser: daily(WALLET_NAMES_WRITES_PER_USER),
+    writesGlobal: daily(WALLET_NAMES_WRITES_PER_DAY),
+  };
+}
 
 /**
  * Held on globalThis like the share route's, so every bundle of this route
- * shares one set. The hourly buckets are remembered for the hour they take to
- * refill: a bucket forgotten sooner would come back full.
+ * shares one set, and one set of copies.
  */
-function defaultBudgets(): Budgets {
-  const holder = globalThis as unknown as Record<symbol, Budgets | undefined>;
-  return (holder[BUDGETS] ??= {
-    exact: createWeightedLimiter({ capacity: WALLET_NAMES_PER_CLIENT_PER_MIN }),
-    aggregate: createWeightedLimiter({ capacity: CLIENT_AGGREGATE_FACTOR * WALLET_NAMES_PER_CLIENT_PER_MIN }),
-    writesPerUser: createWeightedLimiter({ capacity: WALLET_NAMES_WRITES_PER_USER, refillPerMinute: WALLET_NAMES_WRITES_PER_USER / 60, idleMs: HOUR_MS }),
-    writesGlobal: createWeightedLimiter({ capacity: WALLET_NAMES_WRITES_GLOBAL, refillPerMinute: WALLET_NAMES_WRITES_GLOBAL / 60, idleMs: HOUR_MS }),
-    readsGlobal: createWeightedLimiter({ capacity: WALLET_NAMES_READS_GLOBAL }),
-  });
+function defaultBudgets(): WalletNamesBudgets {
+  const holder = globalThis as unknown as Record<symbol, WalletNamesBudgets | undefined>;
+  return (holder[BUDGETS] ??= walletNamesBudgets());
+}
+
+function defaultCopies(): WalletNamesCopies {
+  const holder = globalThis as unknown as Record<symbol, WalletNamesCopies | undefined>;
+  return (holder[COPIES] ??= new Map());
 }
 
 export interface WalletNamesRouteOptions {
@@ -117,7 +159,9 @@ export interface WalletNamesRouteOptions {
   readonly store?: WalletNamesStore;
   /** Privy's keys. Default: its published set for the app id in the environment. Tests pass a local set. */
   readonly keys?: JWTVerifyGetKey;
-  readonly budgets?: Partial<Budgets>;
+  readonly budgets?: Partial<WalletNamesBudgets>;
+  /** Default: this instance's, on globalThis. Tests pass their own. */
+  readonly copies?: WalletNamesCopies;
   readonly now?: () => number;
   /** Default: one console.warn line per second, carrying status and code only. */
   readonly onRefusal?: (event: { readonly status: number; readonly code: string }) => void;
@@ -164,8 +208,19 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
   const env = (): Env => options.env ?? process.env;
   const now = options.now ?? Date.now;
   const onRefusal = options.onRefusal ?? sampledWarn();
-  const budgets = (): Budgets => ({ ...defaultBudgets(), ...options.budgets });
+  const budgets = (): WalletNamesBudgets => ({ ...defaultBudgets(), ...options.budgets });
   const store = (): WalletNamesStore => options.store ?? blobWalletNamesStore();
+  const copies = (): WalletNamesCopies => options.copies ?? defaultCopies();
+
+  const remember = (userId: string, stored: StoredNames): void => {
+    const held = copies();
+    held.delete(userId);
+    held.set(userId, { names: stored.names, etag: stored.etag, at: now() });
+    for (const oldest of held.keys()) {
+      if (held.size <= WALLET_NAMES_COPIES_MAX) break;
+      held.delete(oldest);
+    }
+  };
 
   const refuse = (status: number, code: WalletNamesErrorCode, message: string, more: Record<string, unknown> = {}, extra: Record<string, string> = {}): Response => {
     onRefusal({ status, code });
@@ -181,7 +236,7 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
    * client's buckets, then who it is. A client already refused is not verified,
    * so a flood of junk tokens costs no key-set fetch.
    */
-  async function admit(request: Request): Promise<{ readonly ok: true; readonly userId: string; readonly budgets: Budgets } | { readonly ok: false; readonly response: Response }> {
+  async function admit(request: Request): Promise<{ readonly ok: true; readonly userId: string; readonly budgets: WalletNamesBudgets } | { readonly ok: false; readonly response: Response }> {
     const settings = env();
     if (!walletNamesStoreConfigured(settings)) {
       return { ok: false, response: json(503, { error: { code: "names_off", message: "Wallet names are not kept on this deployment." } }) };
@@ -215,15 +270,36 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
     return refuse(503, "names_unavailable", "Your wallet names could not be reached just now.");
   };
 
+  /**
+   * AN ACCOUNT'S NAMES FOR ONE REQUEST. "copy": this instance's copy while it is
+   * young, the store otherwise. "store": the store, whatever the copy's age. A
+   * store read is charged to the account first, then to everyone; with either
+   * spent, a copy of any age answers (`fromCopy`), and only an account with no
+   * copy here is refused. A store failure throws, and leaves the copy as it was.
+   */
+  const namesOf = async (userId: string, held: WalletNamesBudgets, mode: "copy" | "store"): Promise<{ readonly stored: StoredNames; readonly fromCopy: boolean } | Response> => {
+    const copy = copies().get(userId) ?? null;
+    const at = now();
+    if (mode === "copy" && copy !== null && at - copy.at < WALLET_NAMES_COPY_MS) return { stored: copy, fromCopy: true };
+    const mine = held.readsPerUser.take(userId, 1, at);
+    const wait = mine > 0 ? mine : held.readsGlobal.take(GLOBAL, 1, at);
+    if (wait > 0) {
+      if (copy !== null) return { stored: copy, fromCopy: true };
+      return limited(wait, mine > 0 ? "Too many reads of this account's wallet names." : "SaverFi is reading many wallet names right now.");
+    }
+    const stored = await store().read(userId);
+    remember(userId, stored);
+    return { stored, fromCopy: false };
+  };
+
   return {
     async GET(request) {
       const admitted = await admit(request);
       if (!admitted.ok) return admitted.response;
-      const wait = admitted.budgets.readsGlobal.take(GLOBAL, 1, now());
-      if (wait > 0) return limited(wait, "SaverFi is reading many wallet names right now.");
       try {
-        const { names } = await store().read(admitted.userId);
-        return json(200, { names } satisfies WalletNamesAnswer);
+        const had = await namesOf(admitted.userId, admitted.budgets, "copy");
+        if (had instanceof Response) return had;
+        return json(200, { names: had.stored.names } satisfies WalletNamesAnswer);
       } catch (error) {
         return unavailable(error);
       }
@@ -252,11 +328,17 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
 
       const names = store();
       const { userId, budgets: held } = admitted;
-      /** One read, the edit, one save — or the answer that no save is needed. */
-      const attempt = async (): Promise<Response | "conflict"> => {
-        const read = await names.read(userId);
+      /**
+       * The names, the edit, one save — or the answer that no save is needed. "confirm": the copy
+       * says the name is already this, and a copy can be older than another instance's save, so
+       * the store is asked before anything is answered.
+       */
+      const attempt = async (mode: "copy" | "store"): Promise<Response | "conflict" | "confirm"> => {
+        const had = await namesOf(userId, held, mode);
+        if (had instanceof Response) return had;
+        const read = had.stored;
         const current = read.names[address] ?? null;
-        if (current === cleaned.name) return json(200, { names: read.names } satisfies WalletNamesAnswer);
+        if (current === cleaned.name) return had.fromCopy && mode === "copy" ? "confirm" : json(200, { names: read.names } satisfies WalletNamesAnswer);
         if (current === null && cleaned.name !== null && Object.keys(read.names).length >= WALLET_NAMES_MAX) {
           return refuse(409, "too_many_names", `An account keeps at most ${WALLET_NAMES_MAX} wallet names.`);
         }
@@ -268,8 +350,10 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
         if (everyone > 0) return limited(everyone, "SaverFi is saving many wallet names right now.");
         const next = withName(read.names, address, cleaned.name);
         try {
-          await names.write(userId, next, read.etag);
+          remember(userId, { names: next, etag: await names.write(userId, next, read.etag) });
         } catch (error) {
+          // Moved, or perhaps saved before it failed: either way the copy no longer says what the store holds.
+          copies().delete(userId);
           if (error instanceof WalletNamesConflict) return "conflict";
           throw error;
         }
@@ -277,11 +361,11 @@ export function walletNamesRoute(options: WalletNamesRouteOptions = {}): { GET(r
       };
 
       try {
+        let outcome = await attempt("copy");
+        if (outcome === "confirm") outcome = await attempt("store");
         // Another device saved in between: read what it saved, and apply this change over it — once.
-        const first = await attempt();
-        if (first !== "conflict") return first;
-        const second = await attempt();
-        return second === "conflict" ? unavailable(new WalletNamesConflict()) : second;
+        if (outcome === "conflict") outcome = await attempt("store");
+        return outcome === "conflict" || outcome === "confirm" ? unavailable(new WalletNamesConflict()) : outcome;
       } catch (error) {
         return unavailable(error);
       }

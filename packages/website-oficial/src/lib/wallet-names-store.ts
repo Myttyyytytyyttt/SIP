@@ -26,15 +26,21 @@
  *
  * FRESH READS. A name is overwritten in place, and the CDN may serve the old
  * document for up to a minute after; a rename followed by a reload must show
- * the new name, so reads go to the origin (useCache: false). Writes carry the
- * etag of the read they edit (ifMatch), so two devices renaming at once do not
- * erase each other: the loser re-reads and applies its change again, once.
+ * the new name, so reads go to the origin (useCache: false) — which is why
+ * every read is a billed operation, and why the route keeps its own copy and
+ * reads here as seldom as it can (lib/wallet-names-server.ts).
+ *
+ * NO SAVE ERASES ANOTHER. A save carries the etag of the read it edits
+ * (ifMatch); the very first, with no document to match, may only CREATE one
+ * (allowOverwrite: false). Either way, a document another device saved in
+ * between makes this save a conflict, and the route re-reads and applies its
+ * change over the other's, once.
  */
 import "server-only";
 
 import { createHash } from "node:crypto";
 
-import { BlobPreconditionFailedError, get, put } from "@vercel/blob";
+import { BlobError, BlobPreconditionFailedError, get, put } from "@vercel/blob";
 
 import type { Env } from "@/lib/config";
 import { namesFrom } from "@/lib/wallet-names";
@@ -71,8 +77,12 @@ export class WalletNamesConflict extends Error {
 
 export interface WalletNamesStore {
   read(userId: string): Promise<StoredNames>;
-  /** Saves `names` over the document read at `etag` (null: there was none). Throws WalletNamesConflict when it moved since. */
-  write(userId: string, names: Readonly<Record<string, string>>, etag: string | null): Promise<void>;
+  /**
+   * Saves `names` over the document read at `etag` (null: there was none), and answers the saved
+   * document's etag. Throws WalletNamesConflict when it moved since — or, for a first save, when
+   * another device's first save made it in between.
+   */
+  write(userId: string, names: Readonly<Record<string, string>>, etag: string | null): Promise<string>;
 }
 
 /** The document as stored. `v` lets a later shape be told apart from this one. */
@@ -99,26 +109,31 @@ export function blobWalletNamesStore(): WalletNamesStore {
     async write(userId, names, etag) {
       const document: NamesDocument = { v: 1, names };
       try {
-        await put(walletNamesPath(userId), JSON.stringify(document), {
+        const saved = await put(walletNamesPath(userId), JSON.stringify(document), {
           access: "private",
           contentType: "application/json",
           addRandomSuffix: false,
-          // The first save has no etag to match. Two devices making an account's very
-          // first rename in the same instant is the one race left open: the last one wins.
-          ...(etag === null ? { allowOverwrite: true } : { ifMatch: etag }),
+          // The first save has no etag to match, so it may only create the document: two
+          // devices making an account's first rename at once must not have one erase the other.
+          ...(etag === null ? { allowOverwrite: false } : { ifMatch: etag }),
           // The shortest the store allows. Reads skip the cache anyway; this only bounds a stale edge copy.
           cacheControlMaxAge: 60,
           abortSignal: AbortSignal.timeout(WALLET_NAMES_STORE_TIMEOUT_MS),
         });
+        return saved.etag;
       } catch (error) {
         if (error instanceof BlobPreconditionFailedError) throw new WalletNamesConflict();
+        // The SDK has no class for "this blob already exists": only the store's words tell it
+        // apart. Should the words ever differ, the lost race is a failed save the person sees
+        // and repeats (the repeat reads the document), never a silent loss.
+        if (etag === null && error instanceof BlobError && /already exists/i.test(error.message)) throw new WalletNamesConflict();
         throw error;
       }
     },
   };
 }
 
-/** An in-memory store, for tests: the same contract, etags included. */
+/** An in-memory store, for tests: the same contract, etags and create-only first saves included. */
 export function memoryWalletNamesStore(): WalletNamesStore & { readonly documents: Map<string, StoredNames> } {
   const documents = new Map<string, StoredNames>();
   let version = 0;
@@ -129,9 +144,11 @@ export function memoryWalletNamesStore(): WalletNamesStore & { readonly document
     },
     async write(userId, names, etag) {
       const path = walletNamesPath(userId);
-      if (etag !== null && documents.get(path)?.etag !== etag) throw new WalletNamesConflict();
+      if (etag === null ? documents.has(path) : documents.get(path)?.etag !== etag) throw new WalletNamesConflict();
       version += 1;
-      documents.set(path, { names: { ...names }, etag: `"v${version}"` });
+      const saved = `"v${version}"`;
+      documents.set(path, { names: { ...names }, etag: saved });
+      return saved;
     },
   };
 }

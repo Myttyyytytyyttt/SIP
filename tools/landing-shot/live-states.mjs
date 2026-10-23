@@ -183,6 +183,13 @@ async function shoot(browser, { state, device, path, stub, snapshot, activity, m
     await route.fulfill({ status: 200, contentType: "application/json", headers: { "cache-control": "private, no-store" }, body: JSON.stringify(body) });
   });
 
+  // The account's wallet names (owner, 10-23). This dev server has no Blob store, and its 503 names_off
+  // would be a console error in every shot with a session. Answered as production answers an account that
+  // has named nothing yet, so the shots show the default names with the pencil, as production does.
+  await page.route("**/api/wallet-names", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", headers: { "cache-control": "private, no-store" }, body: JSON.stringify({ names: {} }) });
+  });
+
   try {
     await page.goto(`${ORIGIN}${path}`, { waitUntil: "domcontentloaded", timeout: 180_000 });
     if (marker !== null) {

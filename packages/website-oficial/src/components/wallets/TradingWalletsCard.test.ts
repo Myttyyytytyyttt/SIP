@@ -438,7 +438,7 @@ describe("a trading wallet's own name (owner, 10-23)", () => {
   const named = (names: Readonly<Record<string, string>>, available = true): string => {
     const value: VaultScreenValue = { pensionKey: PENSION_KEY, view: ready(), refresh: vi.fn(), api: { build: vi.fn() } as unknown as VaultApi };
     const card = createElement(VaultWriteLock, null, createElement(TradingWalletsCard));
-    const withNames = createElement(WalletNamesContext.Provider, { value: { available, names, rename: vi.fn() } }, createElement(VaultScreenContext.Provider, { value }, card));
+    const withNames = createElement(WalletNamesContext.Provider, { value: { account: true, available, names, rename: vi.fn() } }, createElement(VaultScreenContext.Provider, { value }, card));
     return renderToStaticMarkup(createElement(TooltipProvider, null, withNames));
   };
 

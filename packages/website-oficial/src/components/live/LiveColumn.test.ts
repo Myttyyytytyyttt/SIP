@@ -33,7 +33,7 @@ function wallets(count: number, over: (index: number) => Partial<LiveSnapshotJso
   return toLiveDashboard({ snapshot, activity: null, privyWallets: addresses }).wallets;
 }
 
-const names = (over: Partial<WalletNamesValue> = {}): WalletNamesValue => ({ available: true, names: {}, rename: vi.fn(async () => ({ ok: true as const })), ...over });
+const names = (over: Partial<WalletNamesValue> = {}): WalletNamesValue => ({ account: true, available: true, names: {}, rename: vi.fn(async () => ({ ok: true as const })), ...over });
 
 function draw(list: ReturnType<typeof wallets>, value: WalletNamesValue | null = null): string {
   const tree: ReactNode = createElement(WalletList, { wallets: list, usdcRawPerSol: USDC_PER_SOL });
@@ -58,9 +58,17 @@ describe("WalletList", () => {
   it("says the balance to three places, cut down, with every lamport in its tooltip — and no settlement count", () => {
     const html = draw(wallets(1));
     expect(html).toContain(">2.433 SOL<");
-    expect(html).toContain('title="2.433206523 SOL"');
+    expect(html).toContain('title="2.433206523 SOL ≈ $243.41"');
     expect(html).not.toContain("2.433206523 SOL<");
     expect(text(html)).not.toMatch(/settlement/i);
+  });
+
+  it("shows the dollars whole or not at all: their own item on a one-line row that wraps out of sight", () => {
+    const html = draw(wallets(1, () => ({ lamports: "1999999999999" })));
+    const balance = html.match(/<span class="([^"]*)" title="1,999\.999999999 SOL ≈ \$[0-9,.]+">/);
+    expect(balance).not.toBeNull();
+    for (const rule of ["flex", "h-4", "flex-wrap", "overflow-hidden", "justify-end"]) expect(balance![1]!.split(" ")).toContain(rule);
+    expect(html).toMatch(/>1,999\.999 SOL<\/span><span>≈ \$[0-9,.]+<\/span>/);
   });
 
   it("reads dust as <0.001, an unread balance as a dash", () => {
@@ -87,6 +95,15 @@ describe("WalletList", () => {
     expect(list).toContain(`aria-label="${LIVE_COPY.tradingWallets}"`);
     for (const rule of ["max-h-[15.5rem]", "overflow-y-auto", "overscroll-contain", "px-1", "-mx-1"]) expect(list).toContain(rule);
     expect(cards(html)).toHaveLength(7);
+  });
+
+  it("keeps the pencil's height from the sign-in on, so nothing moves when the names land — and signed out, the plain name", () => {
+    const waiting = draw(wallets(1), names({ available: false }));
+    expect(waiting).toContain('<span class="flex h-6 min-w-0 items-center"><span class="min-w-0 truncate text-sm font-medium">Trading wallet 1</span></span>');
+    expect(waiting).not.toContain("data-wallet-rename");
+    const visitor = draw(wallets(1));
+    expect(visitor).toContain('<span class="min-w-0 truncate text-sm font-medium">Trading wallet 1</span>');
+    expect(visitor).not.toContain("h-6");
   });
 
   it("offers the pencil only when the account's names can be saved", () => {

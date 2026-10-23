@@ -35,8 +35,20 @@ describe("cleanWalletName", () => {
     }
   });
 
-  it("keeps the joiners emoji sequences need", () => {
+  it("refuses every other invisible or format character, and the letters that draw nothing", () => {
+    // Arabic letter mark, soft hyphen, invisible times, Mongolian vowel separator, interlinear annotation,
+    // a lone tag, the Hangul fillers and the blank Braille cell — the last ones would make a name look empty.
+    for (const bad of ["a\u061Cb", "a\u00ADb", "a\u2062b", "a\u180Eb", "a\uFFF9b", "a\u{E0041}b", "\u3164", "\u115F", "\u1160", "\uFFA0", "\u2800"]) {
+      expect(cleanWalletName(bad), JSON.stringify(bad)).toEqual({ ok: false, message: WALLET_NAME_COPY.forbidden });
+    }
+  });
+
+  it("keeps the joiners emoji sequences need, and a subdivision flag's tags", () => {
     expect(cleanWalletName("👨\u200D👩\u200D👧 fund").ok).toBe(true);
+    const england = "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+    expect(cleanWalletName(`${england} savings`)).toEqual({ ok: true, name: `${england} savings` });
+    // The same tags with no flag before them hide text: refused.
+    expect(cleanWalletName("savings\u{E0067}\u{E0062}\u{E007F}").ok).toBe(false);
   });
 });
 

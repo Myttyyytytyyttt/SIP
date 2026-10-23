@@ -1,9 +1,13 @@
 // Who is asking, from Privy's access token and Privy's PUBLISHED keys — no secret (owner, 10-23). Signed here
 // with a key pair made for the test and checked against a local key set, so nothing reaches the network:
-// the good token, and every way a token is not one this server can believe.
+// the good token, and every way a token is not one this server can believe. The key set's own failures are
+// played by a server on 127.0.0.1, answering as Privy's endpoint might on a bad day.
 
-import { SignJWT, createLocalJWKSet, errors, exportJWK, generateKeyPair, type JWTVerifyGetKey } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
+import { SignJWT, createLocalJWKSet, createRemoteJWKSet, errors, exportJWK, generateKeyPair, type JWK, type JWTVerifyGetKey } from "jose";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { bearerTokenOf, privyJwksUrl, verifyPrivyAccessToken } from "@/lib/privy-access-token";
 
@@ -16,13 +20,14 @@ type Key = Awaited<ReturnType<typeof generateKeyPair>>["privateKey"];
 let signer: Key;
 let stranger: Key;
 let keys: JWTVerifyGetKey;
+let published: JWK;
 
 beforeAll(async () => {
   const pair = await generateKeyPair("ES256", { extractable: true });
   signer = pair.privateKey;
   stranger = (await generateKeyPair("ES256")).privateKey;
-  const jwk = { ...(await exportJWK(pair.publicKey)), kid: KID, alg: "ES256", use: "sig" };
-  keys = createLocalJWKSet({ keys: [jwk] });
+  published = { ...(await exportJWK(pair.publicKey)), kid: KID, alg: "ES256", use: "sig" };
+  keys = createLocalJWKSet({ keys: [published] });
 });
 
 /** A token as Privy issues one: ES256, typ JWT, iss privy.io, aud the app, sub the user, sid the session, an hour long. */
@@ -93,6 +98,44 @@ describe("verifyPrivyAccessToken", () => {
     };
     expect(await verify(jwt, unreachable)).toEqual({ ok: false, status: 503, code: "auth_unavailable" });
     expect(await verify(jwt, slow)).toEqual({ ok: false, status: 503, code: "auth_unavailable" });
+  });
+});
+
+describe("verifyPrivyAccessToken, against a key-set endpoint", () => {
+  /** What the endpoint answers at each path: Privy's set, or a bad day. */
+  const answers: Record<string, { status: number; type: string; body: string; location?: string }> = {};
+  let server: Server;
+  let origin = "";
+
+  beforeAll(async () => {
+    answers["/ok"] = { status: 200, type: "application/json", body: JSON.stringify({ keys: [published] }) };
+    answers["/down"] = { status: 503, type: "application/json", body: '{"error":"unavailable"}' };
+    answers["/busy"] = { status: 429, type: "application/json", body: '{"error":"rate limited"}' };
+    answers["/html"] = { status: 200, type: "text/html", body: "<html>maintenance</html>" };
+    answers["/moved"] = { status: 302, type: "text/plain", body: "", location: "/ok" };
+    server = createServer((request, response) => {
+      const answer = answers[request.url ?? ""] ?? { status: 404, type: "text/plain", body: "" };
+      response.writeHead(answer.status, { "content-type": answer.type, ...(answer.location === undefined ? {} : { location: answer.location }) });
+      response.end(answer.body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+  afterAll(() => new Promise<void>((resolve) => server.close(() => resolve())));
+
+  const at = (path: string): JWTVerifyGetKey => createRemoteJWKSet(new URL(`${origin}${path}`));
+
+  it("believes a token whose key the endpoint publishes, and refuses one it does not", async () => {
+    expect(await verify(await token(), at("/ok"))).toEqual({ ok: true, userId: USER });
+    expect(await verify(await token({ key: stranger }), at("/ok"))).toEqual({ ok: false, status: 401, code: "token_invalid" });
+    expect(await verify(await token({ kid: "unknown-kid" }), at("/ok"))).toEqual({ ok: false, status: 401, code: "token_invalid" });
+  });
+
+  it("is 503, never 401, when the endpoint answers anything but a key set: a 5xx, a 429, a page, a redirect", async () => {
+    const jwt = await token();
+    for (const path of ["/down", "/busy", "/html", "/moved"]) {
+      expect(await verify(jwt, at(path)), path).toEqual({ ok: false, status: 503, code: "auth_unavailable" });
+    }
   });
 });
 

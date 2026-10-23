@@ -15,13 +15,21 @@
  * (lib/wallet-names.ts renameOutcome).
  *
  * THE NEW NAME SHOWS AT ONCE (wallet-names-context.tsx), and a save that fails
- * puts the old one back and says so in the name's own place for a few seconds
- * — the card never grows a line for it. The box is as tall as the pencil, so
- * opening and closing it moves nothing.
+ * puts the old one back and says so in the name's own place for a few seconds,
+ * in a few words that fit there whole (RENAME_COPY), the rule it broke as their
+ * tooltip — the card never grows a line for it. Pressing the pencil again ends
+ * those seconds: an old failure never stands over a newer name. The box is as
+ * tall as the pencil, so opening and closing it moves nothing.
  *
  * NO PENCIL WITHOUT A PLACE TO SAVE: without a names host that read the
- * account's names (the sample, a deployment with no store, a failed read) this
- * is the name as plain text, exactly what the row showed before.
+ * account's names (a deployment with no store, a failed read) the name is
+ * plain text — still as tall as the pencil once someone is signed in, so the
+ * card does not move when the read lands and the pencil appears. Signed out
+ * (the sample) it is exactly what the row showed before.
+ *
+ * AN INPUT METHOD'S ENTER IS NOT A SAVE. Japanese, Chinese and Korean typing
+ * confirm a word with Enter, and Escape drops the word being composed: while a
+ * composition is open, both keys are the input method's, and the box stays.
  *
  * ESCAPE IS THE BOX'S, NOT THE DIALOG'S. The column is also drawn inside the
  * header's sheet and the rows inside the wallets modal, and Radix closes both on
@@ -33,7 +41,7 @@
 import { Pencil } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 
-import { useWalletNames } from "@/components/wallets/wallet-names-context";
+import { refusalWords, useWalletNames, type RenameFailure } from "@/components/wallets/wallet-names-context";
 import { useFlash } from "@/hooks/use-flash";
 import { RENAME_COPY } from "@/lib/live-copy";
 import { cn } from "@/lib/utils";
@@ -53,10 +61,10 @@ export function WalletName({
   /** The name's text style where it is drawn; the box keeps its own. */
   readonly className?: string;
 }) {
-  const { available, names, rename } = useWalletNames();
+  const { account, available, names, rename } = useWalletNames();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
-  const [failure, setFailure] = useState<string | null>(null);
+  const [failure, setFailure] = useState<RenameFailure | null>(null);
   const [failed, flashFailed] = useFlash(FAILURE_MS);
   const input = useRef<HTMLInputElement>(null);
   const pencil = useRef<HTMLButtonElement>(null);
@@ -68,13 +76,15 @@ export function WalletName({
 
   const open = () => {
     ended.current = false;
+    // A new try: the last one's failure is over, whatever its seconds left.
+    setFailure(null);
     setDraft(name);
     setEditing(true);
   };
 
   const fail = useCallback(
-    (message: string) => {
-      setFailure(message);
+    (words: RenameFailure) => {
+      setFailure(words);
       flashFailed();
     },
     [flashFailed],
@@ -90,11 +100,11 @@ export function WalletName({
       const outcome = renameOutcome(input.current?.value ?? draft, name, names[address] ?? null);
       if (outcome.kind === "unchanged") return;
       if (outcome.kind === "invalid") {
-        fail(outcome.message);
+        fail(refusalWords(outcome.message));
         return;
       }
       void rename(address, outcome.name).then((result) => {
-        if (!result.ok) fail(result.message);
+        if (!result.ok) fail(result);
       });
     },
     [address, draft, fail, name, names, rename],
@@ -111,7 +121,7 @@ export function WalletName({
   useEffect(() => {
     if (!editing) return undefined;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.target !== input.current) return;
+      if (event.key !== "Escape" || event.isComposing || event.target !== input.current) return;
       event.stopPropagation();
       event.preventDefault();
       finish(false, true);
@@ -126,7 +136,10 @@ export function WalletName({
     pencil.current?.focus();
   }, [editing]);
 
-  if (!available) return <span className={cn("min-w-0 truncate", className)}>{name}</span>;
+  if (!available) {
+    const plain = <span className={cn("min-w-0 truncate", className)}>{name}</span>;
+    return account ? <span className="flex h-6 min-w-0 items-center">{plain}</span> : plain;
+  }
 
   if (editing) {
     return (
@@ -136,7 +149,8 @@ export function WalletName({
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
+            // keyCode 229: Safari's composing key, which it sends with isComposing already false.
+            if (event.key !== "Enter" || event.nativeEvent.isComposing || event.keyCode === 229) return;
             event.preventDefault();
             finish(true, true);
           }}
@@ -161,8 +175,9 @@ export function WalletName({
   return (
     <span className="flex h-6 min-w-0 items-center gap-0.5">
       {failed && failure !== null ? (
-        <span role="alert" className="min-w-0 truncate text-xs text-destructive">
-          {failure}
+        <span role="alert" title={failure.detail ?? undefined} className="min-w-0 truncate text-xs text-destructive">
+          {failure.message}
+          {failure.detail === null ? null : <span className="sr-only"> {failure.detail}</span>}
         </span>
       ) : (
         <span className={cn("min-w-0 truncate", className)}>{name}</span>
