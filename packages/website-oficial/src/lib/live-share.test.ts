@@ -40,6 +40,7 @@ import {
   shareIntentUrl,
   sharePostText,
   shareRows,
+  shareTitle,
   shareWords,
   unitFor,
   unitsOf,
@@ -277,15 +278,70 @@ describe("a figure fits the card's room", () => {
 });
 
 describe("the zero card's lines are measured once, for both renderers", () => {
-  it("every line a zero card can print has its width — a reworded line fails here until it is measured", () => {
-    for (const example of [false, true]) {
-      for (const mode of ["profit", "volume"] as const) {
-        for (const paused of [false, true]) {
-          const shown = card({ state: "zero", example, mode, paused });
-          for (const line of zeroLines(shown)) expect(ZERO_LINE_WIDTHS[line], line).toBeGreaterThan(100);
-          expect(zeroBeside(shown)).toBe(28 + Math.max(...zeroLines(shown).map((line) => ZERO_LINE_WIDTHS[line]!)));
+  it("every line a zero card can print has its width, in either voice — a reworded line fails here until it is measured", () => {
+    for (const voice of ["own", "link"] as const) {
+      for (const example of [false, true]) {
+        for (const mode of ["profit", "volume"] as const) {
+          for (const paused of [false, true]) {
+            const shown = card({ state: "zero", example, mode, paused });
+            for (const line of zeroLines(shown, voice)) expect(ZERO_LINE_WIDTHS[line], line).toBeGreaterThan(100);
+            expect(zeroBeside(shown, voice)).toBe(28 + Math.max(...zeroLines(shown, voice).map((line) => ZERO_LINE_WIDTHS[line]!)));
+          }
         }
       }
+    }
+  });
+});
+
+/**
+ * THE LINK'S CARD IS IN THE THIRD PERSON (review finding S1; owner, 10-23: 'usa
+ * "SaverFi's Vault"'): /api/share signs a card for any pension key, with no
+ * proof whose it is, so the picture under a link says "SaverFi’s Vault" and
+ * never "my" or "I". The owner's own image — the dialog's canvas — keeps "My
+ * pension"; the sample's is "Example pension" in both voices.
+ */
+describe("whose voice a card speaks in", () => {
+  const FIRST_PERSON = /\bmy\b|\bI\b|\bI’|\bI'/i;
+  const saved = card();
+  const zero = card({ state: "zero", usdText: null, usdCompact: null });
+  const zeroPaused = { ...zero, paused: true };
+  const zeroVolume = { ...zero, mode: "volume" as const, rate: "2%" };
+  const savedPaused = { ...saved, paused: true };
+
+  /** Every word a card prints but its figures: the lockup, the title, the zero card's lines, the rows, the footer. */
+  const printed = (shown: ShareCardData, voice: "own" | "link"): string[] => {
+    const hero = shareHero(shown, "usd");
+    return [
+      SHARE_COPY.card.brand,
+      shareTitle(shown, hero, voice),
+      ...(hero === null ? zeroLines(shown, voice) : [SHARE_COPY.card.since("Sep 2026")]),
+      ...shareRows(shown).flatMap((row) => [row.label, row.value, row.after ?? ""]),
+      SHARE_COPY.card.site,
+      SHARE_COPY.card.tagline,
+    ];
+  };
+
+  it("a link's card — saved, nothing yet, paused, either mode — is titled “SaverFi’s Vault” and says nothing in the first person", () => {
+    for (const [name, shown] of Object.entries({ saved, savedPaused, zero, zeroPaused, zeroVolume })) {
+      const words = printed(shown, "link");
+      expect(shareTitle(shown, shareHero(shown, "usd"), "link"), name).toBe("SaverFi’s Vault");
+      expect(words.join("\n"), name).not.toMatch(FIRST_PERSON);
+    }
+    expect(zeroLines(zero, "link")).toEqual(["of trading gains,", "put aside for later."]);
+    expect(zeroLines(zeroPaused, "link")).toEqual(["of trading gains,", "paused for now."]);
+  });
+
+  it("the owner's own image keeps “My pension” and “of my trading gains” (owner, 10-23: only the link changes)", () => {
+    expect(shareTitle(saved, shareHero(saved, "usd"), "own")).toBe("My pension");
+    expect(shareTitle(zero, null, "own")).toBe("Building my pension");
+    expect(zeroLines(zero, "own")).toEqual(["of my trading gains,", "put aside for later."]);
+  });
+
+  it("the sample's card is the example's in both voices", () => {
+    for (const voice of ["own", "link"] as const) {
+      const example = { ...saved, example: true };
+      expect(shareTitle(example, shareHero(example, "usd"), voice)).toBe("Example pension");
+      expect(zeroLines({ ...zero, example: true }, voice)[0]).toBe("of trading gains,");
     }
   });
 });

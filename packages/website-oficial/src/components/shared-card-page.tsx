@@ -10,7 +10,10 @@
  *
  * WHAT IT TELLS A CRAWLER: the card as og:image and twitter:image
  * (summary_large_image), at its versioned address (lib/share-render-version.ts);
- * a headline and a line in the third person (SHARE_COPY.page); noindex with
+ * a headline and a line in the third person (SHARE_COPY.page) — a link's
+ * headline led by its card's own title, "SaverFi’s Vault" (review finding S1;
+ * owner, 10-23: the server signs a card for any pension, so neither the card
+ * nor its page may say "my"); noindex with
  * its links followed — one person's dated moment is not a page for a search
  * result — and no canonical. The noindex is also an X-Robots-Tag header on
  * /c/ (next.config.mjs): metadata a page streams can land after <head> for a
@@ -35,14 +38,19 @@ export interface SharedCard {
   readonly unit: ShareUnit;
 }
 
-/** The headline, and the image's description, for this card. */
+/**
+ * The headline, and the image's description, for this card. A link's are
+ * "SaverFi’s Vault: …", like its picture (S1; owner, 10-23), and the picture's
+ * description is the headline: the card's title, then what it shows — the
+ * figure, or the rule beside its rate, "paused for now" when it is.
+ */
 function wordsOf({ card, unit }: SharedCard): { readonly title: string; readonly alt: string } {
   const hero = shareHero(card, unit);
   const figure = hero === null ? null : hero.unit === null ? hero.number : `${hero.number} ${hero.unit}`;
   const rule = `${card.rate} ${SHARE_COPY.card.measure[card.mode]}`;
   if (card.example) return { title: SHARE_COPY.page.example.title, alt: SHARE_COPY.page.example.alt(figure ?? rule) };
-  if (figure !== null) return { title: SHARE_COPY.page.title(figure), alt: SHARE_COPY.page.alt(figure) };
-  return card.paused ? { title: SHARE_COPY.page.titleZeroPaused, alt: SHARE_COPY.page.altZero(rule) } : { title: SHARE_COPY.page.titleZero(rule), alt: SHARE_COPY.page.altZero(rule) };
+  const title = figure !== null ? SHARE_COPY.page.title(figure) : card.paused ? SHARE_COPY.page.titleZeroPaused(rule) : SHARE_COPY.page.titleZero(rule);
+  return { title, alt: title };
 }
 
 /** The card's picture, at the renderer's version. */

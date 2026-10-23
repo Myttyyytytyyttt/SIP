@@ -12,4 +12,4 @@
  * keep a preview by its address. A redrawn card needs a new address, or the old
  * picture stays; an image asked for at any other ?v is sent to this one.
  */
-export const SHARE_RENDER_VERSION = "39013d44b1b4";
+export const SHARE_RENDER_VERSION = "ea8d401bdf82";

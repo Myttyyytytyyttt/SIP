@@ -239,6 +239,20 @@ describe("the example's own words", () => {
     expect(paintedOf(liveCard(60_000_000n)).map((each) => each.text)).toContain(SHARE_COPY.card.titleSaved);
     expect(paintedOf(liveCard(0n)).map((each) => each.text)).toContain(SHARE_COPY.card.titleZero);
   });
+
+  /**
+   * ONLY THE LINK'S CARD IS "SaverFi’s Vault" (review finding S1; owner,
+   * 10-23): the image this canvas draws — downloaded, copied, filmed — is the
+   * owner's own, from his connected Live page, and keeps "My pension".
+   */
+  it("the owner's downloaded image still says “My pension”, and never the link's title", () => {
+    const saved = paintedOf(liveCard(60_000_000n)).map((each) => each.text);
+    const zero = paintedOf(liveCard(0n)).map((each) => each.text);
+    expect(saved).toContain("My pension");
+    expect(zero).toContain("Building my pension");
+    expect(zero).toContain("of my trading gains,");
+    expect([...saved, ...zero].join("\n")).not.toContain(SHARE_COPY.page.card.titleSaved);
+  });
 });
 
 /**

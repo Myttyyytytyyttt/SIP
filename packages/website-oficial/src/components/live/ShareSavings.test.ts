@@ -179,7 +179,9 @@ describe("Post on X with the card's own link", () => {
   it("the sample's: its fixed page, at once — no asking, nothing signed", () => {
     const html = renderToStaticMarkup(createElement(SharePanel, { card: card(60_000_000n), link: { kind: "example" } }));
     expect(hrefOf(html).searchParams.get("url")).toBe(`https://saverfi.cash${EXAMPLE_SHARE_LINKS.grid.usd}`);
-    expect(hintOf(html)).toBe(SHARE_COPY.xHintLinked);
+    // Its link shows this very card, "Example pension" in both.
+    expect(hintOf(html)).toBe(SHARE_COPY.example.xHintLinked);
+    expect(hintOf(html)).toBe("Post on X adds a link that shows this card.");
   });
 
   it("a Live page's, while it is asked for: Post on X waits, disabled, and says why", () => {
@@ -201,7 +203,10 @@ describe("Post on X with the card's own link", () => {
     expect(href.searchParams.get("url")).toBe("https://saverfi.cash/c/grid-usd.mac");
     expect(href.searchParams.get("text")).toBe("I’ve saved $6.01 for my pension with SaverFi so far.");
     expect(xLink(html)).toContain('target="_blank"');
+    // Said before the click: X's card is titled "SaverFi’s Vault", not this one's "My pension" (S1; owner, 10-23).
     expect(hintOf(html)).toBe(SHARE_COPY.xHintLinked);
+    // The name never splits across lines: a no-break space joins it.
+    expect(hintOf(html)).toBe("Post on X shares it as “SaverFi’s\u00a0Vault”.");
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 

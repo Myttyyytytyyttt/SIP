@@ -984,7 +984,20 @@ export const PENDING_COPY = {
  *
  * IN THE FIRST PERSON ON THE CARD — "My pension" — because it is the owner
  * who posts it; in the second person in the dialog, which speaks to him.
+ *
+ * BUT NOT ON THE LINK'S CARD (S1; owner, 10-23: 'usa "SaverFi's Vault"').
+ * /api/share signs a card for any pension key it is handed, with no proof
+ * whose it is, so the picture under a /c/<token> post could be somebody else's
+ * pension under "My pension". The card the server draws for a link is
+ * "SaverFi’s Vault", in the third person (page.card), its page's headline
+ * starts with that title, and nothing on the link's page or card says "my" or
+ * "I". The image the dialog downloads, copies and films —
+ * made in the owner's own browser, from his own connected Live page — keeps
+ * "My pension".
  */
+/** The link's card's title, and the head of its page's headline (owner, 10-23). */
+const LINK_TITLE = `${BRAND}’s Vault`;
+
 export const SHARE_COPY = {
   // ── the button beside the figure ─────────────────────────────────────────
   trigger: "Share your pension",
@@ -1028,8 +1041,18 @@ export const SHARE_COPY = {
    * three lines with one clause more (measured 10-22). What the link does not
    * carry is the token's rule (lib/share-token.ts), and the dialog's
    * description already says the card has no address.
+   *
+   * NOT "THIS CARD" ANY MORE (S1; owner, 10-23): the link's card is titled
+   * "SaverFi’s Vault" where this one says "My pension" (page.card), and the
+   * hint says so before the click rather than let X show a card that is not
+   * the one in the dialog. The sample's link IS its card (example.xHintLinked).
+   * Measured 10-23 beside four buttons at 1440: the hint's column is 145 px,
+   * and "Post on X adds a link: its card reads …" took three lines with the
+   * name split across two. This one takes two there, as the old hint did (one
+   * at 375), and the name is joined by a no-break space so a line never breaks
+   * inside it.
    */
-  xHintLinked: "Post on X adds a link that shows this card.",
+  xHintLinked: `Post on X shares it as “${LINK_TITLE.replace(" ", "\u00a0")}”.`,
   /** While the server signs the link: Post on X waits for it — a second or two, never more than a few. */
   xHintPending: "Getting this card’s link for X…",
   /** The dialog's own code did not arrive (a dropped connection, a new deploy): said in the frame. Only a reload fetches it again. */
@@ -1081,6 +1104,7 @@ export const SHARE_COPY = {
   // ── the card's own words ─────────────────────────────────────────────────
   card: {
     brand: BRAND,
+    /** The dialog's image — PNG, copy, MP4 — in the owner's voice; the link's card says page.card's instead (S1; owner, 10-23). */
     titleSaved: "My pension",
     titleZero: "Building my pension",
     since: (date: string): string => `since ${date}`,
@@ -1111,21 +1135,37 @@ export const SHARE_COPY = {
    * person — whoever opens it is not the person who saved — and only what the
    * card already prints. The page is not indexed (it is one person's moment,
    * and its figures are dated); its links are followed.
+   *
+   * AND THE CARD ITSELF IS IN THE THIRD PERSON TOO (S1; owner, 10-23: 'usa
+   * "SaverFi's Vault"'): the server signs a card for any pension key it is
+   * handed, so whoever posts a link may not be whose pension it is. The card is
+   * titled "SaverFi’s Vault" (card, below), and the headline starts with it, as
+   * the card does; the image's description is the headline (shared-card-page.tsx).
    */
   page: {
-    /** "$2,073.42 saved for a pension — SaverFi": the preview's headline. */
-    title: (figure: string): string => `${figure} saved for a pension — ${BRAND}`,
-    /** A card with nothing saved yet: the rule is its news — or, paused, nothing is put aside and the title claims no rule. */
-    titleZero: (rule: string): string => `${rule}, put aside for a pension — ${BRAND}`,
-    titleZeroPaused: `Building a pension — ${BRAND}`,
+    /** "SaverFi’s Vault: $2,073.42 saved": the preview's headline — the card's title, then its figure. */
+    title: (figure: string): string => `${LINK_TITLE}: ${figure} saved`,
+    /** A card with nothing saved yet: its rule is its news, in the card's own words. */
+    titleZero: (rule: string): string => `${LINK_TITLE}: ${rule}, put aside for later`,
+    /** Paused: nothing is put aside, and the headline says so, as the card does. */
+    titleZeroPaused: (rule: string): string => `${LINK_TITLE}: ${rule}, paused for now`,
     description: `${BRAND} builds you a pension from your Solana trading: a slice of every trade, put aside for later in a vault only your wallet can open.`,
     /** Under the card: where the figures came from, and when. */
     readOn: (day: string): string => `Read from Solana by ${BRAND} on ${day}.`,
     start: "Start your pension",
     docs: "How it works",
-    /** The image's description, for a screen reader and for a preview that shows none. */
-    alt: (figure: string): string => `A ${BRAND} pension: ${figure} saved`,
-    altZero: (rule: string): string => `A ${BRAND} pension: ${rule}, put aside for later`,
+    /**
+     * THE LINK'S CARD'S OWN WORDS (S1; owner, 10-23), where the dialog's image
+     * says "My pension" and "of my trading gains": nothing the server draws for
+     * a link says "my" or "I". The rest of the card — the rows, the footer, the
+     * zero card's second line — never did. The sample's link keeps its own
+     * (example.card): it was nobody's already.
+     */
+    card: {
+      titleSaved: LINK_TITLE,
+      titleZero: LINK_TITLE,
+      zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
+    },
     /** The sample's page: nobody's pension, and it says so wherever the card's figures appear. */
     example: {
       title: `Example pension — ${BRAND}`,
@@ -1153,6 +1193,8 @@ export const SHARE_COPY = {
     post: `${BRAND}: a pension that builds itself from your Solana trading.`,
     /** The preview's description for a screen reader. */
     alt: (what: string): string => `Example ${BRAND} image, nobody’s pension: ${what}`,
+    /** Post on X's hint: the sample's link shows the very card in the dialog — "Example pension" in both (xHintLinked says why a pension's does not). */
+    xHintLinked: "Post on X adds a link that shows this card.",
     /** The pill at the image's top-right corner: the docs clips' label, word for word. */
     mark: "Example",
     /**

@@ -10,6 +10,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DRAWN_FROM, drawnVersion } from "../../scripts/check-share-render.mts";
@@ -19,10 +20,11 @@ import ExamplePage, { metadata as exampleMetadata } from "@/app/c/example/page";
 import { GET as exampleOnImage, generateStaticParams as exampleBackgrounds } from "@/app/c/example/[background]/card.png/route";
 import { GET as cardImage } from "@/app/c/[token]/card.png/route";
 import SharedCard, { generateMetadata } from "@/app/c/[token]/page";
-import { SHARE_IMAGE_IMMUTABLE, SHARE_OG_DIR, SHARE_OG_FONTS, drawnOnce, fontMetrics, shareCardImage } from "@/components/share-og";
+import { SHARE_IMAGE_IMMUTABLE, SHARE_OG_DIR, SHARE_OG_FONTS, ShareOgCard, drawnOnce, fontMetrics, shareCardImage, shareOgAssets, type ShareOgAssets } from "@/components/share-og";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import { EXAMPLE_SHARE_LINKS, SHARE_BACKGROUNDS, shareCardOf, type ShareCardData } from "@/lib/live-share";
+import { exampleCard } from "@/lib/share-example";
 import { SHARE_RENDER_VERSION } from "@/lib/share-render-version";
 import { SHARE_SECRET_ENV, payloadOf, signShareToken } from "@/lib/share-token";
 
@@ -56,6 +58,16 @@ function jpegSize(bytes: Buffer): [number, number] | null {
     at += 2 + bytes.readUInt16BE(at + 2);
   }
   return null;
+}
+
+/** "my", "I", "I’ve", "I'm": the first person, in any case. */
+const FIRST_PERSON = /\bmy\b|\bI\b|\bI’|\bI'/i;
+
+/** Every string the link's renderer sets on a card — its tree's text, between the tags (the plate is an attribute, a data: URL). */
+async function drawnWords(shown: ShareCardData, unit: "usd" | "sol", assets: ShareOgAssets): Promise<string[]> {
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const html = renderToStaticMarkup(createElement(ShareOgCard, { card: shown, background: "grid", unit, assets }));
+  return [...html.matchAll(/>([^<>]+)</g)].map((match) => match[1]!.replaceAll("&amp;", "&").replaceAll("&#x27;", "'").replaceAll("&quot;", '"'));
 }
 
 beforeEach(() => vi.stubEnv(SHARE_SECRET_ENV, SECRET));
@@ -105,6 +117,34 @@ describe("the picture", () => {
         expect(await pngSize(response), `${name} ${background}`).toEqual([1200, 630]);
       }
     }
+  });
+
+  /**
+   * "SaverFi’s Vault", NEVER "My pension" (review finding S1; owner, 10-23: 'usa
+   * "SaverFi's Vault"'): /api/share signs a card for any pension key, with no
+   * proof whose it is, so what this renderer draws for a link says nothing in
+   * the first person. Read off the tree Satori draws: every string it sets.
+   */
+  it("a link's picture is titled “SaverFi’s Vault” and says no “my” or “I” — saved, nothing yet, paused, both units", async () => {
+    const assets = await shareOgAssets();
+    for (const [name, [shown, unit]] of Object.entries(EVERY_CARD)) {
+      for (const each of [unit, unit === "usd" ? "sol" : "usd"] as const) {
+        const words = await drawnWords(shown, each, assets);
+        expect(words, `${name} ${each}`).toContain("SaverFi’s Vault");
+        expect(words, `${name} ${each}`).not.toContain(SHARE_COPY.card.titleSaved);
+        expect(words.join("\n"), `${name} ${each}`).not.toMatch(FIRST_PERSON);
+      }
+    }
+    const zero = await drawnWords(EVERY_CARD.zero![0], "usd", assets);
+    expect(zero).toEqual(expect.arrayContaining(["SaverFi’s Vault", "of trading gains,", "put aside for later."]));
+    expect(await drawnWords(card(0n, { paused: true }), "usd", assets)).toEqual(expect.arrayContaining(["SaverFi’s Vault", "of trading gains,", "paused for now."]));
+  });
+
+  it("the sample's picture keeps “Example pension” and its pill — the link's title is not on it", async () => {
+    const words = await drawnWords(exampleCard(), "usd", await shareOgAssets());
+    expect(words).toEqual(expect.arrayContaining([SHARE_COPY.example.card.titleSaved, SHARE_COPY.example.mark]));
+    expect(words).not.toContain("SaverFi’s Vault");
+    expect(words.join("\n")).not.toMatch(FIRST_PERSON);
   });
 
   it("is named by a version of what draws it, so a redrawn card gets a new address (scripts/check-share-render.mts, run before every build)", () => {
@@ -190,9 +230,9 @@ describe("/c/<token>", () => {
 
   it("tells a crawler the card: its picture as og:image and a large Twitter card, noindex, its links followed — nothing of anyone's", async () => {
     const metadata = await generateMetadata(params(token));
-    const image = { url: `/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`, width: 1200, height: 630, type: "image/png", alt: "A SaverFi pension: $2,073.42 saved" };
+    const image = { url: `/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`, width: 1200, height: 630, type: "image/png", alt: "SaverFi’s Vault: $2,073.42 saved" };
     expect(metadata).toMatchObject({
-      title: "$2,073.42 saved for a pension — SaverFi",
+      title: "SaverFi’s Vault: $2,073.42 saved",
       robots: { index: false, follow: true },
       openGraph: { images: [image], url: `/c/${token}`, siteName: "SaverFi" },
       twitter: { card: "summary_large_image", images: [image] },
@@ -209,6 +249,34 @@ describe("/c/<token>", () => {
     expect(html).toContain("Read from Solana by SaverFi on Sep 16, 2026.");
     expect(html).toContain(`href="/">${SHARE_COPY.page.start}<`);
     expect(html).toContain(SHARE_COPY.page.docs);
+  });
+
+  /**
+   * IN THE THIRD PERSON, TITLED LIKE ITS CARD (review finding S1; owner, 10-23:
+   * 'usa "SaverFi's Vault"'): whoever posts a link may not be whose pension it
+   * is, so neither the headline, the description, the picture's alt nor the
+   * page around it says "my" or "I" — saved, nothing yet, or paused.
+   */
+  it("says “SaverFi’s Vault” and nothing in the first person, in every state — headline, description, alt and body", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const STATES: Record<string, [ShareCardData, string]> = {
+      saved: [shown, "SaverFi’s Vault: $2,073.42 saved"],
+      zero: [card(0n), "SaverFi’s Vault: 20% of trading gains, put aside for later"],
+      zeroPaused: [card(0n, { paused: true }), "SaverFi’s Vault: 20% of trading gains, paused for now"],
+      zeroVolume: [card(0n, { mode: "volume", rate: "2%" }), "SaverFi’s Vault: 2% of every buy and sell, put aside for later"],
+    };
+    for (const [name, [state, headline]] of Object.entries(STATES)) {
+      const signed = signShareToken(payloadOf(state, "grid", "usd"), KEY);
+      const metadata = await generateMetadata(params(signed));
+      const og = metadata.openGraph as { title: string; description: string; images: { alt: string }[] };
+      const tw = metadata.twitter as { title: string; description: string; images: { alt: string }[] };
+      expect([metadata.title, og.title, tw.title, og.images[0]!.alt, tw.images[0]!.alt], name).toEqual([headline, headline, headline, headline, headline]);
+      const html = renderToStaticMarkup(await SharedCard(params(signed)));
+      expect(html, name).toContain(`alt="${headline}"`);
+      // What a reader sees: the text between the tags (a token in an attribute is base64url, and may hold an "I").
+      const body = html.replace(/<[^>]*>/g, "\n");
+      for (const said of [headline, String(metadata.description), og.description, tw.description, body]) expect(said, name).not.toMatch(FIRST_PERSON);
+    }
   });
 
   it("a token that does not verify is not found", async () => {

@@ -19,9 +19,10 @@
  *     token's card: its day becomes the date), lib/format.ts (that date, and
  *     the sample's figures), lib/share-example.ts (which figures the sample's
  *     card takes), every font and plate in assets/share-og;
- *   * the words the card prints (SHARE_COPY.card, the example's card and its
- *     mark — not the dialog's own lines), a sentence with a slot hashed with
- *     "§" in it;
+ *   * the words the card prints (SHARE_COPY.card; the link's own title and
+ *     rule words, SHARE_COPY.page.card — "SaverFi’s Vault", owner 10-23; the
+ *     example's card and its mark — not the dialog's own lines), a sentence
+ *     with a slot hashed with "§" in it;
  *   * the sample's card itself, as /c/example draws it: so a re-seeded sample
  *     is a new version, wherever in src/mocks its figures live.
  * share-og.test.ts asks the same through drawnVersion().
@@ -65,7 +66,7 @@ export function drawnVersion(): string {
     hash.update(readFileSync(join(PACKAGE, file)));
     hash.update("\0");
   }
-  const printed = { card: SHARE_COPY.card, example: { card: SHARE_COPY.example.card, mark: SHARE_COPY.example.mark } };
+  const printed = { card: SHARE_COPY.card, link: SHARE_COPY.page.card, example: { card: SHARE_COPY.example.card, mark: SHARE_COPY.example.mark } };
   hash.update(JSON.stringify(printed, (_key, value: unknown) => (typeof value === "function" ? (value as (slot: string) => string)("§") : value)));
   hash.update("\0");
   hash.update(JSON.stringify(exampleCard()));

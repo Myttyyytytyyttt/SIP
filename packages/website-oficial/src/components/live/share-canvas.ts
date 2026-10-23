@@ -52,7 +52,11 @@
  * the server (components/share-og.tsx), so every position, size and ink is
  * SHARE_LAYOUT's and SHARE_INK's (lib/live-share.ts), and the zero card's
  * lines are measured once (ZERO_LINE_WIDTHS) rather than here: the two pick
- * the same step for the same figures.
+ * the same step for the same figures and words. ONE TITLE DIFFERS (review
+ * finding S1; owner, 10-23): this canvas is the owner's own image, made from
+ * his connected Live page, so it says "My pension"; the server's preview of a
+ * signed link — which anybody can ask for, for any pension — says "SaverFi’s
+ * Vault" (live-share.ts ShareVoice).
  *
  * EVERY LINE IS SET GLYPH BY GLYPH, ITS TRACKING BY HAND (review, 10-22).
  * The figure's -0.02 em and the title's tracking were ctx.letterSpacing, which
@@ -81,6 +85,7 @@ import {
   rowBaseline,
   shareHero,
   shareRows,
+  shareTitle,
   titleBaseline,
   zeroBeside,
   zeroLines,
@@ -352,13 +357,11 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   line(ctx, card.asOf, dayRight - widthOf(ctx, card.asOf), lockup.dayBaseline);
 
   const hero = shareHero(card, options.unit);
-  // A pension's own words, or — on the sample's card — the example's, which are nobody's.
-  const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
 
-  // 2. The title: the figure's label.
+  // 2. The title: the figure's label — in the owner's own voice, "My pension" (the link's preview says "SaverFi’s Vault": live-share.ts ShareVoice), or on the sample's card the example's, which is nobody's.
   font(ctx, 500, L.title.size, fonts.sans);
   ctx.fillStyle = C.fg;
-  const title = hero === null ? own.titleZero : own.titleSaved;
+  const title = shareTitle(card, hero, "own");
   const titleWidth = line(ctx, title, PAD, titleY, L.title.tracking);
   if (hero !== null && card.since !== null) {
     runs(ctx, fonts, PAD + titleWidth + L.title.sinceGap, titleY, SHARE_COPY.card.since(card.since), L.title.sinceSize, 400, C.fg55);
@@ -372,8 +375,8 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
 
   if (hero === null) {
     // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it — and, paused, no claim that anything is put aside.
-    const [line1, line2] = zeroLines(card);
-    const fit = fitHero([card.rate], null, zeroBeside(card), measure);
+    const [line1, line2] = zeroLines(card, "own");
+    const fit = fitHero([card.rate], null, zeroBeside(card, "own"), measure);
     const { top, height: h } = blockBox(fit.size, mid);
     block(ctx, scale, PAD, top, fit.blockWidth, h);
     font(ctx, 600, fit.size, fonts.mono);

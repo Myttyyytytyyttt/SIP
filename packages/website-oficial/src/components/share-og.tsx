@@ -3,11 +3,23 @@
  * WhatsApp…) shows under a post of /c/<token> (owner, 10-22: "Enlace con vista
  * previa"). The same card the dialog draws in the browser (live/share-canvas.ts),
  * redrawn with next/og (Satori) at 1200×630 from the same SHARE_LAYOUT and
- * SHARE_INK (lib/live-share.ts), so the link's picture is the dialog's picture.
+ * SHARE_INK (lib/live-share.ts), so the link's picture is the dialog's picture
+ * — but for its title, which is the third person's (below).
  *
  * ONLY FROM A TOKEN THE SERVER SIGNED. The routes that call this
  * (app/c/[token]/card.png, app/c/example/…) draw a card that lib/share-token.ts
  * verified, or the sample's own; nothing a URL merely says.
+ *
+ * IN THE THIRD PERSON: "SaverFi’s Vault", NOT "My pension" (review finding S1;
+ * owner, 10-23: 'usa "SaverFi's Vault"'). Signed is not owned: /api/share signs
+ * a card for any pension key it is handed, with no proof that whoever asks is
+ * its owner, so a link could post somebody else's pension under "My pension".
+ * This renderer draws only links, so it speaks in the link's voice (live-share.ts
+ * ShareVoice): the title is "SaverFi’s Vault", a zero card's rule is "of
+ * trading gains", and nothing on the card says "my" or "I". The dialog's own
+ * image — the canvas, from the owner's connected Live page — keeps "My
+ * pension", so the two differ in that title (and the dialog's hint says so
+ * before Post on X). The sample's link is "Example pension", as before.
  *
  * THE BACKGROUND IS THE PLATE'S FRAME 0, like the dialog's still: a 1200×630
  * copy of each film's first frame (assets/share-og/plates, made by
@@ -70,6 +82,7 @@ import {
   rowBaseline,
   shareHero,
   shareRows,
+  shareTitle,
   titleBaseline,
   zeroBeside,
   zeroLines,
@@ -359,8 +372,8 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
   const metrics = assets.sans;
   const { lockup, title: titleLayout, zero, footer } = L;
   const hero = shareHero(card, unit);
-  const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
-  const title = hero === null ? own.titleZero : own.titleSaved;
+  // The link's voice: "SaverFi’s Vault", never "My pension" (S1; owner, 10-23) — the sample's is "Example pension".
+  const title = shareTitle(card, hero, "link");
   const rows = shareRows(card);
   // Where the group stands: over fewer rows, lower (live-share.ts groupShift) — the canvas's rule.
   const mid = bandMid(rows.length);
@@ -370,8 +383,8 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
 
   let band: ReactNode;
   if (hero === null) {
-    const [line1, line2] = zeroLines(card);
-    const fit = fitHero([card.rate], null, zeroBeside(card), monoWidth);
+    const [line1, line2] = zeroLines(card, "link");
+    const fit = fitHero([card.rate], null, zeroBeside(card, "link"), monoWidth);
     const { top, height } = blockBox(fit.size, mid);
     const x = PAD + fit.blockWidth + zero.gap;
     band = (

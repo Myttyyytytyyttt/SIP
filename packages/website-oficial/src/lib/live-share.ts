@@ -19,6 +19,18 @@
  * a URL merely states — that would let anybody mint a "SaverFi" card with any
  * number on our own domain.
  *
+ * AND THE LINK'S CARD IS NOBODY'S IN PARTICULAR (review finding S1; owner,
+ * 10-23: 'usa "SaverFi's Vault"'). /api/share signs a card for any pension key
+ * it is handed, with no proof that the person asking owns it — so a link could
+ * put somebody else's pension under the first-person "My pension". The words a
+ * card speaks in are therefore chosen by where it is drawn (ShareVoice): the
+ * dialog's canvas, made in the owner's browser from his own connected Live
+ * page, is "own" and says "My pension"; the server's preview of a /c/<token>
+ * link is "link" and says "SaverFi’s Vault", in the third person, with no "my"
+ * or "I" anywhere on it (SHARE_COPY.page.card). Same figures, same layout; the
+ * zero card's narrower line may let the link's rate take a larger step. The
+ * sample's card is "Example pension" in both voices.
+ *
  * NO ADDRESS, WALLET OR NAME (owner, 10-22): ShareCardData has no field for a
  * vault, a wallet, an owner or a handle, so no layout can print one. And the
  * link carries none either: its token holds what the card prints and nothing
@@ -258,8 +270,9 @@ export interface ShareRow {
  * "Rule … · paused" when it is paused, which is not saving; a streak only when
  * it is one (two days or more); the basket when it is known. A card with
  * nothing saved has its rule as its hero, so its rows are the basket alone —
- * and no "Saved so far · Nothing yet" (owner, 10-22): that is what its title,
- * "Building my pension", already says.
+ * and no "Saved so far · Nothing yet" (owner, 10-22): its title ("Building my
+ * pension", or on a link "SaverFi’s Vault") and the rule beside its rate say it.
+ * No row says "my": the rows are the same in both voices (ShareVoice).
  */
 export function shareRows(card: ShareCardData): readonly ShareRow[] {
   const rows: ShareRow[] = [];
@@ -353,15 +366,39 @@ export const ZERO_LINE_WIDTHS: Readonly<Record<string, number>> = {
   "paused for now.": 236,
 };
 
+/**
+ * WHOSE VOICE A CARD SPEAKS IN, BY WHERE IT IS DRAWN (review finding S1;
+ * owner, 10-23: 'usa "SaverFi's Vault"'):
+ *   "own"   the dialog's canvas (live/share-canvas.ts) — the PNG, the copy and
+ *           the MP4, made in the owner's browser from his connected Live page:
+ *           "My pension", "of my trading gains".
+ *   "link"  the server's preview of a signed /c/<token> link
+ *           (components/share-og.tsx): /api/share proves no ownership, so it is
+ *           "SaverFi’s Vault", "of trading gains" — no "my", no "I".
+ * The sample's card is "Example pension" in both: it was nobody's already.
+ */
+export type ShareVoice = "own" | "link";
+
+/** The words that differ by voice: the title over the figure (or over a zero card's rate), and what the rule measures beside that rate. */
+export function cardVoice(card: ShareCardData, voice: ShareVoice): { readonly titleSaved: string; readonly titleZero: string; readonly zeroMeasure: Readonly<Record<"profit" | "volume", string>> } {
+  if (card.example) return SHARE_COPY.example.card;
+  return voice === "link" ? SHARE_COPY.page.card : SHARE_COPY.card;
+}
+
+/** The title a card prints: over its figure, or — with nothing saved, no hero — over its rate. */
+export const shareTitle = (card: ShareCardData, hero: ShareHero | null, voice: ShareVoice): string => {
+  const words = cardVoice(card, voice);
+  return hero === null ? words.titleZero : words.titleSaved;
+};
+
 /** The two lines beside a zero card's rate: what the rule measures, and whether anything is put aside. */
-export function zeroLines(card: ShareCardData): readonly [string, string] {
-  const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
-  return [own.zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
+export function zeroLines(card: ShareCardData, voice: ShareVoice): readonly [string, string] {
+  return [cardVoice(card, voice).zeroMeasure[card.mode], card.paused ? SHARE_COPY.card.zeroPaused : SHARE_COPY.card.zeroAside];
 }
 
 /** What stands beside a zero card's block: the gap and the longer line (ZERO_LINE_WIDTHS). */
-export function zeroBeside(card: ShareCardData): number {
-  const widths = zeroLines(card).map((line) => ZERO_LINE_WIDTHS[line]);
+export function zeroBeside(card: ShareCardData, voice: ShareVoice): number {
+  const widths = zeroLines(card, voice).map((line) => ZERO_LINE_WIDTHS[line]);
   if (widths.some((width) => width === undefined)) throw new Error("a zero card's line has no measured width (ZERO_LINE_WIDTHS)");
   return SHARE_LAYOUT.zero.gap + Math.max(...(widths as number[]));
 }

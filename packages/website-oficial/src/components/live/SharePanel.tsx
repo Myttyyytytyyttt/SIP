@@ -36,8 +36,11 @@
  * dialog asks the server once, on open (lib/share-link-client.ts), for the card
  * as the server reads it from the chain and a signed link per background and
  * unit: saverfi.cash/c/<token>, whose preview on X is this card — nothing to
- * paste. The dialog ADOPTS the server's card, so the preview, Copy, Download
- * and the link all show the same figures. While it asks, Post on X waits,
+ * paste — titled "SaverFi’s Vault" where this one says "My pension" (review
+ * finding S1; owner, 10-23: the server signs a card for any pension key, so
+ * its picture speaks in the third person), which the hint under the actions
+ * says before the click. The dialog ADOPTS the server's card, so the preview,
+ * Copy, Download and the link all show the same figures. While it asks, Post on X waits,
  * disabled, a few seconds at most (SHARE_LINK_WAIT_MS); refused, off, or too
  * slow, Post on X shares the site and the image is pasted, as before. The
  * sample's dialog needs no asking: its links are fixed pages of the sample's
@@ -611,7 +614,8 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
     if (caps.copy) copy("copiedForX");
     else say("noCopyForX");
   }
-  const xHint = linkPath !== null ? SHARE_COPY.xHintLinked : linked.status === "pending" ? SHARE_COPY.xHintPending : caps.copy ? SHARE_COPY.xHint : SHARE_COPY.xHintNoCopy;
+  // A pension's link shows its card as "SaverFi’s Vault" (S1; owner, 10-23); the sample's (/c/example) shows this very card.
+  const xHint = linkPath !== null ? (link?.kind === "example" ? SHARE_COPY.example.xHintLinked : SHARE_COPY.xHintLinked) : linked.status === "pending" ? SHARE_COPY.xHintPending : caps.copy ? SHARE_COPY.xHint : SHARE_COPY.xHintNoCopy;
 
   const drawFailed = main === "failed" || wordsDrawn === "failed";
 
