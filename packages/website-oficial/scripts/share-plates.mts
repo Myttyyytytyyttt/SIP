@@ -19,10 +19,11 @@
  *   * makes the link preview's frame 0 (assets/share-og/plates/<name>.jpg,
  *     1200×630, JPEG at -q:v 2 in 4:4:4: 54–56 dB from the PNG at ~40 KB), which
  *     the server draws the card on (components/share-og.tsx) — then
- *     SHARE_RENDER_VERSION changes, and share-og.test.ts says to what;
+ *     SHARE_RENDER_VERSION changes, and `pnpm run check:render` says to what;
  *   * reads the MP4 back (src/lib/share-mp4.ts) for its frame count and codec;
  *   * rewrites its plateFiles(...) line with the four versions.
- * Then `pnpm run check:plates` says whether they can ship.
+ * Then `pnpm run check:plates` says whether they can ship, and
+ * `pnpm run check:render` the link preview's new version.
  */
 
 import { spawnSync } from "node:child_process";
@@ -94,4 +95,4 @@ for (const name of NAMES) {
 }
 
 writeFileSync(PLATES_TS, source);
-console.log("\nNext: pnpm run check:plates");
+console.log("\nNext: pnpm run check:plates && pnpm run check:render");

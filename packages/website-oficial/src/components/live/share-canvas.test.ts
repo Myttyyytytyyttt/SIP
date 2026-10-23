@@ -3,35 +3,54 @@
 // the sample's card and on no other. The words a card paints, read off a context
 // that records every call: node has no canvas, and what is checked here is WHAT
 // is painted and where, not how it looks (the PNGs and MP4s themselves are
-// looked at in Chrome, WebKit and Firefox).
+// looked at in Chrome, WebKit and Firefox). The card is set glyph by glyph
+// (share-canvas.ts says why), so the recorder joins each glyph to the one it
+// follows on its line, and a test reads whole lines.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ROWS_Y, TITLE_Y, drawCardWords, drawShareCard } from "@/components/live/share-canvas";
+import { drawCardWords, drawShareCard } from "@/components/live/share-canvas";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
-import { SHARE_CARD, exampleShareCardOf, shareCardOf, type ShareCardData } from "@/lib/live-share";
+import { SHARE_CARD, SHARE_LAYOUT, bandMid, exampleShareCardOf, rowBaseline, shareCardOf, shareRows, titleBaseline, type ShareCardData } from "@/lib/live-share";
 
 import { liveDashboard, liveSnapshot } from "../../../test/fixtures/live-dashboard";
 
 interface Painted {
-  readonly text: string;
+  text: string;
   readonly x: number;
   readonly y: number;
   readonly align: string;
+  /** Where its last glyph's advance ends. */
+  end: number;
+  /** Each glyph's x, in order. */
+  readonly glyphs: number[];
 }
 
-/** A 2D context that does nothing but remember what was painted on it. Text is 10 px a character, 10 px tall. */
-function recording(): { ctx: CanvasRenderingContext2D; painted: Painted[]; calls: { name: string; args: unknown[] }[] } {
+/** A glyph placed within this of where the last one's advance ended, on the same line, is the same line — the tracking is at most ~2 px. */
+const JOIN_PX = 3;
+
+/**
+ * A 2D context that does nothing but remember what was painted on it. Text is
+ * 10 px a character, 10 px tall. Glyphs drawn one after another on one line —
+ * each where the last one's advance ended, give or take its tracking — are
+ * joined into the line they make.
+ */
+function recording(initial: Record<string, unknown> = {}): { ctx: CanvasRenderingContext2D; painted: Painted[]; calls: { name: string; args: unknown[] }[] } {
   const painted: Painted[] = [];
   const calls: { name: string; args: unknown[] }[] = [];
-  const state: Record<string, unknown> = { textAlign: "left" };
+  const state: Record<string, unknown> = { textAlign: "left", ...initial };
   const gradient = { addColorStop: () => undefined };
   const ctx = new Proxy(state, {
     get(target, prop: string) {
       if (prop === "fillText")
         return (text: string, x: number, y: number) => {
-          painted.push({ text, x, y, align: String(target.textAlign) });
+          const last = painted.at(-1);
+          if (last !== undefined && last.y === y && Math.abs(x - last.end) <= JOIN_PX) {
+            last.text += text;
+            last.end = x + text.length * 10;
+            last.glyphs.push(x);
+          } else painted.push({ text, x, y, align: String(target.textAlign), end: x + text.length * 10, glyphs: [x] });
           calls.push({ name: prop, args: [text, x, y] });
         };
       if (prop === "measureText") return (text: string) => ({ width: text.length * 10, actualBoundingBoxAscent: 10 });
@@ -138,7 +157,9 @@ describe("nothing around the figure", () => {
       for (const unit of UNITS) {
         const { ctx, painted } = recording();
         drawShareCard(ctx, card, { unit, scale: 1 }, FONTS, null);
-        const between = painted.filter((each) => each.y > TITLE_Y && each.y < ROWS_Y - 3 * 38);
+        // From the title's line to the first row's — or, with no row, the footer's.
+        const rows = shareRows(card).length;
+        const between = painted.filter((each) => each.y > titleBaseline(rows) && each.y < (rows === 0 ? SHARE_LAYOUT.footer.baseline : rowBaseline(0, rows)));
         const allowed =
           card.state === "saved"
             ? [card.usdText, card.usdCompact, card.solText, card.solCompact, "SOL"]
@@ -157,8 +178,8 @@ describe("the Example mark", () => {
       expect(words.length).toBeGreaterThan(10);
       expect(words).not.toContain(SHARE_COPY.example.mark);
       expect(words.join("\n")).not.toMatch(/example|nobody/i);
-      // The day keeps its corner.
-      expect(paintedOf(card).find((each) => each.text === card.asOf)).toMatchObject({ x: SHARE_CARD.width - 64, align: "right" });
+      // The day keeps its corner: it ends at the right padding.
+      expect(paintedOf(card).find((each) => each.text === card.asOf)?.end).toBe(SHARE_CARD.width - 64);
     }
   });
 
@@ -172,8 +193,7 @@ describe("the Example mark", () => {
       // In the header's line, at the right; the day stands to its left, never under it.
       expect(mark!.y).toBeLessThan(100);
       expect(mark!.x).toBeGreaterThan(SHARE_CARD.width / 2);
-      expect(day!.align).toBe("right");
-      expect(day!.x).toBeLessThan(mark!.x);
+      expect(day!.end).toBeLessThan(mark!.x);
       expect(painted.map((each) => each.text)).toContain(SHARE_COPY.example.card.titleSaved);
       // The sample's figure, in dollars, whichever unit was asked for.
       expect(painted.map((each) => each.text)).toContain(example.usdText);
@@ -218,5 +238,60 @@ describe("the example's own words", () => {
   it("leaves a pension's card in its own voice", () => {
     expect(paintedOf(liveCard(60_000_000n)).map((each) => each.text)).toContain(SHARE_COPY.card.titleSaved);
     expect(paintedOf(liveCard(0n)).map((each) => each.text)).toContain(SHARE_COPY.card.titleZero);
+  });
+});
+
+/**
+ * THE GROUP STANDS BY ITS ROWS (review, 10-22): a card with fewer rows under
+ * it — a new vault's, with no basket yet, has none — brings the title and the
+ * figure down, rather than leave its lower third empty. Both renderers place
+ * them by the same functions (live-share.ts groupShift).
+ */
+describe("where the title and the figure stand", () => {
+  it("over three rows, two, one or none: the title and the block's middle come down with each row missing", () => {
+    for (const [name, card] of Object.entries(EVERY_CARD)) {
+      const rows = shareRows(card).length;
+      const { ctx, painted, calls } = recording();
+      drawCardWords(ctx, card, { unit: "usd", scale: 1 }, FONTS);
+      const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
+      const title = painted.find((each) => each.text === own.titleSaved || each.text === own.titleZero);
+      expect(title?.y, name).toBe(titleBaseline(rows));
+      // The block — the rounded rectangle at the left padding (the sample's pill is the one at the right) — is centred on bandMid.
+      const rect = calls.find((call) => call.name === "roundRect" && call.args[0] === SHARE_LAYOUT.pad)!.args as number[];
+      expect(rect[1]! + rect[3]! / 2, name).toBe(bandMid(rows));
+    }
+  });
+
+  it("a zero card with no basket — no row at all — has its group in the middle, not its top half", () => {
+    const bare = { ...liveCard(0n), basket: [] };
+    expect(shareRows(bare)).toEqual([]);
+    expect(titleBaseline(0)).toBeGreaterThan(titleBaseline(3) + 50);
+    expect(bandMid(0)).toBeGreaterThan(bandMid(3) + 50);
+  });
+});
+
+/**
+ * THE TRACKING IS SET BY HAND (review, 10-22): WebKit's canvas has no
+ * letterSpacing, and the figure was set looser there, measured wider and could
+ * drop a step. Every glyph is placed by its advance plus the tracking, so a
+ * canvas with letterSpacing and one without draw the same.
+ */
+describe("the tracking", () => {
+  it("each glyph of the figure stands its advance less 0.02 em after the last — with letterSpacing on the canvas or not", () => {
+    const card = liveCard(60_000_000n);
+    const drawn = [{}, { letterSpacing: "5px" }].map((initial) => {
+      const { ctx, painted } = recording(initial);
+      drawCardWords(ctx, card, { unit: "usd", scale: 1 }, FONTS);
+      // A canvas that has it is set to none: the tracking is the glyphs' places, never added twice.
+      if ("letterSpacing" in initial) expect((ctx as unknown as { letterSpacing: string }).letterSpacing).toBe("0px");
+      return painted;
+    });
+    expect(drawn[1]).toEqual(drawn[0]);
+    const figure = drawn[0]!.find((each) => each.text === card.usdText)!;
+    const steps = figure.glyphs.slice(1).map((x, i) => x - figure.glyphs[i]!);
+    // 10 px a glyph in this recorder, less 0.02 em of whatever step fitted.
+    expect(new Set(steps.map((step) => step.toFixed(6))).size).toBe(1);
+    expect(steps[0]).toBeLessThan(10);
+    expect(steps[0]).toBeGreaterThan(10 - 0.02 * 104 - 1e-9);
   });
 });

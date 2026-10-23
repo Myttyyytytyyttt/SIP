@@ -34,11 +34,14 @@
  * same step here as in the browser. The zero card's two lines are measured once
  * (ZERO_LINE_WIDTHS) for the same reason.
  *
- * WHAT DIFFERS, MEASURED (10-22, the dialog's PNG against this one, Chrome):
- * Satori does not kern, so a line of words runs a little longer than the
- * canvas sets it — the tagline 330 px where the dialog's is 323, "since" 4 px
- * further right of the title. Every baseline is within a pixel, the figure and
- * its block within a pixel, and the rest is two rasterisers' anti-aliasing.
+ * WHAT DIFFERS, MEASURED (review, 10-22: the dialog's PNG against this one,
+ * Chrome and WebKit, 30 cards). The canvas now sets every line glyph by glyph
+ * without kerning (share-canvas.ts), as Satori does: the tagline ends on the
+ * same pixel, "since" within 2 px, the day within 3, and the block and the
+ * figure within a pixel in both engines. What is left is inside a tracked
+ * title: Satori sets its glyphs a little tighter — "pension" 149 px wide where
+ * the canvas's is 153, so the sample's gap before it reads 20 px against 14.
+ * Every baseline is within a pixel; the rest is two rasterisers' anti-aliasing.
  *
  * next/og draws with Satori: every box with more than one child says
  * `display: flex`, and only inline styles exist.
@@ -58,6 +61,7 @@ import {
   SHARE_CARD,
   SHARE_INK as C,
   SHARE_LAYOUT as L,
+  bandMid,
   blockBox,
   fitHero,
   heroPadX,
@@ -66,6 +70,7 @@ import {
   rowBaseline,
   shareHero,
   shareRows,
+  titleBaseline,
   zeroBeside,
   zeroLines,
   type ShareBackground,
@@ -357,6 +362,8 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
   const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
   const title = hero === null ? own.titleZero : own.titleSaved;
   const rows = shareRows(card);
+  // Where the group stands: over fewer rows, lower (live-share.ts groupShift) — the canvas's rule.
+  const mid = bandMid(rows.length);
   const markWidth = (lockup.markHeight * MARK_W) / MARK_H;
   /** The figure centred on the block the canvas's way: half the digit's height under the middle. */
   const figureBaseline = (top: number, height: number, size: number): number => top + height / 2 + ((assets.monoDigitTop / metrics.unitsPerEm) * size) / 2;
@@ -365,20 +372,20 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
   if (hero === null) {
     const [line1, line2] = zeroLines(card);
     const fit = fitHero([card.rate], null, zeroBeside(card), monoWidth);
-    const { top, height } = blockBox(fit.size);
+    const { top, height } = blockBox(fit.size, mid);
     const x = PAD + fit.blockWidth + zero.gap;
     band = (
       <>
         <Block top={top} width={fit.blockWidth} height={height}>
           <Line runs={[{ text: fit.text, family: MONO, weight: 600, size: fit.size, color: C.ink, tracking: -0.02 * fit.size }]} baseline={figureBaseline(0, height, fit.size)} left={heroPadX(fit.size)} metrics={metrics} />
         </Block>
-        <Line runs={[{ text: line1, family: SANS, weight: 500, size: zero.size, color: C.fg, tracking: zero.tracking }]} baseline={L.band.mid + zero.line1} left={x} metrics={metrics} />
-        <Line runs={[{ text: line2, family: SANS, weight: 500, size: zero.size, color: C.fg55, tracking: zero.tracking }]} baseline={L.band.mid + zero.line2} left={x} metrics={metrics} />
+        <Line runs={[{ text: line1, family: SANS, weight: 500, size: zero.size, color: C.fg, tracking: zero.tracking }]} baseline={mid + zero.line1} left={x} metrics={metrics} />
+        <Line runs={[{ text: line2, family: SANS, weight: 500, size: zero.size, color: C.fg55, tracking: zero.tracking }]} baseline={mid + zero.line2} left={x} metrics={metrics} />
       </>
     );
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, monoWidth);
-    const { top, height } = blockBox(fit.size);
+    const { top, height } = blockBox(fit.size, mid);
     const baseline = figureBaseline(0, height, fit.size);
     const x = heroPadX(fit.size);
     band = (
@@ -411,7 +418,7 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
       )}
 
       {/* 2. The title: the figure's label, and the month beside it. */}
-      <Title title={title} since={hero === null ? null : card.since} metrics={metrics} />
+      <Title title={title} since={hero === null ? null : card.since} baseline={titleBaseline(rows.length)} metrics={metrics} />
 
       {/* 3. The figure on its block, and nothing under it. */}
       {band}
@@ -447,13 +454,13 @@ export function ShareOgCard({ card, background, unit, assets }: { readonly card:
  * title's width is Satori's to know, so the two sit in one row: the month is
  * pushed down to share the title's baseline.
  */
-function Title({ title, since, metrics }: { readonly title: string; readonly since: string | null; readonly metrics: FontMetrics }) {
+function Title({ title, since, baseline, metrics }: { readonly title: string; readonly since: string | null; readonly baseline: number; readonly metrics: FontMetrics }) {
   const { title: layout } = L;
   const runs: Run[] = [{ text: title, family: SANS, weight: 500, size: layout.size, color: C.fg, tracking: layout.tracking }, ...(since === null ? [] : runsOf(SHARE_COPY.card.since(since), layout.sinceSize, 400, C.fg55))];
   const offsets = runs.map((run) => baselineIn(run.size, metrics));
   const top = Math.max(...offsets);
   return (
-    <div style={{ position: "absolute", left: PAD, top: layout.baseline - top, display: "flex", flexDirection: "row", alignItems: "flex-start" }}>
+    <div style={{ position: "absolute", left: PAD, top: baseline - top, display: "flex", flexDirection: "row", alignItems: "flex-start" }}>
       {runs.map((run, index) => (
         <div key={index} style={{ display: "flex", marginTop: top - offsets[index]!, marginLeft: index === 1 ? layout.sinceGap : 0 }}>
           <Text run={run} />
@@ -465,6 +472,37 @@ function Title({ title, since, metrics }: { readonly title: string; readonly sin
 
 /** A card's image response cached for a year without asking again: its address carries the renderer's version, so a redrawn card has a new one. */
 export const SHARE_IMAGE_IMMUTABLE = "public, max-age=31536000, s-maxage=31536000, immutable";
+
+/**
+ * THE PICTURES THIS INSTANCE HAS DRAWN, by the card's address (review, 10-22).
+ * The CDN keeps a picture by its RAW URL, and one card has many: a character
+ * of its token or of "?v=" percent-encoded is another key to the CDN and the
+ * same request to the route. Without this, every such URL drew the card again
+ * (65–85 ms of Satori and resvg, measured on `next start`). Now the first draws
+ * it, and the rest of this instance's life it is a lookup — bounded, oldest
+ * out first, about 250 KB a card.
+ */
+const DRAWN_MAX = 64;
+const drawn = new Map<string, Promise<Uint8Array>>();
+
+/** A card's PNG bytes, drawn once per instance under `key` (its address); a failed draw is not kept. `draw` is next/og's response. */
+export function drawnOnce(key: string, draw: () => Promise<Response>): Promise<Uint8Array> {
+  const kept = drawn.get(key);
+  if (kept !== undefined) {
+    // Most recently asked for: to the back of the line.
+    drawn.delete(key);
+    drawn.set(key, kept);
+    return kept;
+  }
+  const bytes = draw().then(async (response) => {
+    if (!response.ok) throw new Error(`the card did not draw: ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  });
+  bytes.catch(() => drawn.delete(key));
+  drawn.set(key, bytes);
+  while (drawn.size > DRAWN_MAX) drawn.delete(drawn.keys().next().value!);
+  return bytes;
+}
 
 /**
  * ONE CARD AS A PNG RESPONSE, 1200×630. next/og would send "public, max-age=0,

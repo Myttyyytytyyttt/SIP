@@ -41,8 +41,11 @@
  * disabled, a few seconds at most (SHARE_LINK_WAIT_MS); refused, off, or too
  * slow, Post on X shares the site and the image is pasted, as before. The
  * sample's dialog needs no asking: its links are fixed pages of the sample's
- * own card (/c/example). The selected picture is asked for once as soon as its
- * link is known, so X's crawler finds it drawn.
+ * own card (/c/example). A Live card's picture is asked for once Post on X is
+ * about to be pressed — the pointer on it, its focus, the tap — so X's crawler
+ * finds it drawn; never on a background merely looked at, and never the
+ * sample's, drawn at build time (review, 10-22: the sample's dialog fetched
+ * 775 KB of pictures nobody saw, and a Live one a render per pick).
  *
  * THE VIDEO (owner, 10-22: "Vídeo corto MP4"), in its own row, offered only
  * where this browser can make one (share-video.ts videoCaps). Made on request,
@@ -53,7 +56,10 @@
  * the encode. A finished video is kept per background and unit, like the
  * pictures; one in flight is cancelled when the dialog closes, and when its
  * background or unit is changed under it. A video that cannot be made says so,
- * and the image's actions stay.
+ * and the image's actions stay. While a Live card's link is being asked for,
+ * Make video waits with Post on X (a few seconds at most): the server's card
+ * may differ from the page's (a streak it could not prove), and adopting it
+ * would drop a video made of the page's figures without a word (review, 10-22).
  *
  * WHAT POST ON X DOES IS SAID BEFORE THE CLICK (review, 10-22). X opens in
  * front, so a "paste it" said after the click lands in the tab left behind, and
@@ -71,7 +77,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from
 
 import { renderShareCard, renderShareWords } from "@/components/live/share-canvas";
 import { SharePreviewFrame } from "@/components/live/share-frame";
-import { makeShareVideo, videoCaps } from "@/components/live/share-video";
+import { PlateUnavailable, makeShareVideo, videoCaps } from "@/components/live/share-video";
 import { Button } from "@/components/ui/button";
 import { DialogFooter } from "@/components/ui/dialog";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -223,7 +229,8 @@ const drawCard = (card: ShareCardData, part: string): Promise<Blob> => {
 /** The words alone, for a unit: "usd". */
 const drawWords = (card: ShareCardData, unit: string): Promise<Blob> => (isUnit(unit) ? renderShareWords(card, unit) : Promise.reject(new Error(`no unit ${unit}`)));
 
-export type Video = { readonly status: "making" } | { readonly status: "ready"; readonly blob: Blob } | { readonly status: "failed" };
+/** A video made, being made, or failed — by the network (the plate did not arrive: try again) or by the browser. */
+export type Video = { readonly status: "making" } | { readonly status: "ready"; readonly blob: Blob } | { readonly status: "failed"; readonly network: boolean };
 
 /**
  * THE BAR OF THE VIDEO BEING MADE, MOVED BY HAND (measured 10-22). Its percent
@@ -298,10 +305,10 @@ function useShareVideos(card: ShareCardData) {
           making.current = null;
           set(key, { status: "ready", blob });
         },
-        () => {
+        (error: unknown) => {
           if (controller.signal.aborted) return;
           making.current = null;
-          set(key, { status: "failed" });
+          set(key, { status: "failed", network: error instanceof PlateUnavailable });
         },
       );
     },
@@ -371,6 +378,7 @@ export function VideoRow({
   progress,
   seconds,
   canShare,
+  waiting = false,
   onMake,
   onCancel,
   onDownload,
@@ -380,6 +388,8 @@ export function VideoRow({
   progress: ProgressSink;
   seconds: number;
   canShare: boolean;
+  /** The card's link is still being asked for: Make video waits with Post on X. */
+  waiting?: boolean;
   onMake: () => void;
   onCancel: () => void;
   onDownload: (blob: Blob) => void;
@@ -388,7 +398,8 @@ export function VideoRow({
   const titleId = useId();
   const status = video?.status ?? "idle";
   // Said to a screen reader once per state, not once per percent.
-  const said = status === "making" ? SHARE_COPY.video.makingSaid : video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : status === "failed" ? SHARE_COPY.video.failed : "";
+  const failedWords = video?.status === "failed" ? (video.network ? SHARE_COPY.video.failedNetwork : SHARE_COPY.video.failed) : "";
+  const said = status === "making" ? SHARE_COPY.video.makingSaid : video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : failedWords;
   return (
     <section aria-labelledby={titleId} data-share-video={status} className="flex flex-col gap-3 rounded-lg border p-3 sm:flex-row sm:items-center">
       <div className="flex min-w-0 flex-1 items-start gap-3">
@@ -403,7 +414,7 @@ export function VideoRow({
             <MakingBar sink={progress} />
           ) : (
             <p aria-hidden className={cn("text-xs", video?.status === "failed" ? "text-destructive" : video?.status === "ready" ? SAVED : "text-muted-foreground")}>
-              {video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : video?.status === "failed" ? SHARE_COPY.video.failed : SHARE_COPY.video.about(seconds)}
+              {video?.status === "ready" ? SHARE_COPY.video.ready(seconds, sizeLabel(video.blob.size)) : video?.status === "failed" ? failedWords : SHARE_COPY.video.about(seconds)}
             </p>
           )}
           <p role="status" aria-live="polite" className="sr-only">
@@ -431,7 +442,7 @@ export function VideoRow({
             </Button>
           </>
         ) : (
-          <Button type="button" variant="outline" onClick={onMake} data-share-action="video-make">
+          <Button type="button" variant="outline" onClick={onMake} disabled={waiting} data-share-action="video-make">
             {status === "failed" ? <RotateCcw aria-hidden /> : <Film aria-hidden />}
             {status === "failed" ? SHARE_COPY.video.retry : SHARE_COPY.video.make}
           </Button>
@@ -553,9 +564,10 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
   // The page this card's link names, for what is shown: its background and unit.
   const linkPath = linked.status === "ready" ? shareLinkFor(linked.links, background, unit) : null;
   const postUrl = linkPath === null ? SHARE_SITE : shareLinkUrl(linkPath);
-  useEffect(() => {
-    if (linkPath !== null) warmShareImage(shareImagePath(linkPath, SHARE_RENDER_VERSION));
-  }, [linkPath]);
+  /** The picture X will ask for, asked first — a Live card's, once Post on X is about to be pressed (the header says why). */
+  const warm = (): void => {
+    if (link?.kind === "live" && linkPath !== null) warmShareImage(shareImagePath(linkPath, SHARE_RENDER_VERSION));
+  };
 
   function copy(then: "copied" | "copiedForX" | "copiedLinked"): void {
     try {
@@ -591,6 +603,7 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
   // even while it is still being drawn: the clipboard takes the picture's promise (copy()).
   // With the card's own link there is nothing to paste: the image is copied as a bonus, and nothing is said where it cannot be.
   function postOnX(): void {
+    warm();
     if (linkPath !== null) {
       if (caps.copy) copy("copiedLinked");
       return;
@@ -668,6 +681,7 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
           progress={videos.progress}
           seconds={videoSeconds(plate)}
           canShare={caps.shareVideo}
+          waiting={linked.status === "pending"}
           onMake={() => videos.make(background, unit)}
           onCancel={() => videos.cancel()}
           onDownload={(blob) => saveFile(blob, shareFileName(card, "mp4"))}
@@ -720,7 +734,16 @@ export function SharePanel({ card: pageCard, link }: { card: ShareCardData; link
             </Button>
           ) : (
             <Button asChild className={caps.share ? OUTLINE_UNDER_SM : undefined}>
-              <a href={shareIntentUrl(text, postUrl)} target="_blank" rel="noopener noreferrer" onClick={postOnX} aria-describedby={ids.xHint} data-share-action="x">
+              <a
+                href={shareIntentUrl(text, postUrl)}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={postOnX}
+                onPointerEnter={warm}
+                onFocus={warm}
+                aria-describedby={ids.xHint}
+                data-share-action="x"
+              >
                 <XMark />
                 {SHARE_COPY.postOnX}
               </a>

@@ -158,8 +158,14 @@ export function ShareSavings({ card, link }: { card: ShareCardData; link?: Share
         </TooltipTrigger>
         <TooltipContent>{words.triggerTip}</TooltipContent>
       </Tooltip>
-      {/* A 16:9-ish image wants the width: 672 px, scrolling within the screen on a short one. */}
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
+      {/*
+        A 16:9-ish image wants the width: 672 px, scrolling within the screen on a short one.
+        auto-rows-max (review, 10-22): the dialog is a grid, and with its height capped its rows
+        shrank to fit — the preview's frame (overflow hidden) gave way, and the picker and the
+        video row were drawn over the card on a 390×664 phone and a 1366×768 laptop (Chrome,
+        WebKit). Rows at their content's height make it scroll instead.
+      */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] auto-rows-max overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{words.title}</DialogTitle>
           <DialogDescription>{words.description}</DialogDescription>

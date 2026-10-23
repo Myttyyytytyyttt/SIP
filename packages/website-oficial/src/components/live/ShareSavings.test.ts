@@ -225,9 +225,9 @@ describe("a dialog whose code did not load", () => {
 });
 
 describe("the video's row", () => {
-  const row = (video: Video | undefined, canShare = false): string =>
+  const row = (video: Video | undefined, canShare = false, waiting = false): string =>
     renderToStaticMarkup(
-      createElement(VideoRow, { video, progress: { percent: 0, show: null }, seconds: 12, canShare, onMake: () => undefined, onCancel: () => undefined, onDownload: () => undefined, onShare: () => undefined }),
+      createElement(VideoRow, { video, progress: { percent: 0, show: null }, seconds: 12, canShare, waiting, onMake: () => undefined, onCancel: () => undefined, onDownload: () => undefined, onShare: () => undefined }),
     );
   const rowActions = (html: string): string[] => [...html.matchAll(/data-share-action="([a-z-]+)"/g)].map((match) => match[1]!);
 
@@ -253,10 +253,22 @@ describe("the video's row", () => {
   });
 
   it("failed: said in words, and a retry — the image's actions are elsewhere and stay", () => {
-    const html = row({ status: "failed" });
+    const html = row({ status: "failed", network: false });
     expect(html).toContain(SHARE_COPY.video.failed);
     expect(rowActions(html)).toEqual(["video-make"]);
     expect(html).toContain(SHARE_COPY.video.retry);
+  });
+
+  it("failed because the plate did not download: the network is named, not the browser (review, 10-22)", () => {
+    const html = row({ status: "failed", network: true });
+    expect(html).toContain(SHARE_COPY.video.failedNetwork);
+    expect(html).not.toContain(SHARE_COPY.video.failed);
+    expect(rowActions(html)).toEqual(["video-make"]);
+  });
+
+  it("while the card's link is asked for, Make video waits — the server's card may not be the page's (review, 10-22)", () => {
+    expect(row(undefined, false, true)).toMatch(/<button[^>]*disabled=""[^>]*data-share-action="video-make"/);
+    expect(row(undefined)).not.toMatch(/<button[^>]*disabled=""[^>]*data-share-action="video-make"/);
   });
 });
 

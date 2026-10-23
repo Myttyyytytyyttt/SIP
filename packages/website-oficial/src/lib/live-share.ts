@@ -306,12 +306,15 @@ export const SHARE_INK = {
  * The lockup at the top — the S and the name on the left, the day on the right,
  * and on the sample the "Example" pill in the corner with the day beside it.
  * The title and the figure are one group — the title is the figure's label
- * now — centred between the lockup (bottom at 86) and the tallest stack of rows
- * (three, their top at ~443): the title's baseline at 186, the block's middle
- * at 300. A smaller step shrinks the block about that middle, so nothing else
- * moves. The rows are anchored to the footer: the last one's baseline is
- * always 534. The footer's right side is left empty on purpose — a referral
- * link goes there later.
+ * now — centred between the lockup (bottom at 86) and what stands under it.
+ * Under three rows (their top at ~443) the title's baseline is at 186 and the
+ * block's middle at 300; with fewer, the group comes down by half the room the
+ * missing rows leave (groupShift), and with none it is centred between the
+ * lockup and the footer's rule (review, 10-22: a new vault's card, with no
+ * row at all, had its lower third empty). A smaller step shrinks the block
+ * about its middle, so nothing else moves. The rows are anchored to the
+ * footer: the last one's baseline is always 534. The footer's right side is
+ * left empty on purpose — a referral link goes there later.
  */
 export const SHARE_LAYOUT = {
   pad: 64,
@@ -327,19 +330,20 @@ export const SHARE_LAYOUT = {
   band: { mid: 300, radius: 18, height: 1.25, glowBlur: 28 },
   /** A card with nothing saved: the rate on the block, and two lines beside it — the first 6 above the middle, the second 34 below. */
   zero: { size: 32, tracking: -0.5, gap: 28, line1: -6, line2: 34 },
-  rows: { last: 534, step: 38, size: 21, valueX: 150 },
+  /** `cap`: the top of a row's capitals above its baseline (Geist's 0.71 em at 21 px), where the stack of rows begins. */
+  rows: { last: 534, step: 38, size: 21, valueX: 150, cap: 15, most: 3 },
   footer: { ruleY: 562, baseline: 594, size: 19, gap: 20 },
 } as const;
 
 /**
  * THE ZERO CARD'S TWO LINES, MEASURED: Geist 500 at 32 px, -0.5 px tracking,
- * the larger of two measures (10-22), rounded up — Chrome's canvas, which
- * kerns ("of every buy and sell," 304.7 px), and the font's own advances,
- * which is how the preview sets them (Satori does not kern: 311). Pinned
- * rather than measured at draw time so the browser and the preview choose the
- * SAME step for the rate (fitHero), and the larger so the lines end inside the
- * plates' still zone in both. live-share.test.ts fails when a line is added or
- * reworded without its width here.
+ * rounded up — the font's own advances, which is how both renderers set a line
+ * now (Satori does not kern, and the canvas is set glyph by glyph since the
+ * review of 10-22: "of every buy and sell," 311 in each). Pinned rather than
+ * measured at draw time so the browser and the preview choose the SAME step
+ * for the rate (fitHero), and so the lines end inside the plates' still zone
+ * in both. live-share.test.ts fails when a line is added or reworded without
+ * its width here.
  */
 export const ZERO_LINE_WIDTHS: Readonly<Record<string, number>> = {
   "of my trading gains,": 290,
@@ -362,14 +366,32 @@ export function zeroBeside(card: ShareCardData): number {
   return SHARE_LAYOUT.zero.gap + Math.max(...(widths as number[]));
 }
 
-/** The block's height and top at a step: 1.25 × the figure, centred on the band's middle. */
-export const blockBox = (size: number): { readonly top: number; readonly height: number } => {
-  const height = Math.round(size * SHARE_LAYOUT.band.height);
-  return { top: SHARE_LAYOUT.band.mid - height / 2, height };
-};
-
 /** Each row's baseline: the last one's is always SHARE_LAYOUT.rows.last. */
 export const rowBaseline = (index: number, count: number): number => SHARE_LAYOUT.rows.last - SHARE_LAYOUT.rows.step * (count - 1 - index);
+
+/** Where what stands under the group begins: the first row's capitals, or with no row, the footer's rule. */
+const underTop = (rows: number): number => (rows === 0 ? SHARE_LAYOUT.footer.ruleY : rowBaseline(0, rows) - SHARE_LAYOUT.rows.cap);
+
+/**
+ * HOW FAR THE TITLE AND THE BLOCK COME DOWN under fewer than three rows: half
+ * the room the missing rows leave, so the group stays centred between the
+ * lockup and what is under it — 0 under three rows, 19 under two, 38 under
+ * one, 60 under none. One function for both renderers, so the link's preview
+ * moves with the dialog's picture.
+ */
+export const groupShift = (rows: number): number => Math.round((underTop(Math.min(rows, SHARE_LAYOUT.rows.most)) - underTop(SHARE_LAYOUT.rows.most)) / 2);
+
+/** The title's baseline over `rows` rows. */
+export const titleBaseline = (rows: number): number => SHARE_LAYOUT.title.baseline + groupShift(rows);
+
+/** The block's middle over `rows` rows: the figure, or the rate and the two lines beside it, are centred on it. */
+export const bandMid = (rows: number): number => SHARE_LAYOUT.band.mid + groupShift(rows);
+
+/** The block's height and top at a step: 1.25 × the figure, centred on the band's middle (bandMid). */
+export const blockBox = (size: number, mid: number): { readonly top: number; readonly height: number } => {
+  const height = Math.round(size * SHARE_LAYOUT.band.height);
+  return { top: mid - height / 2, height };
+};
 
 // ── the hero's fit ───────────────────────────────────────────────────────────
 

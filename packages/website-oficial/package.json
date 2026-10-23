@@ -8,7 +8,7 @@
   "description": "SaverFi. The savings dashboard: what each trade put aside, what it adds up to, and the wallet activity behind it. Mock data until the backend exists.",
   "scripts": {
     "dev": "next dev --port 3002",
-    "prebuild": "pnpm run check:csp && pnpm run check:clips && pnpm run check:plates && pnpm run check:idl",
+    "prebuild": "pnpm run check:csp && pnpm run check:clips && pnpm run check:plates && pnpm run check:render && pnpm run check:idl",
     "build": "next build",
     "start": "next start --port 3002",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -18,11 +18,12 @@
     "check:csp": "tsx scripts/check-csp.mts",
     "check:clips": "tsx scripts/check-clips.mts",
     "check:plates": "tsx scripts/check-share-plates.mts",
+    "check:render": "tsx scripts/check-share-render.mts",
     "check:public-ws": "tsx scripts/check-public-ws.mts",
     "check:idl": "pnpm --dir ../solana-core run check:idl",
     "docs:clip": "tsx scripts/docs-clip.mts",
     "share:plates": "tsx scripts/share-plates.mts",
-    "verify": "pnpm run check:csp && pnpm run check:clips && pnpm run check:plates && pnpm run check:idl && pnpm run typecheck && pnpm run test && next build"
+    "verify": "pnpm run check:csp && pnpm run check:clips && pnpm run check:plates && pnpm run check:render && pnpm run check:idl && pnpm run typecheck && pnpm run test && next build"
   },
   "dependencies": {
     "@privy-io/react-auth": "3.36.0",

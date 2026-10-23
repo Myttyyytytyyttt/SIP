@@ -1062,6 +1062,8 @@ export const SHARE_COPY = {
     share: "Share video",
     /** Said in words: a video that silently never comes reads as one that worked. */
     failed: "This browser could not make the video. The image still works.",
+    /** The plate did not download (offline, a flaky network): the network's fault, not the browser's — so Try again is worth a tap (review, 10-22). */
+    failedNetwork: "Couldn’t load the video’s background. Check your connection and try again.",
     retry: "Try again",
     shareFailed: "That did not share. Download the video instead.",
   },

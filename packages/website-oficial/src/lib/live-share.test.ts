@@ -18,7 +18,13 @@ import {
   SHARE_BACKGROUNDS,
   SHARE_SITE,
   SHARE_STREAK_CAP,
+  SHARE_LAYOUT,
   ZERO_LINE_WIDTHS,
+  bandMid,
+  blockBox,
+  groupShift,
+  rowBaseline,
+  titleBaseline,
   shareLinkFor,
   streakText,
   zeroBeside,
@@ -280,6 +286,33 @@ describe("the zero card's lines are measured once, for both renderers", () => {
           expect(zeroBeside(shown)).toBe(28 + Math.max(...zeroLines(shown).map((line) => ZERO_LINE_WIDTHS[line]!)));
         }
       }
+    }
+  });
+});
+
+/**
+ * THE GROUP STANDS BY ITS ROWS (review, 10-22): a new vault's card, with no
+ * basket signed, had no row at all and a 198 px empty band under its block —
+ * 31 % of the card. The title and the block come down by half the room the
+ * missing rows leave; under three rows nothing moves.
+ */
+describe("where the title and the block stand", () => {
+  it("under three rows, as designed; then 19 px lower for each row missing; with none, 60", () => {
+    expect([3, 2, 1, 0].map(groupShift)).toEqual([0, 19, 38, 60]);
+    expect([titleBaseline(3), bandMid(3)]).toEqual([SHARE_LAYOUT.title.baseline, SHARE_LAYOUT.band.mid]);
+    expect([titleBaseline(0), bandMid(0)]).toEqual([246, 360]);
+  });
+
+  it("the group is centred between the lockup and what is under it — the first row's capitals, or the footer's rule — within 10 px, at the largest step", () => {
+    const lockupBottom = SHARE_LAYOUT.lockup.markTop + SHARE_LAYOUT.lockup.markHeight;
+    // The title's capitals: Geist's 0.71 em.
+    const titleCap = Math.round(0.71 * SHARE_LAYOUT.title.size);
+    for (const rows of [0, 1, 2, 3]) {
+      const { top, height } = blockBox(HERO_STEPS[0], bandMid(rows));
+      const above = titleBaseline(rows) - titleCap - lockupBottom;
+      const under = (rows === 0 ? SHARE_LAYOUT.footer.ruleY : rowBaseline(0, rows) - SHARE_LAYOUT.rows.cap) - (top + height);
+      expect(Math.abs(above - under), `${rows} rows: ${above} above, ${under} under`).toBeLessThanOrEqual(10);
+      expect(top + height, `${rows} rows`).toBeLessThan(rows === 0 ? SHARE_LAYOUT.footer.ruleY : rowBaseline(0, rows) - SHARE_LAYOUT.rows.cap);
     }
   });
 });

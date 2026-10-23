@@ -52,6 +52,17 @@
  * CANCEL: the AbortSignal closes both codecs and every held frame, and the
  * promise rejects with an AbortError. SharePanel aborts when the dialog
  * closes, or when the background or the unit changes under it.
+ *
+ * A PLATE THAT DID NOT DOWNLOAD IS NOT THE BROWSER'S FAULT (review, 10-22):
+ * it rejects with a PlateUnavailable, and the dialog says the network failed
+ * and offers Try again, rather than "this browser could not make the video".
+ *
+ * FIREFOX ADDS KEYFRAMES OF ITS OWN (measured 10-22, Firefox 131): one every
+ * 30 frames, where Chrome and WebKit make one per loop as the films ask —
+ * WebCodecs has no setting for the interval, and keyFrame: false is a hint.
+ * Measured invisible: the text zone's frame-to-frame luma at those frames is
+ * 44.4–44.7 dB, the loop's seam 43.2–44.7 dB in every engine. The cost is
+ * weight: 1.07–1.54 MB against 0.65–1.07 MB.
  */
 
 import { cardFonts, drawCardWords } from "@/components/live/share-canvas";
@@ -134,12 +145,18 @@ export async function videoCaps(): Promise<boolean> {
 
 const plates = new Map<ShareBackground, Promise<{ readonly bytes: Uint8Array; readonly mp4: ParsedMp4 }>>();
 
+/** The plate's MP4 did not arrive — refused, or the network failed under it: worth trying again, unlike a browser that cannot encode. */
+export class PlateUnavailable extends Error {
+  override readonly name = "PlateUnavailable";
+}
+
 /** A plate's MP4, fetched and read once per dialog's life; a failure is not kept. */
 function plateOf(background: ShareBackground): Promise<{ readonly bytes: Uint8Array; readonly mp4: ParsedMp4 }> {
   let plate = plates.get(background);
   if (plate === undefined) {
     plate = fetch(SHARE_PLATES[background].mp4)
-      .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(new Error(`plate ${response.status}`))))
+      .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(new PlateUnavailable(`the ${background} plate answered ${response.status}`))))
+      .catch((error: unknown) => Promise.reject(error instanceof PlateUnavailable ? error : new PlateUnavailable(`the ${background} plate did not download: ${String(error)}`)))
       .then((buffer) => ({ bytes: new Uint8Array(buffer), mp4: parseMp4(buffer) }));
     plate.catch(() => plates.delete(background));
     plates.set(background, plate);

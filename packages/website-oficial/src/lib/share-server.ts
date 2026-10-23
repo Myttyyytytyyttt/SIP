@@ -28,6 +28,15 @@
  * day (both per instance), so a dialog opened twice reads once. The /c pages
  * and their images read nothing at all.
  *
+ * THE OWN BUDGET IS TAKEN AFTER THE CLIENT PAYS, STEP BY STEP (review, 10-22).
+ * It was taken first, for the worst case: 49 for a request whose client paid
+ * 4, before the route knew the vault existed — six requests for vaults that do
+ * not exist, each naming 45 junk signatures, emptied it, and share links
+ * answered 429 for everyone. Now the snapshot is paid by the client and then
+ * by the budget; the streak's reads only once the vault is known to exist,
+ * again the client first. A client never takes more from the budget than from
+ * its own buckets, and one already refused takes nothing.
+ *
  * OFF WITHOUT ITS SECRET: no SIP_SHARE_SECRET, and every request is a 404
  * share_links_off before any read — the dialog then shares the site, as
  * before. An unknown total has no card, so no link either.
@@ -135,19 +144,18 @@ async function link(fields: Readonly<Record<string, unknown>>, served: SolanaRou
   const at = now();
   const kept = fresh(state.dashboards.get(owner), at, SHARE_CARD_TTL_MS);
   const unproven = (streak as string[]).filter((signature) => fresh(state.proven.get(signature), at, SHARE_PROOF_TTL_MS)?.vault !== vault);
-  const calls = (kept === null ? LIVE_READS_WEIGHT.snapshot : 0) + unproven.length;
-  if (calls > 0) {
-    const wait = budget.take("global", calls, at);
-    if (wait > 0) {
-      const seconds = retryAfterSeconds(wait);
-      return served.refuse(429, "rate_limited", `SaverFi is making many share links right now. Retry in ${seconds} s.`, { retryAfterSeconds: seconds });
-    }
-  }
+  /** This route's own budget, for calls the client has just paid for: a 429 when it is spent. */
+  const shared = (calls: number): Response | null => {
+    const wait = budget.take("global", calls, now());
+    if (wait <= 0) return null;
+    const seconds = retryAfterSeconds(wait);
+    return served.refuse(429, "rate_limited", `SaverFi is making many share links right now. Retry in ${seconds} s.`, { retryAfterSeconds: seconds });
+  };
 
-  // THE CARD: one snapshot, the Live page's own JSON, the Live page's own model.
+  // THE CARD: one snapshot, the Live page's own JSON, the Live page's own model — paid by the client, then by the route's budget.
   let data = kept;
   if (data === null) {
-    const spent = served.spendReads(LIVE_READS_WEIGHT.snapshot);
+    const spent = served.spendReads(LIVE_READS_WEIGHT.snapshot) ?? shared(LIVE_READS_WEIGHT.snapshot);
     if (spent !== null) return spent;
     const snapshot = await readLiveSnapshot(served.pool, { owner, wallets: [], discover: false });
     const parsed = JSON.parse(liveSnapshotJsonText(owner, snapshot, now())) as LiveSnapshotJson;
@@ -157,9 +165,9 @@ async function link(fields: Readonly<Record<string, unknown>>, served: SolanaRou
   if (data.vault.status === "missing") return served.refuse(404, "vault_missing", "This pension key has no vault.");
   if (data.vault.status !== "exists" || data.vault.lifetimeSaved === null) return served.refuse(502, "unreadable", "SaverFi could not read this pension just now.");
 
-  // THE STREAK: the claim, read back — each day proven once a day.
+  // THE STREAK: the claim, read back — each day proven once a day. Only for a vault that exists, and the client pays first.
   if (unproven.length > 0) {
-    const more = served.spendMore(unproven.length);
+    const more = served.spendMore(unproven.length) ?? shared(unproven.length);
     if (more !== null) return more;
     const read = await readVaultTransactions(
       served.pool,

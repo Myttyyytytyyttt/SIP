@@ -6,19 +6,20 @@
 // draws every kind of card, from files a standalone build carries, and that a
 // redrawn card gets a new address.
 
-import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DRAWN_FROM, drawnVersion } from "../../scripts/check-share-render.mts";
+
 import { GET as exampleCardImage } from "@/app/c/example/card.png/route";
 import ExamplePage, { metadata as exampleMetadata } from "@/app/c/example/page";
 import { GET as exampleOnImage, generateStaticParams as exampleBackgrounds } from "@/app/c/example/[background]/card.png/route";
 import { GET as cardImage } from "@/app/c/[token]/card.png/route";
 import SharedCard, { generateMetadata } from "@/app/c/[token]/page";
-import { SHARE_IMAGE_IMMUTABLE, SHARE_OG_DIR, SHARE_OG_FONTS, fontMetrics, shareCardImage } from "@/components/share-og";
+import { SHARE_IMAGE_IMMUTABLE, SHARE_OG_DIR, SHARE_OG_FONTS, drawnOnce, fontMetrics, shareCardImage } from "@/components/share-og";
 import { SHARE_COPY } from "@/lib/live-copy";
 import { toDashboardMock } from "@/lib/live-mock";
 import { EXAMPLE_SHARE_LINKS, SHARE_BACKGROUNDS, shareCardOf, type ShareCardData } from "@/lib/live-share";
@@ -106,26 +107,25 @@ describe("the picture", () => {
     }
   });
 
-  it("is named by a version of what draws it, so a redrawn card gets a new address", () => {
-    const hash = createHash("sha256");
-    const files = [
-      "src/components/share-og.tsx",
-      "src/lib/live-share.ts",
-      "src/lib/brand-mark.ts",
-      ...SHARE_OG_FONTS.map((font) => `${SHARE_OG_DIR}/fonts/${font.file}`),
-      ...SHARE_BACKGROUNDS.map((name) => `${SHARE_OG_DIR}/plates/${name}.jpg`),
-    ];
-    for (const file of files) {
-      hash.update(`${file}\0`);
-      hash.update(readFileSync(join(PACKAGE, file)));
-      hash.update("\0");
-    }
-    // The words the card prints — and only those: the dialog's own lines can change without a new picture. A sentence with a slot is hashed with "§" in it.
-    const printed = { card: SHARE_COPY.card, example: { card: SHARE_COPY.example.card, mark: SHARE_COPY.example.mark } };
-    hash.update(JSON.stringify(printed, (_key, value: unknown) => (typeof value === "function" ? (value as (slot: string) => string)("§") : value)));
-    const drawn = hash.digest("hex").slice(0, 12);
+  it("is named by a version of what draws it, so a redrawn card gets a new address (scripts/check-share-render.mts, run before every build)", () => {
+    // Every font and plate the preview reads is among what the version hashes.
+    for (const font of SHARE_OG_FONTS) expect(DRAWN_FROM).toContain(`${SHARE_OG_DIR}/fonts/${font.file}`);
+    for (const name of SHARE_BACKGROUNDS) expect(DRAWN_FROM).toContain(`${SHARE_OG_DIR}/plates/${name}.jpg`);
     // A failure here means the picture changed: set SHARE_RENDER_VERSION in src/lib/share-render-version.ts to the "Expected" value.
-    expect(SHARE_RENDER_VERSION, "SHARE_RENDER_VERSION in src/lib/share-render-version.ts").toBe(drawn);
+    expect(SHARE_RENDER_VERSION, "SHARE_RENDER_VERSION in src/lib/share-render-version.ts").toBe(drawnVersion());
+  });
+
+  it("the sample's figures are part of it: a re-seeded sample is a new address (review, 10-22)", async () => {
+    const before = drawnVersion();
+    const { mock } = await import("@/mocks");
+    const saved = mock.stats.totalSavedUsd;
+    try {
+      (mock.stats as { totalSavedUsd: number | null }).totalSavedUsd = (saved ?? 0) + 1;
+      expect(drawnVersion()).not.toBe(before);
+    } finally {
+      (mock.stats as { totalSavedUsd: number | null }).totalSavedUsd = saved;
+    }
+    expect(drawnVersion()).toBe(before);
   });
 });
 
@@ -146,6 +146,29 @@ describe("/c/<token>/card.png", () => {
       const response = await get(`/c/${token}/card.png${query}`);
       expect([response.status, response.headers.get("location")], query).toEqual([308, `/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`]);
     }
+  });
+
+  it("at its token with a character percent-encoded in the path: sent to the plain one (review, 10-22)", async () => {
+    const encoded = `%${token.charCodeAt(0).toString(16)}${token.slice(1)}`;
+    // The route is handed the token decoded, as Next hands it; the path it was asked at still says how it was written.
+    const response = await get(`/c/${encoded}/card.png?v=${SHARE_RENDER_VERSION}`, token);
+    expect([response.status, response.headers.get("location")]).toEqual([308, `/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`]);
+  });
+
+  it("is drawn once per instance: a second ask of the same address is the same bytes, not a second render", async () => {
+    const first = Buffer.from(await (await get(`/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`)).arrayBuffer());
+    const draw = vi.fn(async () => new Response("never"));
+    const again = await drawnOnce(`/c/${token}/card.png?v=${SHARE_RENDER_VERSION}`, draw);
+    expect(draw).not.toHaveBeenCalled();
+    expect(Buffer.from(again).equals(first)).toBe(true);
+  });
+
+  it("a draw that failed is not kept: the next ask draws again", async () => {
+    const failing = vi.fn(async () => new Response("no", { status: 500 }));
+    await expect(drawnOnce("failing-card", failing)).rejects.toThrow(/did not draw/);
+    const working = vi.fn(async () => new Response(new Uint8Array([1, 2, 3])));
+    expect([...(await drawnOnce("failing-card", working))]).toEqual([1, 2, 3]);
+    expect([failing.mock.calls.length, working.mock.calls.length]).toEqual([1, 1]);
   });
 
   it("a token changed by one character, signed by another key, or links off: 404, kept five minutes", async () => {

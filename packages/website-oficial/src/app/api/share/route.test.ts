@@ -285,6 +285,24 @@ describe("/api/share", () => {
     expect(net.calls).toHaveBeenCalledTimes(1);
   });
 
+  it("its own budget is taken after the client pays, and the streak's share only for a vault that exists: one client cannot empty it for everyone (review, 10-22)", async () => {
+    const owner = someKey();
+    // Exactly what six such requests took when the budget was charged first, for the worst case: the snapshot's 4 and 45 transactions each.
+    const { net, route, post } = setup({ accounts: new Map(vaultOf(owner, 60_000_000n)) }, { shareBudget: createWeightedLimiter({ capacity: 6 * (4 + 45) }) });
+    // One address, vaults that do not exist, 45 junk signatures each — until its own buckets refuse it.
+    const attacker = { "x-envoy-external-address": "198.51.100.66" };
+    const statuses: number[] = [];
+    for (let i = 0; i < 20; i += 1) {
+      const answer = await route.POST(request({ action: "link", owner: someKey(), streak: Array.from({ length: 45 }, () => someSignature()) }, attacker));
+      statuses.push(answer.status);
+    }
+    expect(statuses).toContain(404);
+    expect(net.methods).not.toContain("getTransaction");
+    // Its neighbour still gets a link.
+    const honest = await post({ action: "link", owner, streak: [] });
+    expect(honest.status, JSON.stringify(honest.json)).toBe(200);
+  });
+
   it("GET is 405", () => {
     expect(setup({ accounts: new Map() }).route.GET().status).toBe(405);
   });

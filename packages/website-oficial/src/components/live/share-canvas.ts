@@ -53,6 +53,16 @@
  * SHARE_LAYOUT's and SHARE_INK's (lib/live-share.ts), and the zero card's
  * lines are measured once (ZERO_LINE_WIDTHS) rather than here: the two pick
  * the same step for the same figures.
+ *
+ * EVERY LINE IS SET GLYPH BY GLYPH, ITS TRACKING BY HAND (review, 10-22).
+ * The figure's -0.02 em and the title's tracking were ctx.letterSpacing, which
+ * WebKit's canvas does not have (Playwright's WebKit, about Safari 18.0, on
+ * both canvases): there the figure was set looser, measured wider, and dropped
+ * a step — Safari's PNG and MP4 were not the link's preview. And a canvas kerns
+ * where the preview (Satori) does not, so a line of words ran a few px shorter
+ * in the dialog. Each glyph is now placed at the sum of the advances before it
+ * plus the tracking after each, which is how Satori sets a line: one width in
+ * every engine and on the server, and fitHero picks one step everywhere.
  */
 
 import { MARK_H, MARK_PIECES, MARK_W } from "@/lib/brand-mark";
@@ -62,6 +72,7 @@ import {
   SHARE_INK as C,
   SHARE_LAYOUT as L,
   SHARE_SCALE,
+  bandMid,
   blockBox,
   fitHero,
   heroPadX,
@@ -70,6 +81,7 @@ import {
   rowBaseline,
   shareHero,
   shareRows,
+  titleBaseline,
   zeroBeside,
   zeroLines,
   type ShareBackground,
@@ -191,10 +203,25 @@ export function drawShareCard(ctx: Ctx, card: ShareCardData, options: DrawOption
 
 // ── type ─────────────────────────────────────────────────────────────────────
 
-function font(ctx: Ctx, weight: number, size: number, family: string, tracking = "0px"): void {
+function font(ctx: Ctx, weight: number, size: number, family: string): void {
   ctx.font = `${weight} ${size}px ${family}`;
-  // Tracking only where the canvas has it: without it the words are merely a little looser.
-  if ("letterSpacing" in ctx) ctx.letterSpacing = tracking;
+}
+
+/** A line's width as it is set (above): each glyph's own advance, and the tracking after each — no kerning, like the preview. */
+function widthOf(ctx: Ctx, text: string, tracking = 0): number {
+  let width = 0;
+  for (const glyph of text) width += ctx.measureText(glyph).width + tracking;
+  return width;
+}
+
+/** A line drawn glyph by glyph from `x` (left-aligned), at the current font and fill; returns its width, widthOf's. */
+function line(ctx: Ctx, text: string, x: number, y: number, tracking = 0): number {
+  let at = x;
+  for (const glyph of text) {
+    ctx.fillText(glyph, at, y);
+    at += ctx.measureText(glyph).width + tracking;
+  }
+  return at - x;
 }
 
 /** A number run: a digit with what sticks to it ($ , . %), ending on a digit or %. "Sep 18, 2026" keeps its comma in Geist. */
@@ -208,9 +235,8 @@ function runs(ctx: Ctx, fonts: CardFonts, x: number, y: number, text: string, si
   text.split(NUMBER_RUN).forEach((part, index) => {
     if (part === "") return;
     const isNumber = index % 2 === 1;
-    font(ctx, weight, size, isNumber ? fonts.mono : fonts.sans, isNumber ? `${-0.02 * size}px` : "0px");
-    ctx.fillText(part, at, y);
-    at += ctx.measureText(part).width;
+    font(ctx, weight, size, isNumber ? fonts.mono : fonts.sans);
+    at += line(ctx, part, at, y, isNumber ? -0.02 * size : 0);
   });
   return at - x;
 }
@@ -258,9 +284,9 @@ function block(ctx: Ctx, scale: number, x: number, y: number, w: number, h: numb
 const PILL = L.pill;
 
 function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, mid: number): number {
-  font(ctx, 500, PILL.text, fonts.sans, "0px");
+  font(ctx, 500, PILL.text, fonts.sans);
   const word = SHARE_COPY.example.mark;
-  const width = PILL.padLeft + PILL.icon + PILL.gap + ctx.measureText(word).width + PILL.padRight;
+  const width = PILL.padLeft + PILL.icon + PILL.gap + widthOf(ctx, word) + PILL.padRight;
   const x = right - width;
   const top = mid - PILL.height / 2;
   // A ground of its own first, so the art behind the corner never shows through the word.
@@ -291,14 +317,11 @@ function examplePill(ctx: Ctx, fonts: CardFonts, scale: number, right: number, m
   ctx.restore();
   ctx.fillStyle = "rgba(255,255,255,0.90)";
   const cap = ctx.measureText("E").actualBoundingBoxAscent;
-  ctx.fillText(word, x + PILL.padLeft + PILL.icon + PILL.gap, mid + cap / 2);
+  line(ctx, word, x + PILL.padLeft + PILL.icon + PILL.gap, mid + cap / 2);
   return x;
 }
 
-/** THE LAYOUT, TOP TO BOTTOM: SHARE_LAYOUT (lib/live-share.ts) says why each line is where it is. */
-export const TITLE_Y = L.title.baseline;
-export const BAND_MID = L.band.mid;
-/** The rows' last baseline. */
+/** THE LAYOUT, TOP TO BOTTOM: SHARE_LAYOUT (lib/live-share.ts) says why each line is where it is. The rows' last baseline: */
 export const ROWS_Y = L.rows.last;
 
 export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOptions, fonts: CardFonts): void {
@@ -307,6 +330,12 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.textBaseline = "alphabetic";
   ctx.textAlign = "left";
+  // The tracking is set by hand (line()): a canvas that has letterSpacing must not add its own.
+  if ("letterSpacing" in ctx) ctx.letterSpacing = "0px";
+  // The rows decide where the group stands (groupShift): fewer rows, and the title and the block come down.
+  const rows = shareRows(card);
+  const titleY = titleBaseline(rows.length);
+  const mid = bandMid(rows.length);
 
   // 1. The lockup top-left, the snapshot's day top-right — and on the sample's card, the "Example" pill in the corner, the day beside it.
   const { lockup } = L;
@@ -314,76 +343,73 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   markPath(ctx, PAD, lockup.markTop, markH);
   ctx.fillStyle = C.fg;
   ctx.fill();
-  font(ctx, 600, lockup.brandSize, fonts.sans, `${lockup.brandTracking}px`);
-  ctx.fillText(SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + lockup.markGap, lockup.brandBaseline);
+  font(ctx, 600, lockup.brandSize, fonts.sans);
+  line(ctx, SHARE_COPY.card.brand, PAD + (markH * MARK_W) / MARK_H + lockup.markGap, lockup.brandBaseline, lockup.brandTracking);
   const dayRight = card.example ? examplePill(ctx, fonts, scale, W - PAD, lockup.markTop + markH / 2) - lockup.dayGap : W - PAD;
   font(ctx, 400, lockup.daySize, fonts.mono);
   ctx.fillStyle = C.fg55;
-  ctx.textAlign = "right";
-  ctx.fillText(card.asOf, dayRight, lockup.dayBaseline);
-  ctx.textAlign = "left";
+  // Ending at dayRight: set from where its width says it starts.
+  line(ctx, card.asOf, dayRight - widthOf(ctx, card.asOf), lockup.dayBaseline);
 
   const hero = shareHero(card, options.unit);
   // A pension's own words, or — on the sample's card — the example's, which are nobody's.
   const own = card.example ? SHARE_COPY.example.card : SHARE_COPY.card;
 
   // 2. The title: the figure's label.
-  font(ctx, 500, L.title.size, fonts.sans, `${L.title.tracking}px`);
+  font(ctx, 500, L.title.size, fonts.sans);
   ctx.fillStyle = C.fg;
   const title = hero === null ? own.titleZero : own.titleSaved;
-  ctx.fillText(title, PAD, TITLE_Y);
+  const titleWidth = line(ctx, title, PAD, titleY, L.title.tracking);
   if (hero !== null && card.since !== null) {
-    const titleWidth = ctx.measureText(title).width;
-    runs(ctx, fonts, PAD + titleWidth + L.title.sinceGap, TITLE_Y, SHARE_COPY.card.since(card.since), L.title.sinceSize, 400, C.fg55);
+    runs(ctx, fonts, PAD + titleWidth + L.title.sinceGap, titleY, SHARE_COPY.card.since(card.since), L.title.sinceSize, 400, C.fg55);
   }
 
   // 3. The figure on its block, and nothing under it.
   const measure = (text: string, size: number, part: "number" | "unit"): number => {
-    font(ctx, 600, size, fonts.mono, part === "number" ? `${-0.02 * size}px` : "0px");
-    return ctx.measureText(text).width;
+    font(ctx, 600, size, fonts.mono);
+    return widthOf(ctx, text, part === "number" ? -0.02 * size : 0);
   };
 
   if (hero === null) {
     // NOTHING SAVED YET: the rule itself is the hero, with the landing's words beside it — and, paused, no claim that anything is put aside.
     const [line1, line2] = zeroLines(card);
     const fit = fitHero([card.rate], null, zeroBeside(card), measure);
-    const { top, height: h } = blockBox(fit.size);
+    const { top, height: h } = blockBox(fit.size, mid);
     block(ctx, scale, PAD, top, fit.blockWidth, h);
-    font(ctx, 600, fit.size, fonts.mono, `${-0.02 * fit.size}px`);
+    font(ctx, 600, fit.size, fonts.mono);
     ctx.fillStyle = C.ink;
     const cap = ctx.measureText("0").actualBoundingBoxAscent;
-    ctx.fillText(fit.text, PAD + heroPadX(fit.size), top + h / 2 + cap / 2);
-    font(ctx, 500, L.zero.size, fonts.sans, `${L.zero.tracking}px`);
+    line(ctx, fit.text, PAD + heroPadX(fit.size), top + h / 2 + cap / 2, -0.02 * fit.size);
+    font(ctx, 500, L.zero.size, fonts.sans);
     const tx = PAD + fit.blockWidth + L.zero.gap;
     ctx.fillStyle = C.fg;
-    ctx.fillText(line1, tx, BAND_MID + L.zero.line1);
+    line(ctx, line1, tx, mid + L.zero.line1, L.zero.tracking);
     ctx.fillStyle = C.fg55;
-    ctx.fillText(line2, tx, BAND_MID + L.zero.line2);
+    line(ctx, line2, tx, mid + L.zero.line2, L.zero.tracking);
   } else {
     const fit = fitHero([hero.number, hero.compact], hero.unit, 0, measure);
-    const { top, height: h } = blockBox(fit.size);
+    const { top, height: h } = blockBox(fit.size, mid);
     block(ctx, scale, PAD, top, fit.blockWidth, h);
-    font(ctx, 600, fit.size, fonts.mono, `${-0.02 * fit.size}px`);
+    font(ctx, 600, fit.size, fonts.mono);
     ctx.fillStyle = C.ink;
     const cap = ctx.measureText("0").actualBoundingBoxAscent;
     const baseline = top + h / 2 + cap / 2;
     const x = PAD + heroPadX(fit.size);
-    ctx.fillText(fit.text, x, baseline);
+    line(ctx, fit.text, x, baseline, -0.02 * fit.size);
     if (hero.unit !== null) {
       font(ctx, 600, heroUnitSize(fit.size), fonts.mono);
       ctx.fillStyle = C.unitInk;
-      ctx.fillText(hero.unit, x + fit.numberWidth + heroUnitGap(fit.size), baseline);
+      line(ctx, hero.unit, x + fit.numberWidth + heroUnitGap(fit.size), baseline);
     }
   }
 
   // 4. The rows, anchored at the bottom: the last one's baseline is always ROWS_Y.
-  const rows = shareRows(card);
   const { size: rowSize, valueX } = L.rows;
   rows.forEach((row, index) => {
     const y = rowBaseline(index, rows.length);
     font(ctx, 400, rowSize, fonts.sans);
     ctx.fillStyle = C.fg55;
-    ctx.fillText(row.label, PAD, y);
+    line(ctx, row.label, PAD, y);
     const width = runs(ctx, fonts, PAD + valueX, y, row.value, rowSize, 500, C.fg);
     if (row.after !== undefined) runs(ctx, fonts, PAD + valueX + width, y, row.after, rowSize, 500, C.fg55);
   });
@@ -394,10 +420,9 @@ export function drawCardWords(ctx: Ctx, card: ShareCardData, options: DrawOption
   ctx.fillRect(PAD, footer.ruleY, W - PAD * 2, 1);
   font(ctx, 500, footer.size, fonts.mono);
   ctx.fillStyle = C.emerald;
-  ctx.fillText(SHARE_COPY.card.site, PAD, footer.baseline);
-  const siteWidth = ctx.measureText(SHARE_COPY.card.site).width;
+  const siteWidth = line(ctx, SHARE_COPY.card.site, PAD, footer.baseline);
   font(ctx, 400, footer.size, fonts.sans);
   ctx.fillStyle = C.fg55;
-  ctx.fillText(SHARE_COPY.card.tagline, PAD + siteWidth + footer.gap, footer.baseline);
+  line(ctx, SHARE_COPY.card.tagline, PAD + siteWidth + footer.gap, footer.baseline);
   ctx.restore();
 }
