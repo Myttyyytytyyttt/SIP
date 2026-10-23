@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import htmlBots from "next/dist/shared/lib/router/utils/html-bots.js";
 
-import { HTML_LIMITED_BOTS, buildCommitOf, privyStubAlias } from "../next.config.mjs";
+import { HTML_LIMITED_BOTS, blobStubAlias, buildCommitOf, privyStubAlias } from "../next.config.mjs";
 import { securityHeaders } from "../security-headers.mjs";
 
 const PRIVY = "@privy-io/react-auth";
@@ -40,10 +40,29 @@ describe("when the stub alias is applied", () => {
   });
 });
 
+/**
+ * THE DEV-ONLY BLOB STUB (10-23), held to the same three guards: the short
+ * share links' proof keeps its records in a folder, and a production build that
+ * did would hand out links that die with the instance.
+ */
+describe("when the Blob stub alias is applied", () => {
+  it("is applied in development WITH its flag, to the SDK the store imports", () => {
+    expect(blobStubAlias({ NODE_ENV: "development", SIP_WEB_BLOB_STUB: "1" })).toEqual({ "@vercel/blob": "./test/stubs/vercel-blob.ts" });
+  });
+
+  it("is NEVER applied in production, and not without its own flag", () => {
+    expect(blobStubAlias({ NODE_ENV: "production", SIP_WEB_BLOB_STUB: "1" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "development" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "development", SIP_WEB_PRIVY_STUB: "1" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "test", SIP_WEB_BLOB_STUB: "true" })).toEqual({});
+  });
+});
+
 describe("the config itself", () => {
-  it("carries no turbopack alias at all when the stub is off", async () => {
+  it("carries no turbopack alias at all when the stubs are off", async () => {
     vi.resetModules();
     vi.stubEnv("SIP_WEB_PRIVY_STUB", "");
+    vi.stubEnv("SIP_WEB_BLOB_STUB", "");
     const config = (await import("../next.config.mjs")).default;
     expect(config.turbopack).toBeUndefined();
   });
@@ -87,9 +106,22 @@ describe("the headers the config adds", () => {
  * picture's fonts and plates reach a standalone build.
  */
 describe("the shared card's pages", () => {
-  it("say noindex, follow in a header on every /c/ path", async () => {
+  it("say noindex, follow in a header on every /c/ path; a short link's page alone is kept at Vercel's CDN for a year (10-23)", async () => {
     const config = (await import("../next.config.mjs")).default;
-    expect((await config.headers()).filter((rule) => rule.source.startsWith("/c/"))).toEqual([{ source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] }]);
+    expect((await config.headers()).filter((rule) => rule.source.startsWith("/c/"))).toEqual([
+      { source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] },
+      { source: "/c/:code([0-9A-Za-z]{8})", headers: [{ key: "Vercel-CDN-Cache-Control", value: "max-age=31536000" }] },
+    ]);
+  });
+
+  it("match a short link's page and nothing else under /c/: not a long token, not the sample, not a picture", async () => {
+    // Next's own matcher for a rule's source, as it applies them.
+    const { getPathMatch } = await import("next/dist/shared/lib/router/utils/path-match");
+    const short = getPathMatch("/c/:code([0-9A-Za-z]{8})");
+    expect(["/c/aZ09bY18", "/c/00000000"].map((path) => short(path) !== false)).toEqual([true, true]);
+    for (const path of ["/c/example", "/c/example/vault", "/c/aZ09bY18/card.png", "/c/aZ09bY1", "/c/aZ09bY18x", "/c/aZ09bY1-", "/c/eyJ2IjoxfQ.PQ_sBKvRw9XufMsNMy0DLQ"]) {
+      expect(short(path), path).toBe(false);
+    }
   });
 
   it("give their metadata in <head> to Next's own HTML-limited bots, and to Mastodon's and Bluesky's — not to a browser", async () => {
@@ -125,6 +157,8 @@ describe("the stub modules refuse to load in a production build", () => {
     await expect(import("../test/stubs/privy-react-auth")).rejects.toThrow(/must never ship/);
     vi.resetModules();
     await expect(import("../test/stubs/privy-react-auth-solana")).rejects.toThrow(/must never ship/);
+    vi.resetModules();
+    await expect(import("../test/stubs/vercel-blob")).rejects.toThrow(/must never ship/);
   });
 });
 

@@ -1,7 +1,9 @@
 /**
- * A SHARED CARD'S OWN PAGE, /c/<token> and /c/example (owner, 10-22: "Enlace
- * con vista previa"). What a post on X links to: X reads this page's metadata
- * and shows the card under the post; a person who clicks lands here.
+ * A SHARED CARD'S OWN PAGE, /c/<token>, /c/<code> and /c/example (owner,
+ * 10-22: "Enlace con vista previa"; 10-23, the short /c/<code>). What a post on
+ * X links to: X reads this page's metadata and shows the card under the post;
+ * a person who clicks lands here. Its picture is at its own address plus
+ * /card.png, short or long alike.
  *
  * WHAT IT SHOWS: the card, where its figures came from and when ("Read from
  * Solana by SaverFi on Oct 22, 2026" — the token's day), and the two ways on:
@@ -32,7 +34,7 @@ import { SHARE_RENDER_VERSION } from "@/lib/share-render-version";
 import { NOT_INDEXED } from "@/lib/seo";
 
 export interface SharedCard {
-  /** The page's own path: "/c/<token>", "/c/example/vault". */
+  /** The page's own path: "/c/<token>", "/c/<code>", "/c/example/vault". */
   readonly page: string;
   readonly card: ShareCardData;
   readonly unit: ShareUnit;

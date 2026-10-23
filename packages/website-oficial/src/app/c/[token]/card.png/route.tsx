@@ -1,14 +1,16 @@
 /**
- * /c/<token>/card.png — A SHARED CARD'S PICTURE, drawn on the server
- * (components/share-og.tsx) from a token this server signed, never from
- * figures a URL states.
+ * /c/<token>/card.png and /c/<code>/card.png — A SHARED CARD'S PICTURE, drawn
+ * on the server (components/share-og.tsx) from a token this server signed —
+ * given in the address, or kept under a short code (lib/share-store.ts) —
+ * never from figures a URL states.
  *
  * ONE ADDRESS PER PICTURE. At ?v=<the renderer's version> it is cached for a
  * year, by browsers and by the CDN (SHARE_IMAGE_IMMUTABLE): X and the rest
  * fetch it once. A path or a query that is not exactly that address is sent
  * there (308): another ?v, an extra parameter, a token with a character
- * percent-encoded in the path. A token that does not verify is a 404, kept
- * five minutes.
+ * percent-encoded in the path. A token that does not verify, or a code with no
+ * card, is a 404, kept five minutes. A code whose store did not answer just now
+ * is a 503 that nothing keeps (10-23): the next ask reads again.
  *
  * AND ONE DRAWING PER INSTANCE (review, 10-22). Next hands a route its query
  * already decoded and re-encoded, so "?%76=<version>" and "?v=<version>&"
@@ -25,15 +27,19 @@
 import { SHARE_IMAGE_IMMUTABLE, drawnOnce, shareCardImage } from "@/components/share-og";
 import { shareImagePath } from "@/lib/live-share";
 import { SHARE_RENDER_VERSION } from "@/lib/share-render-version";
-import { openShareToken } from "@/lib/share-token";
+import { openSharedCard } from "@/lib/share-store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request, { params }: { params: Promise<{ token: string }> }): Promise<Response> {
   const { token } = await params;
-  const opened = openShareToken(token);
-  if (opened === null) return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+  const shared = await openSharedCard(token);
+  if (shared.kind === "unavailable") {
+    return new Response("Try again in a minute", { status: 503, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "retry-after": "60" } });
+  }
+  if (shared.kind === "missing") return new Response("Not found", { status: 404, headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "public, max-age=300" } });
+  const opened = shared.opened;
   const canonical = shareImagePath(`/c/${token}`, SHARE_RENDER_VERSION);
   const asked = new URL(request.url);
   if (`${asked.pathname}${asked.search}` !== canonical) return new Response(null, { status: 308, headers: { location: canonical, "cache-control": "public, max-age=3600" } });

@@ -39,10 +39,12 @@
  * THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"). A Live page's
  * dialog asks the server once, on open (lib/share-link-client.ts), for the card
  * as the server reads it from the chain and a signed link per background and
- * unit: saverfi.cash/c/<token>, whose preview on X is this card — nothing to
- * paste — titled "SaverFi’s Vault" where this one says "My pension" (review
- * finding S1; owner, 10-23: the server signs a card for any pension key, so
- * its picture speaks in the third person), which the hint under the actions
+ * unit: saverfi.cash/c/<token> — or, once the server has kept the card in its
+ * store, saverfi.cash/c/<8 characters> (owner, 10-23: "que sean como
+ * /c/xxxxxxx y ya"; lib/share-store.ts) — whose preview on X is this card —
+ * nothing to paste — titled "SaverFi’s Vault" where this one says "My
+ * pension" (review finding S1; owner, 10-23: the server signs a card for any
+ * pension key, so its picture speaks in the third person), which the hint under the actions
  * says before the click. The dialog ADOPTS the server's card, so the preview,
  * Copy, Download and the link all show the same figures. While it asks, Post on X waits,
  * disabled, a few seconds at most (SHARE_LINK_WAIT_MS); refused, off, or too

@@ -9,6 +9,12 @@
  * adopts that card, so its preview, Copy, Download and the X preview all show
  * the same figures, and the link shows nothing the server did not read itself.
  *
+ * SHORT WHEN IT CAN BE (owner, 10-23: "que sean como /c/xxxxxxx y ya"): once
+ * the card's record is in the Blob store, each link is saverfi.cash/c/<8
+ * characters> (lib/share-code.ts, lib/share-store.ts). No store, a slow one, a
+ * full one, and the links are the long /c/<token> ones, as before: the answer's
+ * shape is the same either way, and so is what the dialog does with it.
+ *
  * THE FIGURES ARE READ, NEVER RECEIVED. One snapshot — the Live page's own
  * batch of four, through readLiveSnapshot and liveSnapshotJsonText, so the
  * route parses the very JSON /api/solana-live sends — then the Live model
@@ -26,7 +32,9 @@
  * On top, a budget of its own (SHARE_READS_PER_MIN), so a burst of shares can
  * never starve Live. The card per pension is kept a minute and a proven day a
  * day (both per instance), so a dialog opened twice reads once. The /c pages
- * and their images read nothing at all.
+ * and their images read nothing of the chain; a short link's, its record, once
+ * per instance (lib/share-store.ts). A card's record is written once: at most
+ * one store write per answer, none for a card already written.
  *
  * THE OWN BUDGET IS TAKEN AFTER THE CLIENT PAYS, STEP BY STEP (review, 10-22).
  * It was taken first, for the worst case: 49 for a request whose client paid
@@ -65,6 +73,7 @@ import { toLiveDashboard } from "@/lib/live-model";
 import { SHARE_STREAK_CAP, shareCardOf, unitsOf, type ShareCardData, type ShareLinks } from "@/lib/live-share";
 import type { LiveDashboard, LiveSnapshotJson } from "@/lib/live-types";
 import { solanaGate } from "@/lib/load-config";
+import { shortLinksOf, type ShareStore } from "@/lib/share-store";
 import { shareKeysOf, signShareLinks } from "@/lib/share-token";
 
 /** The largest body: an owner and 45 signatures of up to 88 characters each, with room to spare. */
@@ -122,13 +131,22 @@ export interface ShareRouteOptions extends Omit<SolanaBuildHandlerOptions, "gate
   readonly env?: Env;
   /** This route's own budget across everyone. Default: one per process, SHARE_READS_PER_MIN. */
   readonly shareBudget?: WeightedLimiter;
+  /** Where short links are kept. Default: the deployment's Blob store, if it has one (lib/share-store.ts); null: none, every link long. */
+  readonly shareStore?: ShareStore | null;
 }
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: HEADERS });
 }
 
-async function link(fields: Readonly<Record<string, unknown>>, served: SolanaRouteServed, env: Env, now: () => number, budget: WeightedLimiter): Promise<Response> {
+async function link(
+  fields: Readonly<Record<string, unknown>>,
+  served: SolanaRouteServed,
+  env: Env,
+  now: () => number,
+  budget: WeightedLimiter,
+  store: ShareStore | null | undefined,
+): Promise<Response> {
   const extra = Object.keys(fields).find((name) => !(FIELDS as readonly string[]).includes(name));
   if (extra !== undefined) return served.refuse(400, "bad_request", `Unexpected field ${extra.slice(0, 40)}.`);
   const { owner, streak } = fields;
@@ -192,7 +210,9 @@ async function link(fields: Readonly<Record<string, unknown>>, served: SolanaRou
 
   const card = shareCardOf(shareInputOf(data, streakDays));
   if (card.state === "unknown") return served.refuse(502, "unreadable", "SaverFi could not read this pension just now.");
-  const answer: ShareLinkAnswer = { card, links: signShareLinks(card, unitsOf(card), keys.sign), streak: { claimed, proven } };
+  // THE LINKS: signed, then short once the card's record is kept — the long ones if it cannot be.
+  const links = await shortLinksOf(signShareLinks(card, unitsOf(card), keys.sign), keys.sign, { env, store, now });
+  const answer: ShareLinkAnswer = { card, links, streak: { claimed, proven } };
   return json(200, answer);
 }
 
@@ -202,12 +222,12 @@ async function link(fields: Readonly<Record<string, unknown>>, served: SolanaRou
  * before anything else is spent on it.
  */
 export function shareRoute(options: ShareRouteOptions = {}): SolanaRouteHandler {
-  const { env: given, shareBudget, ...rest } = options;
+  const { env: given, shareBudget, shareStore, ...rest } = options;
   const env = (): Env => given ?? process.env;
   const now = rest.now ?? Date.now;
   const budget = (): WeightedLimiter => shareBudget ?? stateOf().budget;
   const route = createSolanaReadRoute("share", { ...rest, gate: () => solanaGate(env()), maxBodyBytes: SHARE_MAX_BODY_BYTES }, async (action, fields, served) =>
-    action === "link" ? link(fields, served, env(), now, budget()) : served.refuse(400, "bad_request", 'action must be "link".'),
+    action === "link" ? link(fields, served, env(), now, budget(), shareStore) : served.refuse(400, "bad_request", 'action must be "link".'),
   );
   return {
     POST: (request) => (shareKeysOf(env()) === null ? Promise.resolve(json(404, { error: { code: "share_links_off", message: "Share links are off on this deployment." } })) : route.POST(request)),

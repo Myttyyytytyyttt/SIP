@@ -37,7 +37,20 @@ export function privyStubAlias(env = process.env) {
   };
 }
 
-const resolveAlias = privyStubAlias(process.env);
+/**
+ * THE DEV-ONLY BLOB STUB (10-23), the same way: the short share links' store
+ * (src/lib/share-store.ts) is a private Vercel Blob store that exists only in
+ * production, and no proof may reach a real one. With SIP_WEB_BLOB_STUB exactly
+ * "1", outside a production build, @vercel/blob is a stand-in that keeps each
+ * record as a file in SIP_WEB_BLOB_STUB_DIR (test/stubs/vercel-blob.ts), which
+ * itself throws on import under NODE_ENV=production.
+ */
+export function blobStubAlias(env = process.env) {
+  if (env.NODE_ENV === "production" || env.SIP_WEB_BLOB_STUB !== "1") return {};
+  return { "@vercel/blob": "./test/stubs/vercel-blob.ts" };
+}
+
+const resolveAlias = { ...privyStubAlias(process.env), ...blobStubAlias(process.env) };
 
 /**
  * THE COMMIT THIS BUNDLE IS BUILT FROM, baked in as SIP_BUILD_COMMIT so a tab
@@ -87,6 +100,17 @@ const nextConfig = {
       // dated moment. Its metadata says so too, but metadata streamed into
       // <body> is not read by every crawler; a header always is. Links followed.
       { source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] },
+      // A SHORT LINK'S PAGE IS KEPT AT VERCEL'S CDN FOR A YEAR (10-23): a code is
+      // one card forever (src/lib/share-code.ts), so its page need not ask the
+      // Blob store again on every visit — the store's reads are what is scarce.
+      // Next sends a page rendered per request as "private, no-store", which
+      // browsers keep obeying; this header is for Vercel's CDN alone, which
+      // never forwards it. Best effort, and nothing rests on it: a CDN that
+      // ignores it renders the page per visit, as a long link's, and the record
+      // is still read once per instance (src/lib/share-store.ts). Exactly 8
+      // characters: a long /c/<token> and /c/example are not matched. Its 404s
+      // may be kept too; its errors (a store that did not answer) never are.
+      { source: "/c/:code([0-9A-Za-z]{8})", headers: [{ key: "Vercel-CDN-Cache-Control", value: "max-age=31536000" }] },
     ];
   },
 
