@@ -31,7 +31,7 @@
  * untouched.
  */
 
-export type DestinationId = "axiom" | "gmgn";
+export type DestinationId = "axiom" | "gmgn" | "padre";
 
 export interface TerminalDestination {
   readonly id: DestinationId;
@@ -51,13 +51,22 @@ export interface TerminalDestination {
 }
 
 /**
- * THE TERMINALS WITH AN ICON, in the order the row shows them, read 2026-10-22:
- * Axiom from its public code, GMGN from its docs. A terminal's screens change
- * without notice, so the steps say where to look, never what the screen will show.
+ * THE TERMINALS WITH AN ICON, in the order the row shows them: Axiom from its
+ * public code and GMGN from its docs (read 2026-10-22), Terminal from its public
+ * code (read 2026-10-23). A terminal's screens change without notice, so the
+ * steps say where to look, never what the screen will show.
  *
- * Terminal (Padre) and Trojan were researched too and can come back once their
- * icons are here. Left out on purpose: Telegram bots (the key would sit in a
- * cloud chat), Photon (no documented import) and BullX (trading disabled).
+ * TERMINAL, PADRE'S, NOW PUMP.FUN'S, LIVES ON trade.padre.gg. terminal.pump.fun
+ * serves the same app, but its own og:url names trade.padre.gg (read
+ * 2026-10-23), and a session on one host is not a session on the other. Its
+ * /wallets sends a visitor to sign in with /wallets as the way back
+ * (?backToUrl=%2Fwallets). Its code has an "Import wallet" button and dialog,
+ * a chain to choose ("Make sure it matches the selected chain") and an
+ * "Import" button; the screens were not seen signed in.
+ *
+ * Trojan was researched too and can come back once its icon is here. Left out
+ * on purpose: Telegram bots (the key would sit in a cloud chat), Photon (no
+ * documented import) and BullX (trading disabled).
  */
 export const TERMINAL_DESTINATIONS: readonly TerminalDestination[] = [
   {
@@ -79,6 +88,16 @@ export const TERMINAL_DESTINATIONS: readonly TerminalDestination[] = [
     steps: ["Log in to GMGN.", "Open Wallet Manager, then press Import wallet."],
     pasteInto: "GMGN's Import wallet box",
     afterPaste: "Then confirm in GMGN.",
+  },
+  {
+    id: "padre",
+    name: "Terminal",
+    host: "trade.padre.gg",
+    startUrl: "https://trade.padre.gg/wallets",
+    icon: "/landing/terminals/padre.png",
+    steps: ["Log in to Terminal.", "Open Wallets, press Import wallet and choose Solana."],
+    pasteInto: "Terminal's Import wallet box",
+    afterPaste: "Then press Import in Terminal.",
   },
 ];
 

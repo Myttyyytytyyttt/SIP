@@ -47,6 +47,7 @@ describe("TerminalShortcuts", () => {
     for (const [id, url, name] of [
       ["axiom", "https://axiom.trade/portfolio", "Axiom"],
       ["gmgn", "https://gmgn.ai/?chain=sol", "GMGN"],
+      ["padre", "https://trade.padre.gg/wallets", "Terminal"],
     ] as const) {
       const link = html.match(new RegExp(`<a [^>]*data-terminal-shortcut="${id}"[^>]*>`))?.[0] ?? "";
       expect(link).toContain(`href="${url}"`);

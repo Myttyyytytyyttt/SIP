@@ -463,6 +463,7 @@ describe("WalletsScreen with the seat configured", () => {
     for (const row of all) {
       expect(row.body).toMatch(/<a [^>]*href="https:\/\/axiom\.trade\/portfolio"[^>]*data-terminal-shortcut="axiom"/);
       expect(row.body).toMatch(/<a [^>]*href="https:\/\/gmgn\.ai\/\?chain=sol"[^>]*data-terminal-shortcut="gmgn"/);
+      expect(row.body).toMatch(/<a [^>]*href="https:\/\/trade\.padre\.gg\/wallets"[^>]*data-terminal-shortcut="padre"/);
     }
   });
 });

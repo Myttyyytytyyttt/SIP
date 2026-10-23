@@ -35,8 +35,8 @@ describe("terminal destinations", () => {
     }
   });
 
-  it("offers Axiom and GMGN, and leaves out the destinations the research ruled out", () => {
-    expect(TERMINAL_DESTINATIONS.map((destination) => destination.id)).toEqual(["axiom", "gmgn"]);
+  it("offers Axiom, GMGN and Terminal, and leaves out the destinations the research ruled out", () => {
+    expect(TERMINAL_DESTINATIONS.map((destination) => destination.id)).toEqual(["axiom", "gmgn", "padre"]);
     const hosts = TERMINAL_DESTINATIONS.map((destination) => destination.host);
     // Telegram bots keep the key in a cloud chat; Photon documents no import; BullX disabled trading.
     for (const ruledOut of ["t.me", "photon-sol.tinyastro.io", "neo.bullx.io"]) expect(hosts).not.toContain(ruledOut);
