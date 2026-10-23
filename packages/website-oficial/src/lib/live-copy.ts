@@ -1256,4 +1256,6 @@ export const RENAME_COPY = {
   forbidden: "Hidden characters.",
   /** The account keeps as many names as it may. */
   tooManyNames: "Too many names.",
+  /** The day's saves are spent, this account's or the server's (names_budget): the pencil goes until they are back. */
+  paused: "Renaming paused.",
 } as const;

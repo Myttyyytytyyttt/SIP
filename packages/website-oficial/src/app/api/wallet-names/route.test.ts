@@ -1,8 +1,9 @@
 // /api/wallet-names as wired in this app (owner, 10-23: a trading wallet's name, saved to the account, no
-// signature): off without a store, then the gate, cross-site, the client's buckets, the Privy session — checked
-// against a local key set, so nothing reaches Privy — and the names, kept in an in-memory store with the Blob
-// store's contract (etags and create-only first saves included), behind this instance's copies and the daily
-// budgets that keep the store inside Hobby's month. No network.
+// signature): off without a store — by the short links' rule, since it is their store too — then the gate,
+// cross-site, the client's buckets, the Privy session — checked against a local key set, so nothing reaches
+// Privy — and the names, kept in an in-memory store with the Blob store's contract (etags and create-only first
+// saves included), behind this instance's copies and the daily budgets that keep the WHOLE store, short links
+// included, inside Hobby's month. No network.
 
 import { SIP_PROGRAM_ID } from "@sip/solana-core/client";
 import { createWeightedLimiter } from "@sip/solana-core/server";
@@ -11,9 +12,11 @@ import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTVerifyG
 import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WALLET_NAMES_MAX, WALLET_NAME_COPY } from "@/lib/wallet-names";
+import { SHARE_STORE_WRITES_PER_DAY } from "@/lib/share-store";
 import {
   WALLET_NAMES_COPY_MS,
   WALLET_NAMES_MAX_BODY_BYTES,
+  WALLET_NAMES_PLANNED_INSTANCES,
   WALLET_NAMES_READS_PER_DAY,
   WALLET_NAMES_READS_PER_USER,
   WALLET_NAMES_WRITES_PER_DAY,
@@ -34,7 +37,9 @@ const ENV = {
   SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
   SIP_TRUSTED_CLIENT_IP_HEADER: "x-real-ip",
   PRIVY_APP_ID: APP_ID,
+  // As on Vercel: the store's id, for the OIDC token each request carries.
   BLOB_STORE_ID: "store_test",
+  VERCEL: "1",
 } as const;
 
 let keys: JWTVerifyGetKey;
@@ -79,6 +84,7 @@ function routeWith(over: Partial<WalletNamesRouteOptions> = {}) {
       readsGlobal: createWeightedLimiter({ capacity: 60 }),
       writesPerUser: createWeightedLimiter({ capacity: 10 }),
       writesGlobal: createWeightedLimiter({ capacity: 20 }),
+      paused: new Map(),
       ...over.budgets,
     },
   });
@@ -120,9 +126,19 @@ describe("off, unconfigured, and refused before anyone is believed", () => {
   });
 
   it("counts a read-write token as a store too, for a deployment connected the older way", async () => {
-    const { BLOB_STORE_ID: _off, ...env } = ENV;
+    const { BLOB_STORE_ID: _off, VERCEL: _vercel, ...env } = ENV;
     const { route } = routeWith({ env: { ...env, BLOB_READ_WRITE_TOKEN: "vercel_blob_rw_x" } });
     expect((await route.GET(get(await tokenFor(ALICE)))).status).toBe(200);
+  });
+
+  it("is off with a store id alone off Vercel, as the short links are: no CLI login is asked for a token", async () => {
+    const store = { read: vi.fn(), write: vi.fn() } satisfies WalletNamesStore;
+    const { VERCEL: _vercel, ...env } = ENV;
+    const { route } = routeWith({ env, store });
+    expect(await codeOf(await route.GET(get(await tokenFor(ALICE))))).toBe("names_off");
+    // With Vercel's OIDC token in the environment instead, it is on.
+    expect((await routeWith({ env: { ...env, VERCEL_OIDC_TOKEN: "eyJ.oidc" } }).route.GET(get(await tokenFor(ALICE)))).status).toBe(200);
+    expect(store.read).not.toHaveBeenCalled();
   });
 
   it("is 503 unavailable on a deployment whose Solana settings or Privy app id are missing", async () => {
@@ -376,13 +392,16 @@ describe("this instance's copy: the store is read as seldom as it can be", () =>
   });
 });
 
-describe("the month, at the budgets' production sizes (Hobby: 10,000 reads and 2,000 saves a month, store-wide)", () => {
+describe("the month, at the budgets' production sizes (Hobby: 10,000 reads and 2,000 writes a month, for the whole store)", () => {
   const MINUTE = 60_000;
   const DAY = 24 * 60 * MINUTE;
+  const HOBBY_WRITES = 2_000;
+  const HOBBY_READS = 10_000;
   /** A session that outlives the simulated day. */
   const dayToken = (userId: string): Promise<string> => tokenFor(userId, Math.floor((NOW + 2 * DAY) / 1_000));
 
-  it("holds one instance, spent flat out every minute of a 31-day month, inside the month", () => {
+  /** One instance's budgets, spent flat out every minute of a 31-day month: what the store would be charged. */
+  function spentFlatOut() {
     const budgets = walletNamesBudgets();
     let reads = 0;
     let writes = 0;
@@ -390,11 +409,31 @@ describe("the month, at the budgets' production sizes (Hobby: 10,000 reads and 2
       if (budgets.readsGlobal.take("global", 1, at) === 0) reads += 1;
       if (budgets.writesGlobal.take("global", 1, at) === 0) writes += 1;
     }
+    return { reads, writes };
+  }
+
+  it("holds one instance, spent flat out every minute of a 31-day month, to 32 days of its budget", () => {
+    const { reads, writes } = spentFlatOut();
     // A full bucket at the start, then a day's refill for each of the 31 days.
     expect(reads).toBeLessThanOrEqual(WALLET_NAMES_READS_PER_DAY * 32);
     expect(writes).toBeLessThanOrEqual(WALLET_NAMES_WRITES_PER_DAY * 32);
-    expect(WALLET_NAMES_READS_PER_DAY * 32).toBeLessThan(10_000);
-    expect(WALLET_NAMES_WRITES_PER_DAY * 32).toBeLessThan(2_000);
+  });
+
+  it("keeps the whole store — short links and names, each spent to the brim at the planned instances — clearly inside the month", () => {
+    const { reads, writes } = spentFlatOut();
+    const N = WALLET_NAMES_PLANNED_INSTANCES;
+    // The short links' writes: a fixed daily window, so at most 32 windows in 31 days (share-store.ts, not changed here).
+    const shareWrites = 32 * SHARE_STORE_WRITES_PER_DAY;
+    expect(N * (shareWrites + writes)).toBeLessThanOrEqual(0.8 * HOBBY_WRITES);
+    // The names' reads; the short links' are about one CDN miss per record, so at most one per write.
+    expect(N * (reads + shareWrites)).toBeLessThanOrEqual(0.35 * HOBBY_READS);
+  });
+
+  it("gives the names the small end: a flood of names alone needs over three times the instances a flood of short links does", () => {
+    const { reads, writes } = spentFlatOut();
+    const shareAlone = HOBBY_WRITES / (32 * SHARE_STORE_WRITES_PER_DAY);
+    expect(HOBBY_WRITES / writes).toBeGreaterThan(3 * shareAlone);
+    expect(HOBBY_READS / reads).toBeGreaterThan(3 * shareAlone);
   });
 
   it("lets a script reading one account all day cost a day of that account's reads, and answers it all the same", async () => {
@@ -454,6 +493,24 @@ describe("the budgets", () => {
     expect((await route.GET(get(token))).status).toBe(200);
   });
 
+  it("refuses a save past the account's day as names_budget, and says paused to that account until it refills", async () => {
+    let clock = NOW;
+    const { route } = routeWith({ now: () => clock, budgets: { writesPerUser: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440 }) } });
+    const alice = await tokenFor(ALICE, Math.floor((NOW + 2 * 86_400_000) / 1_000));
+    const wallet = someWallet();
+    expect(await (await route.PUT(put(alice, { address: wallet, name: "a" }))).json()).toEqual({ names: { [wallet]: "a" } });
+    const refused = await route.PUT(put(alice, { address: someWallet(), name: "b" }));
+    expect(refused.status).toBe(429);
+    expect(await codeOf(refused)).toBe("names_budget");
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    // The names still read, saying paused; another account is not paused.
+    expect(await (await route.GET(get(alice))).json()).toEqual({ names: { [wallet]: "a" }, paused: true });
+    expect(await (await route.GET(get(await tokenFor(BOB)))).json()).toEqual({ names: {} });
+    // A day on, it has refilled: no longer paused.
+    clock += 86_400_000;
+    expect(await (await route.GET(get(alice))).json()).toEqual({ names: { [wallet]: "a" } });
+  });
+
   it("limits one account's saves, from any address", async () => {
     const { route } = routeWith({ budgets: { writesPerUser: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 1_440 }) } });
     const alice = await tokenFor(ALICE);
@@ -465,19 +522,23 @@ describe("the budgets", () => {
     expect((await route.GET(get(alice))).status).toBe(200);
   });
 
-  it("limits this instance's saves, across every account", async () => {
+  it("limits this instance's saves, across every account — and then says paused to everyone", async () => {
     const { route } = routeWith({ budgets: { writesGlobal: createWeightedLimiter({ capacity: 2, refillPerMinute: 2 / 1_440 }) } });
     expect((await route.PUT(put(await tokenFor(ALICE), { address: someWallet(), name: "a" }))).status).toBe(200);
     expect((await route.PUT(put(await tokenFor(BOB), { address: someWallet(), name: "b" }))).status).toBe(200);
     const third = await route.PUT(put(await tokenFor("did:privy:carol000000000000000000000c"), { address: someWallet(), name: "c" }));
     expect(third.status).toBe(429);
-    expect(await codeOf(third)).toBe("rate_limited");
+    expect(await codeOf(third)).toBe("names_budget");
+    expect(await route.GET(get(await tokenFor(ALICE))).then((response) => response.json())).toMatchObject({ paused: true });
+    expect(await route.GET(get(await tokenFor("did:privy:dave00000000000000000000000d"))).then((response) => response.json())).toEqual({ names: {}, paused: true });
   });
 
-  it("limits this instance's store reads, across every account", async () => {
+  it("limits this instance's store reads, across every account, as names_budget: the browser shows the default names", async () => {
     const { route } = routeWith({ budgets: { readsGlobal: createWeightedLimiter({ capacity: 1, refillPerMinute: 1 / 1_440 }) } });
     expect((await route.GET(get(await tokenFor(ALICE)))).status).toBe(200);
-    expect((await route.GET(get(await tokenFor(BOB)))).status).toBe(429);
+    const refused = await route.GET(get(await tokenFor(BOB)));
+    expect(refused.status).toBe(429);
+    expect(await codeOf(refused)).toBe("names_budget");
   });
 
   it("logs refusals by status and code only", async () => {

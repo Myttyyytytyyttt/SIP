@@ -15,7 +15,7 @@ function answering(status: number, body: unknown, headers: Record<string, string
 describe("readWalletNames", () => {
   it("GETs the same-origin route with the token as a bearer, never in the URL, and never cached", async () => {
     const fetch = answering(200, { names: { [WALLET]: "Axiom" } });
-    expect(await readWalletNames("tok.en.value", { fetch })).toEqual({ ok: true, status: 200, body: { names: { [WALLET]: "Axiom" } } });
+    expect(await readWalletNames("tok.en.value", { fetch })).toEqual({ ok: true, status: 200, body: { names: { [WALLET]: "Axiom" }, paused: false } });
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe(WALLET_NAMES_PATH);
     expect(String(url)).not.toContain("tok.en.value");
@@ -26,6 +26,17 @@ describe("readWalletNames", () => {
   it("drops anything in the answer that is not an address with a valid name", async () => {
     const fetch = answering(200, { names: { [WALLET]: "a\nb", junk: "x" } });
     expect(await readWalletNames("t", { fetch })).toMatchObject({ ok: true, body: { names: {} } });
+  });
+
+  it("reads paused only when the server says exactly true", async () => {
+    expect(await readWalletNames("t", { fetch: answering(200, { names: {}, paused: true }) })).toMatchObject({ ok: true, body: { paused: true } });
+    expect(await readWalletNames("t", { fetch: answering(200, { names: {}, paused: "yes" }) })).toMatchObject({ ok: true, body: { paused: false } });
+    expect(await readWalletNames("t", { fetch: answering(429, { error: { code: "names_budget", message: "Wallet names are paused for now. Retry in 60 s." } }, { "retry-after": "60" }) })).toMatchObject({
+      ok: false,
+      status: 429,
+      code: "names_budget",
+      retryAfterSeconds: 60,
+    });
   });
 
   it("reads a store that is off as names_off, and no answer as a network failure", async () => {

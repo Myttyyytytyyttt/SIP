@@ -135,8 +135,8 @@ export interface ShareStore {
 
 type BlobSdk = typeof import("@vercel/blob");
 
-/** The SDK's error, as a kind — matched by class, since a minified bundle renames them. */
-function kindOf(sdk: BlobSdk, error: unknown): string {
+/** The SDK's error, as a kind — matched by class, since a minified bundle renames them. The wallet names, in the same store, say theirs with it too (wallet-names-store.ts). */
+export function kindOf(sdk: BlobSdk, error: unknown): string {
   const kinds: readonly (readonly [unknown, string])[] = [
     [sdk.BlobStoreSuspendedError, "store_suspended"],
     [sdk.BlobAccessError, "forbidden"],

@@ -20,6 +20,8 @@ export const WALLET_NAMES_PATH = "/api/wallet-names";
 /** What both calls answer when they succeed: the account's names, after any save. */
 export interface WalletNames {
   readonly names: Readonly<Record<string, string>>;
+  /** True while the server would refuse a save for its budget (names_budget): the names show, the pencil does not. */
+  readonly paused: boolean;
 }
 
 interface CallOptions {
@@ -49,12 +51,12 @@ async function call(method: "GET" | "PUT", token: string, body: unknown, options
   } catch {
     answer = null;
   }
-  const result = createJsonPoster().result<{ readonly names?: unknown }>(answer);
-  // Only well-formed names reach the screen, whatever the answer carried.
-  return result.ok ? { ok: true, status: result.status, body: { names: namesFrom(result.body.names) } } : result;
+  const result = createJsonPoster().result<{ readonly names?: unknown; readonly paused?: unknown }>(answer);
+  // Only well-formed names reach the screen, whatever the answer carried; only an explicit true pauses.
+  return result.ok ? { ok: true, status: result.status, body: { names: namesFrom(result.body.names), paused: result.body.paused === true } } : result;
 }
 
-/** The account's names. A 503 names_off means this deployment keeps none: show the defaults, offer no pencil. */
+/** The account's names. A 503 names_off means this deployment keeps none, a 429 names_budget that none can be read now: show the defaults, offer no pencil. */
 export const readWalletNames = (token: string, options: CallOptions = {}): Promise<ApiResult<WalletNames>> => call("GET", token, undefined, options);
 
 /** Saves `name` for `address` (null: back to the default name), and answers every name the account has after it. */

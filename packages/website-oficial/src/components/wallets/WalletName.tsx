@@ -25,7 +25,9 @@
  * account's names (a deployment with no store, a failed read) the name is
  * plain text — still as tall as the pencil once someone is signed in, so the
  * card does not move when the read lands and the pencil appears. Signed out
- * (the sample) it is exactly what the row showed before.
+ * (the sample) it is exactly what the row showed before. A save refused for
+ * the day's budget takes the pencil away as it answers (10-23), and its words
+ * still stand in the name's place for their seconds.
  *
  * AN INPUT METHOD'S ENTER IS NOT A SAVE. Japanese, Chinese and Korean typing
  * confirm a word with Enter, and Escape drops the word being composed: while a
@@ -136,8 +138,16 @@ export function WalletName({
     pencil.current?.focus();
   }, [editing]);
 
+  const failing =
+    failed && failure !== null ? (
+      <span role="alert" title={failure.detail ?? undefined} className="min-w-0 truncate text-xs text-destructive">
+        {failure.message}
+        {failure.detail === null ? null : <span className="sr-only"> {failure.detail}</span>}
+      </span>
+    ) : null;
+
   if (!available) {
-    const plain = <span className={cn("min-w-0 truncate", className)}>{name}</span>;
+    const plain = failing ?? <span className={cn("min-w-0 truncate", className)}>{name}</span>;
     return account ? <span className="flex h-6 min-w-0 items-center">{plain}</span> : plain;
   }
 
@@ -174,14 +184,7 @@ export function WalletName({
 
   return (
     <span className="flex h-6 min-w-0 items-center gap-0.5">
-      {failed && failure !== null ? (
-        <span role="alert" title={failure.detail ?? undefined} className="min-w-0 truncate text-xs text-destructive">
-          {failure.message}
-          {failure.detail === null ? null : <span className="sr-only"> {failure.detail}</span>}
-        </span>
-      ) : (
-        <span className={cn("min-w-0 truncate", className)}>{name}</span>
-      )}
+      {failing ?? <span className={cn("min-w-0 truncate", className)}>{name}</span>}
       <button
         ref={pencil}
         type="button"

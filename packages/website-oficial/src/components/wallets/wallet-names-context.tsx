@@ -26,6 +26,15 @@
  * lands, so a name keeps the height the pencil will give it and nothing moves
  * when it appears.
  *
+ * NO BUDGET, NO PENCIL EITHER (10-23). The store is shared with the short share
+ * links and the names get the small end of it (lib/wallet-names-server.ts): a
+ * read the server cannot afford (429 names_budget) leaves the derived names and
+ * no pencil, and is not asked again; an answer that says `paused`, or a save
+ * refused names_budget, keeps the names on screen and takes the pencil away
+ * until the names are read again (the next page load) — the refused save says
+ * so in the name's place first. Nothing on the screen breaks: a name is a
+ * name, with or without its pencil.
+ *
  * Nothing is written to the browser's storage: the names are the account's,
  * and a shared computer keeps none of them after the session ends.
  */
@@ -34,9 +43,9 @@ import { usePrivy } from "@privy-io/react-auth";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { RENAME_COPY } from "@/lib/live-copy";
-import type { ApiFailure } from "@/lib/vault-api";
+import type { ApiFailure, ApiResult } from "@/lib/vault-api";
 import { WALLET_NAME_COPY } from "@/lib/wallet-names";
-import { readWalletNames, saveWalletName } from "@/lib/wallet-names-client";
+import { readWalletNames, saveWalletName, type WalletNames } from "@/lib/wallet-names-client";
 
 /** A failed save in the words that stand in the name's place, and the sentence behind them when there is one. */
 export interface RenameFailure {
@@ -135,12 +144,28 @@ export function refusalWords(rule: string): RenameFailure {
 }
 
 /** A refused save in the words the pencil shows for a moment; the server's own sentence, when it gave one, behind them. */
-function failureWords(failure: ApiFailure | null): RenameFailure {
+export function failureWords(failure: ApiFailure | null): RenameFailure {
   if (failure === null || failure.status === 401) return { message: RENAME_COPY.signIn, detail: null };
+  if (failure.code === "names_budget") return { message: RENAME_COPY.paused, detail: failure.message === "" ? null : failure.message };
   if (failure.status === 429) return { message: RENAME_COPY.rateLimited, detail: null };
   if (failure.code === "too_many_names") return { message: RENAME_COPY.tooManyNames, detail: failure.message === "" ? null : failure.message };
   if (failure.code === "bad_request" && failure.message !== "") return refusalWords(failure.message);
   return { message: RENAME_COPY.failed, detail: null };
+}
+
+/** What a read's answer leaves: the names to show (null: the derived ones), whether the pencil shows, and whether to ask once more. */
+export function afterRead(result: ApiResult<WalletNames>): { readonly names: Readonly<Record<string, string>> | null; readonly available: boolean; readonly again: boolean } {
+  if (result.ok) return { names: result.body.names, available: !result.body.paused, again: false };
+  // Off, not believed, or not affordable today: a setting, a session or a budget, not a moment. Anything else is asked once more.
+  const settled = result.code === "names_off" || result.code === "names_budget" || result.status === 401;
+  return { names: null, available: false, again: !settled };
+}
+
+/** Whether a save's answer takes the pencil away (false), or leaves it as it was (null): only a spent budget does. */
+export function pencilAfterSave(result: ApiResult<WalletNames> | null): false | null {
+  if (result === null) return null;
+  const spent = result.ok ? result.body.paused : result.code === "names_budget";
+  return spent ? false : null;
 }
 
 /** Mounted inside Providers, wherever the wallets are managed: the dashboard's frame and /wallets. */
@@ -178,14 +203,10 @@ export function WalletNamesHost({ children }: { readonly children: ReactNode }) 
       if (!live || token === null) return;
       const result = await readWalletNames(token);
       if (!live) return;
-      if (result.ok) {
-        setNames(result.body.names);
-        setAvailable(true);
-        return;
-      }
-      // Off, or not believed: a setting or a session, not a moment. Anything else is asked once more.
-      const settled = result.code === "names_off" || result.status === 401;
-      if (!settled && again) timer = setTimeout(() => void read(false), READ_RETRY_MS);
+      const after = afterRead(result);
+      if (after.names !== null) setNames(after.names);
+      setAvailable(after.available);
+      if (after.again && again) timer = setTimeout(() => void read(false), READ_RETRY_MS);
     };
     void read(true);
     return () => {
@@ -212,6 +233,8 @@ export function WalletNamesHost({ children }: { readonly children: ReactNode }) 
       if (latest) pending.current.delete(address);
       const answer = result !== null && result.ok ? result.body.names : null;
       setNames(namesAfterAnswer(namesNow.current, { address, name, before, save, newest: saves.current, latest, pending: new Set(pending.current.keys()), answer }));
+      // The day's saves spent: the names stay, the pencil goes until the next read.
+      if (pencilAfterSave(result) === false) setAvailable(false);
       if (result !== null && result.ok) return { ok: true };
       return { ok: false, ...failureWords(result) };
     },
