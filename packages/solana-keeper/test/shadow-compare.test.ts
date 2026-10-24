@@ -81,6 +81,20 @@ describe("production's decision per wallet", () => {
     expect(productionDecisions("not json", undefined).size).toBe(0);
   });
 
+  it("takes a volume wallet's settle from the volume keeper when the profit keeper's turn threw (its THREW names no mode)", () => {
+    const decided = productionDecisions(
+      { wallets: { [VOLUME_W]: { settle: "THREW", invest: "THREW", detail: "Error: rpc", at: iso(T0) } } },
+      { wallets: { [VOLUME_W]: { settle: "SETTLED", invest: "none (volume keeper)", detail: "settled", at: iso(T0 - 5_000) } } },
+    );
+    expect(decided.get(VOLUME_W)).toMatchObject({ settle: "SETTLED", invest: "THREW", servedBy: "volume", at: T0 - 5_000 });
+    // A PROFIT WALLET'S THROW stays the profit keeper's: the volume keeper answers UNSUPPORTED_MODE for it.
+    const own = productionDecisions(
+      { wallets: { [PROFIT_W]: { settle: "THREW", invest: "THREW", detail: "Error: rpc", at: iso(T0) } } },
+      { wallets: { [PROFIT_W]: { settle: "UNSUPPORTED_MODE", invest: "none (volume keeper)", detail: "", at: iso(T0) } } },
+    );
+    expect(own.get(PROFIT_W)).toMatchObject({ settle: "THREW", servedBy: "profit" });
+  });
+
   it("leaves a wallet out when a keeper it needs did not answer: no profit keeper, no invest; profit says not mine and no volume keeper, no settle (the 7-day shadow's 10 at 2026-10-15 05:48 and 2026-10-21 09:41–09:43)", () => {
     const { profit, volume } = production(T0);
     // THE PROFIT KEEPER'S FETCH GOT NO ANSWER: the volume keeper's settle is there, the invest is not — no decision.
@@ -208,6 +222,25 @@ describe("explaining mismatches", () => {
     // A DECIDED SETTLE THAT DIFFERS BESIDE A FAILED INVEST is not excused by the invest's failure.
     const decided: CompareRow = { ...row(1, "IDLE", "SETTLED"), shadow: { ...row(1, "IDLE", "SETTLED").shadow!, invest: null } };
     expect(explainMismatches([row(0, "IDLE", "IDLE"), decided, row(2, "IDLE", "IDLE")])[0]!.explanation).toBe("unexplained");
+  });
+
+  it("never excuses a failed half beside a decision production ACTED on: the IDLE after a buy only production made is no recovery (review of 2de4494)", () => {
+    for (const failed of ["THREW", "FAILED", null]) {
+      const buy = row(1, "IDLE", "IDLE", false, { production: "INVESTED" });
+      const rows = [row(0, "IDLE", "IDLE"), { ...buy, verdict: "mismatch" as const, shadow: { ...buy.shadow!, invest: failed } }, row(2, "IDLE", "IDLE"), row(3, "IDLE", "IDLE")];
+      expect(explainMismatches(rows).map((e) => e.explanation), String(failed)).toEqual(["unexplained"]);
+    }
+    // THE SAME FAILURE BESIDE A DECISION PRODUCTION REPEATS is a recovery: NO_POLICY, then NO_POLICY on both sides.
+    const rest = row(1, "IDLE", "IDLE", false, { production: "NO_POLICY", shadow: "THREW" });
+    expect(explainMismatches([row(0, "IDLE", "IDLE", false, { production: "NO_POLICY", shadow: "NO_POLICY" }), rest, row(2, "IDLE", "IDLE", false, { production: "NO_POLICY", shadow: "NO_POLICY" })])[0]!.explanation).toBe("transient");
+  });
+
+  it("bounds TIMING in time, not in rows: a witness 21 minutes away across a gap explains nothing", () => {
+    const rows = [row(0, "IDLE", "IDLE"), row(1, "IDLE", "IDLE", false, { shadow: "INVESTED" }), row(22, "IDLE", "IDLE", false, { production: "INVESTED", shadow: "IDLE" }), row(23, "IDLE", "IDLE")];
+    expect(explainMismatches(rows).map((e) => [e.row.at - T0, e.explanation])).toEqual([
+      [60_000, "unexplained"],
+      [22 * 60_000, "unexplained"],
+    ]);
   });
 
   it("looks past rows that repeat the failed observation for the recovery (2026-10-20 03:20–03:21: one invest that threw, read twice)", () => {

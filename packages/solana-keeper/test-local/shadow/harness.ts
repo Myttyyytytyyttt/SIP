@@ -1945,14 +1945,32 @@ function analyse(): void {
   // REPLAYED from production.jsonl and jobs.jsonl (compare.jsonl is the live loop's record of the same), and
   // JUDGED ON THE COVERAGE CLOCK: a minute outside a covered stretch (the Mac asleep, the fleet down) is not one
   // the shadow could have answered, so its rows are counted apart and never enter the agreement.
-  const replayed = replayComparison(readLines<ProductionSample>("production.jsonl"), readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl"));
+  const samples = readLines<ProductionSample>("production.jsonl");
+  const replayed = replayComparison(samples, readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl"));
   const rows = replayed.filter((row) => inCovered(row.at));
+  // PRODUCTION ANSWERED: a keeper whose /status did not answer leaves its wallets as no-production gaps, never verdicts
+  // (productionDecisions), so a run in which one keeper stayed silent would compare half the wallets and still pass.
+  // Each keeper must have answered — a body with a wallets object — at ≥ 99 % of the covered samples.
+  const answeredBy = (side: { readonly body: unknown }): boolean => {
+    const wallets = side.body !== null && typeof side.body === "object" ? (side.body as { wallets?: unknown }).wallets : undefined;
+    return wallets !== null && typeof wallets === "object" && !Array.isArray(wallets);
+  };
+  const coveredSamples = samples.filter((sample) => inCovered(Date.parse(sample.at)));
+  const productionAnswered = {
+    samples: coveredSamples.length,
+    profit: coveredSamples.filter((sample) => answeredBy(sample.profit)).length,
+    volume: coveredSamples.filter((sample) => answeredBy(sample.volume)).length,
+  };
   // A MISMATCH IN A WALLET'S LAST COMPARED MINUTE cannot be explained yet: no later minute exists to show a shift or a
   // recovery. It is "open" — listed, counted as a mismatch in the percentage, apart from "unexplained" — and the next
   // rolling report, with more minutes, explains it or not.
   const lastCompared = new Map<string, number>();
   for (const row of rows) if (row.verdict === "agree" || row.verdict === "mismatch") lastCompared.set(row.wallet, Math.max(lastCompared.get(row.wallet) ?? 0, row.at));
-  const explained = explainMismatches(rows).map((e) =>
+  // EXPLAINED OVER EVERY ROW, KEPT FOR THE COVERED ONES: a production sample from a minute the fleet was down is still
+  // evidence of what production said then; only the verdicts are judged on the coverage clock.
+  const explained = explainMismatches(replayed)
+    .filter((e) => inCovered(e.row.at))
+    .map((e) =>
     e.explanation === "unexplained" && e.row.at >= (lastCompared.get(e.row.wallet) ?? Number.POSITIVE_INFINITY)
       ? { ...e, explanation: "open" as const, note: `${e.note}; the data ends here, so no later minute can explain it yet` }
       : e,
@@ -2058,6 +2076,7 @@ function analyse(): void {
     agreement: {
       ...agreement,
       uncoveredRows: replayed.length - rows.length,
+      productionAnswered,
       explained: {
         timing: explained.filter((e) => e.explanation === "timing").length,
         dryRun: explained.filter((e) => e.explanation === "dry-run").length,
@@ -2132,6 +2151,16 @@ function analyse(): void {
         have: `${agreement.percent === null ? "n/a" : agreement.percent.toFixed(2)} % (${agreement.agree}/${agreement.compared}), ${unexplained} unexplained, ${openAtEnd} open`,
         verdict: agreement.percent === null ? "PENDING" : agreement.percent >= 99 && unexplained === 0 ? "PASS" : "FAIL",
       },
+      production: {
+        need: "each keeper's /status answered at ≥ 99 % of the covered samples",
+        have: `profit ${productionAnswered.profit}/${productionAnswered.samples}, volume ${productionAnswered.volume}/${productionAnswered.samples}`,
+        verdict:
+          productionAnswered.samples === 0
+            ? "PENDING"
+            : productionAnswered.profit >= 0.99 * productionAnswered.samples && productionAnswered.volume >= 0.99 * productionAnswered.samples
+              ? "PASS"
+              : "FAIL",
+      },
       overlap: { need: "0 rows", have: `max ${overlapMaxSeen}, final ${String(finalOverlap)}`, verdict: overlapMaxSeen === 0 && (finalOverlap === null || finalOverlap === 0) ? "PASS" : "FAIL" },
       discovery: {
         need: "exactly 1 listing every quiet acted tick, and no listing outside one",
@@ -2158,6 +2187,7 @@ function analyse(): void {
     ...report.coverage.gaps.slice(-20).map((gap) => `  gap ${gap.from} → ${gap.to} (${gap.minutes} min): ${gap.cause}`),
     `window ${String(report.window.from)} → ${String(report.window.to)} (${report.window.coveredMinutes} covered min)`,
     `agreement ${a.percent === null ? "n/a" : a.percent.toFixed(2)} % (${a.agree}/${a.compared}); mismatches: timing ${a.explained.timing}, dry-run ${a.explained.dryRun}, transient ${a.explained.transient}, unexplained ${a.explained.unexplained}, open in the data's last minute ${a.explained.openAtEnd}; gaps: no-shadow ${a.noShadow}, no-production ${a.noProduction}; frontier slots equal ${a.frontier.equal}/${a.frontier.compared}; rows outside the coverage clock ${a.uncoveredRows}`,
+    `production answered: profit ${a.productionAnswered.profit}/${a.productionAnswered.samples}, volume ${a.productionAnswered.volume}/${a.productionAnswered.samples} covered samples`,
     `overlap audit: max ${report.overlap.maxRowsSeen} rows over ${report.overlap.auditsRun} audits (${report.overlap.auditsUnavailable} unavailable), final ${String(report.overlap.final)}`,
     `discovery: ${report.discovery.quietTicksWithExactlyOne}/${report.discovery.quietTicksJudged} quiet acted ticks with exactly one listing, ${report.discovery.quietOrphanListings.length} orphan listings; drill ticks ${report.discovery.drillTicksWithExactlyOne}/${report.discovery.drillTicksJudged}; late ticks ${report.discovery.lateTicks.count} (longest ${String(report.discovery.lateTicks.maxGapMs)} ms)`,
     `discovery by minute: ${report.discovery.quietMinutesWithExactlyOne}/${report.discovery.quietMinutesJudged} quiet covered minutes with exactly one listing; drill minutes ${report.discovery.drillMinutesWithExactlyOne}/${report.discovery.drillMinutesJudged}; gaps ${String(report.discovery.gapsMs.min)}–${String(report.discovery.gapsMs.max)} ms`,

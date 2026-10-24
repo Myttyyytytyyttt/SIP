@@ -137,7 +137,12 @@ export function productionDecisions(profit: unknown, volume: unknown, vaultOf: (
     const vr = v.get(wallet);
     if (pr === undefined) continue;
     const serves = (row: StatusRow | undefined): boolean => row !== undefined && text(row.settle) !== null && row.settle !== UNSUPPORTED_MODE;
-    const served: { row: StatusRow; by: "profit" | "volume" } | null = serves(pr) ? { row: pr, by: "profit" } : serves(vr) ? { row: vr!, by: "volume" } : null;
+    // A PROFIT ROW THAT THREW NAMES NO MODE: the profit keeper turns every vault
+    // and its catch writes THREW for a throw in either half (keeper.mts), the
+    // invest of a VOLUME vault included. Where the volume keeper answered a
+    // settle of its own, that is the wallet's settle.
+    const profitServes = serves(pr) && !(pr.settle === "THREW" && serves(vr));
+    const served: { row: StatusRow; by: "profit" | "volume" } | null = profitServes ? { row: pr, by: "profit" } : serves(vr) ? { row: vr!, by: "volume" } : null;
     if (served === null && vr === undefined) continue;
     const row = served?.row ?? pr;
     const investOwn = text(pr.invest);
@@ -300,6 +305,14 @@ const FAILED_INVESTS = new Set(["THREW", "FAILED"]);
 /** How far apart, in comparison rows of the same wallet, a timing explanation may look: two minutes either way. */
 export const TIMING_WINDOW_ROWS = 2;
 
+/**
+ * The same window IN TIME, which is what bounds it: rows a minute apart, plus
+ * half a minute of slack for a beat that ran late. Counted in rows alone it
+ * stretched across any gap — a Mac asleep, a fleet down — and paired a
+ * mismatch with a "witness" an hour away.
+ */
+export const TIMING_WINDOW_MS = TIMING_WINDOW_ROWS * 60_000 + 30_000;
+
 type Sides = { readonly production: NonNullable<CompareRow["production"]>; readonly shadow: NonNullable<CompareRow["shadow"]> };
 
 /**
@@ -330,15 +343,18 @@ const observedAt = (row: CompareRow, side: "production" | "shadow"): number => {
  * Each mismatch with its explanation. DRY RUN: the shadow's settle detail says
  * what it would have sent, and production's outcome is one a real send leads
  * to. TIMING: for every half that differs (settle, invest), within
- * TIMING_WINDOW_ROWS rows of the same wallet either way, production showed the
+ * TIMING_WINDOW_MS of the same wallet's rows either way, production showed the
  * shadow's value AND the shadow showed production's — the two read the chain at
  * different instants (a settle and the buy it funds may each land a minute
  * apart). TRANSIENT: every half that differs FAILED on one side — a settle that
  * THREW, was INCOMPLETE or RETRY; an invest that THREW or FAILED, or a shadow
  * job that ran out of time before its invest — and the wallet's next compared
- * row with a NEWER observation from each failed side agrees (a row that repeats
- * the failed observation, because no job ran in between, cannot show a
- * recovery). Anything else is unexplained, and the gate fails on it.
+ * row with a NEWER observation from each failed side agrees ON THE DECISION THE
+ * OTHER SIDE MADE (a row that repeats the failed observation, because no job ran
+ * in between, cannot show a recovery; nor can an agreement on something else,
+ * such as the IDLE after a buy only production made). TIMING looks at most
+ * TIMING_WINDOW_MS either way. Anything else is unexplained, and the gate fails
+ * on it.
  */
 export function explainMismatches(rows: readonly CompareRow[]): Explained[] {
   const byWallet = new Map<string, CompareRow[]>();
@@ -358,7 +374,7 @@ export function explainMismatches(rows: readonly CompareRow[]): Explained[] {
         out.push({ row, explanation: "dry-run", note: `the shadow would have sent (${s.settle}, dry); production answered ${p.settle}` });
         return;
       }
-      const near = list.slice(Math.max(0, index - TIMING_WINDOW_ROWS), index + TIMING_WINDOW_ROWS + 1);
+      const near = list.filter((other) => Math.abs(other.at - row.at) <= TIMING_WINDOW_MS);
       const halves = (["settle", "invest"] as const).filter((half) => p[half] !== s[half]);
       const shifted = halves.every(
         (half) =>
@@ -375,7 +391,14 @@ export function explainMismatches(rows: readonly CompareRow[]): Explained[] {
         const next = list
           .slice(index + 1)
           .find((other) => (other.verdict === "agree" || other.verdict === "mismatch") && sides.every((side) => observedAt(other, side) > observedAt(row, side)));
-        if (next?.verdict === "agree") {
+        // THE RECOVERY MUST BE THE SAME DECISION: the side that did not fail says
+        // again what it said, and the failed side now says it too. Without this a
+        // shadow whose buy failed every time production bought was excused by the
+        // IDLE/IDLE minute after — production had spent the money.
+        const same =
+          next !== undefined &&
+          halves.every((half, k) => (failures[k]!.side === "shadow" ? next.production?.[half] === p[half] : next.shadow?.[half] === s[half]));
+        if (next?.verdict === "agree" && same) {
           out.push({ row, explanation: "transient", note: `${failures.map((failure) => failure!.note).join("; ")}; the next fresh comparison agrees` });
           return;
         }
