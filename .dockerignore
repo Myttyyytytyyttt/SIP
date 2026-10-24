@@ -72,6 +72,13 @@ packages/solana-program/target
 #
 *.jsonl
 **/*.jsonl
+# EXCEPT THE KEEPER'S COMMITTED TEST FIXTURES. The keeper's suite runs inside its
+# image (the Dockerfile's `pnpm --dir packages/solana-keeper test`), and a
+# measured Jupiter turn kept as a fixture is one of its inputs: excluded here as
+# a "store file", it made the image's build fail with ENOENT while every host run
+# stayed green (2026-10-24, test/fixtures/jupiter-turn-run2-apijup-unpaced.jsonl).
+# Only that directory comes back; test/dockerfile-copies.test.ts checks it.
+!packages/solana-keeper/test/fixtures/*.jsonl
 *.sqlite
 **/*.sqlite
 **/*.sqlite3

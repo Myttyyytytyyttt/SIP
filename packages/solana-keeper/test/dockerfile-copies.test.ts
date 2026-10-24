@@ -100,6 +100,50 @@ function dockerignoredKeeperDirs(): ReadonlySet<string> | null {
   return out;
 }
 
+/**
+ * Whether .dockerignore keeps one repo path out of the build context, read the
+ * way Docker reads it: every pattern in order, a leading "!" re-includes, and
+ * the LAST pattern that matches the path or one of its parents decides. null
+ * inside the image, where there is no .dockerignore and what is on disk is
+ * what was copied.
+ */
+function dockerignoreExcludes(path: string): boolean | null {
+  let text: string;
+  try {
+    text = read(".dockerignore");
+  } catch {
+    return null;
+  }
+  const toRegex = (pattern: string): RegExp => {
+    let out = "";
+    for (let i = 0; i < pattern.length; i++) {
+      const c = pattern[i]!;
+      if (c === "*" && pattern[i + 1] === "*") {
+        if (pattern[i + 2] === "/") {
+          out += "(?:.*/)?";
+          i += 2;
+        } else {
+          out += ".*";
+          i += 1;
+        }
+      } else if (c === "*") out += "[^/]*";
+      else if (c === "?") out += "[^/]";
+      else out += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+    return new RegExp(`^${out}$`);
+  };
+  const parents = path.split("/").map((_, i, parts) => parts.slice(0, i + 1).join("/"));
+  let excluded = false;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    const negate = line.startsWith("!");
+    const re = toRegex((negate ? line.slice(1) : line).replace(/^\//, "").replace(/\/$/, ""));
+    if (parents.some((p) => re.test(p))) excluded = !negate;
+  }
+  return excluded;
+}
+
 function includedDirs(): readonly string[] {
   const include = JSON.parse(read("packages/solana-keeper/tsconfig.json")).include as readonly string[] | undefined;
   expect(include, "packages/solana-keeper/tsconfig.json states an include list").toBeDefined();
@@ -323,5 +367,27 @@ describe("the keeper's Dockerfile carries every module the keeper imports", () =
     expect([...reached.keys()], "nothing the image carries reaches link-consent.ts").not.toContain(
       "packages/solana-program/scripts/link-consent.ts",
     );
+  });
+});
+
+describe("the suite's own inputs survive .dockerignore", () => {
+  it("reads .dockerignore the way Docker does: secrets and store files out, a negation brings a path back", () => {
+    if (dockerignoreExcludes(".env") === null) return; // inside the image
+    expect(dockerignoreExcludes(".env")).toBe(true);
+    expect(dockerignoreExcludes("packages/solana-keeper/.env.local")).toBe(true);
+    expect(dockerignoreExcludes(".env.example")).toBe(false);
+    expect(dockerignoreExcludes("some/state/run.jsonl")).toBe(true);
+    expect(dockerignoreExcludes("packages/solana-keeper/test-local/fork.sh")).toBe(true);
+    expect(dockerignoreExcludes("packages/solana-keeper/src/keeper.ts")).toBe(false);
+  });
+
+  it("keeps every committed fixture in the build context — the suite runs in the image, and a .jsonl fixture was once kept out as a store file", () => {
+    const names = readdirSync(resolve(KEEPER, "test/fixtures"));
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
+      const excluded = dockerignoreExcludes(`packages/solana-keeper/test/fixtures/${name}`);
+      if (excluded === null) return; // inside the image: what is on disk is what was copied
+      expect(excluded, `test/fixtures/${name} is kept out of the image by .dockerignore`).toBe(false);
+    }
   });
 });
