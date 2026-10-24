@@ -203,6 +203,7 @@ export interface SchedulerOptions {
 /** What one tick did: the tests' handle and the log line. */
 export type TickReport =
   | { readonly kind: "skipped" }
+  | { readonly kind: "stopped" }
   | { readonly kind: "standby"; readonly lock: Extract<LockState, "standby" | "lost"> }
   | { readonly kind: "failed"; readonly error: string }
   | {
@@ -317,6 +318,8 @@ export class Scheduler {
   readonly #filter: LamportsFilter | null;
   #running = false;
   #acting = false;
+  /** The process is going: no tick after stop() takes or keeps the lock. */
+  #stopped = false;
   /** The database's clock when this process last took the lock. */
   #takeoverAt = 0;
   /** The first full pass after a takeover is still to come: its probes are staggered (RT-19). */
@@ -358,6 +361,19 @@ export class Scheduler {
     return this.#acting;
   }
 
+  /**
+   * THE PROCESS IS GOING (a signal, or the watchdog's exit): every later tick is
+   * a no-op that never asks for the lock, and a tick whose lock attempt answers
+   * after this gives the lock straight back. Without it a dying scheduler's next
+   * interval took the lock again during the watchdog's exit grace — 93 of the
+   * 165 watchdog exits in the 7-day shadow — and the standby waited a tick more.
+   * A tick already past its lock attempt finishes what it started.
+   */
+  stop(): void {
+    this.#stopped = true;
+    this.#acting = false;
+  }
+
   #progress(): void {
     try {
       this.#o.progress?.();
@@ -384,6 +400,7 @@ export class Scheduler {
 
   /** One tick. Never throws: a failure is reported, counted, and the next tick tries again. */
   async tick(): Promise<TickReport> {
+    if (this.#stopped) return { kind: "stopped" };
     if (this.#running) {
       this.#skipped += 1;
       return { kind: "skipped" };
@@ -394,6 +411,11 @@ export class Scheduler {
     try {
       const lock = await this.#o.lock.ensure();
       this.#progress();
+      if (this.#stopped) {
+        // STOPPED WHILE THE LOCK WAS BEING ASKED FOR: whatever the answer, it goes back.
+        this.#o.lock.release();
+        return { kind: "stopped" };
+      }
       if (lock === "lost") {
         this.#lockLosses += 1;
         this.#o.log("warn", "the scheduler lost its lock's session; it stands by and asks again next tick");

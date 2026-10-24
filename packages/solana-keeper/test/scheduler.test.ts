@@ -500,6 +500,36 @@ describe("failures, skips and the watchdog", () => {
     expect(s.scheduler.status().skipped).toBe(1);
   });
 
+  it("a stopped scheduler never asks for the lock again: the watchdog's exit grace is the standby's, not one more tick of the dying holder", async () => {
+    const r = rig(1);
+    const a = scheduler(r, "A");
+    const b = scheduler(r, "B");
+    expect((await a.scheduler.tick()).kind).toBe("acted");
+    expect(r.server.holder).toBe("A");
+    // bin/scheduler.mts's watchdog beforeExit: the ticks stop, then the session goes.
+    a.scheduler.stop();
+    a.lock.release();
+    const attempts = r.server.attempts;
+    expect(await a.scheduler.tick()).toEqual({ kind: "stopped" });
+    expect(await a.scheduler.tick()).toEqual({ kind: "stopped" });
+    expect(r.server.attempts).toBe(attempts);
+    expect(r.server.holder).toBeNull();
+    expect(a.scheduler.acting).toBe(false);
+    expect(await b.scheduler.tick()).toMatchObject({ kind: "acted", tookOver: true });
+    expect(r.server.holder).toBe("B");
+  });
+
+  it("a stop that lands while the lock is being asked for gives the lock straight back and acts on nothing", async () => {
+    const r = rig(1);
+    const a = scheduler(r, "A");
+    const ticking = a.scheduler.tick(); // runs up to its lock attempt
+    a.scheduler.stop();
+    expect(await ticking).toEqual({ kind: "stopped" });
+    expect(r.server.holder).toBeNull();
+    expect(r.chain.calls.length).toBe(0);
+    expect(await scheduler(r, "B").scheduler.tick()).toMatchObject({ kind: "acted", tookOver: true });
+  });
+
   it("scheduler-hung: a tick blocked on a call that never returns exits non-zero within the bound; the standby takes over with a full pass", async () => {
     const r = rig(2);
     r.chain.hang = true;

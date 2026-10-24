@@ -331,6 +331,15 @@ if (base.port !== null) {
     .listen(port, () => log.info("scheduler: listening", { port }));
 }
 
+let stopping = false;
+const timers: ReturnType<typeof setInterval>[] = [];
+/** No more ticks, beats or board turns from this process: the first step of both ways out. */
+const stopTicking = (): void => {
+  stopping = true;
+  for (const timer of timers.splice(0)) clearInterval(timer);
+  scheduler.stop();
+};
+
 const watchdog = startWatchdog({
   health: healthNow,
   beforeExit: (report) => {
@@ -339,7 +348,10 @@ const watchdog = startWatchdog({
       staleAfterMs: report.staleAfterMs,
     });
     alerter.fire({ ...watchdogExitAlert(report), title: "The scheduler is restarting itself: its tick stopped moving" });
-    // THE SESSION GOES FIRST, so the standby can take the lock while this process is still exiting.
+    // THE TICKS STOP BEFORE THE SESSION GOES: otherwise this process's next tick
+    // takes the lock straight back during the exit's grace. Then the session
+    // goes, so the standby can take the lock while this process is still exiting.
+    stopTicking();
     lock.release();
   },
   exit: (code) => process.exit(code),
@@ -373,12 +385,9 @@ log.info("scheduler starting", {
   priceTape: config.priceTape ? "on — the lock holder samples SOL/USD into sip_solana.sol_price_tape every tick" : "off",
 });
 
-let stopping = false;
-const timers: ReturnType<typeof setInterval>[] = [];
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
-    stopping = true;
-    for (const timer of timers) clearInterval(timer);
+    stopTicking();
     watchdog.stop();
     // THE RECEIVER'S BELLS FIRST (bounded), then the lock, then the row: a
     // delivery already answered 200 is written before the process goes.
