@@ -456,6 +456,16 @@ describe("WalletsScreen with the seat configured", () => {
       [{ address: IMPORTED }],
     ]);
   });
+
+  it("each trading wallet shows the terminals' icons beside Export key, as links to their fixed hosts", () => {
+    const all = rows(render());
+    expect(all).toHaveLength(4);
+    for (const row of all) {
+      expect(row.body).toMatch(/<a [^>]*href="https:\/\/axiom\.trade\/portfolio"[^>]*data-terminal-shortcut="axiom"/);
+      expect(row.body).toMatch(/<a [^>]*href="https:\/\/gmgn\.ai\/\?chain=sol"[^>]*data-terminal-shortcut="gmgn"/);
+      expect(row.body).toMatch(/<a [^>]*href="https:\/\/trade\.padre\.gg\/wallets"[^>]*data-terminal-shortcut="padre"/);
+    }
+  });
 });
 
 describe("Re-seat keeper: remove every signer on a wallet, then seat the keeper's current signer", () => {

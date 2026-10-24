@@ -16,29 +16,16 @@
 
 import { useEffect, useRef } from "react";
 
+// The S's grid in the film (launch-video MarkBuild) and its seven pieces, on a
+// 1272×1488 mark: one copy, shared with the share card's canvas (10-22).
+import { MARK_H, MARK_H_LINES, MARK_PIECES, MARK_V_LINES, MARK_W } from "@/lib/brand-mark";
 import { usd } from "@/lib/format";
 
-/** The S's grid in the film (launch-video MarkBuild): its edges, on a 1272×1488 mark. */
-const MARK_H_LINES = [0, 271, 497, 607, 880, 989, 1219, 1488] as const;
-const MARK_V_LINES = [0, 275, 998, 1272] as const;
 /** One repeat of that rhythm on the page, in CSS pixels. */
 const TILE_W = 520;
 const TILE_H = (TILE_W * 1488) / 1272;
 const hLines = MARK_H_LINES.map((y) => (y / 1488) * TILE_H);
 const vLines = MARK_V_LINES.map((x) => (x / 1272) * TILE_W);
-
-/** The S's seven pieces, vectorised in launch-video (src/components/Logo.tsx), on its 1272×1488 grid. */
-const MARK_W = 1272;
-const MARK_H = 1488;
-const MARK_PIECES: readonly (readonly (readonly [number, number])[])[] = [
-  [[275, 0], [998, 0], [998, 271], [275, 271]],
-  [[998, 0], [1272, 271], [1272, 497], [998, 497]],
-  [[0, 271], [275, 271], [275, 607], [0, 607]],
-  [[0, 607], [998, 607], [1272, 880], [275, 880]],
-  [[998, 880], [1272, 880], [1272, 1219], [998, 1219]],
-  [[0, 989], [275, 989], [275, 1219], [0, 1219]],
-  [[0, 1219], [998, 1219], [998, 1488], [275, 1488]],
-];
 
 /**
  * The marks that drift beside the headline: the basket's two assets and what

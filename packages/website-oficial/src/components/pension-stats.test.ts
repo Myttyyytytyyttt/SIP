@@ -9,6 +9,7 @@ import { PensionStats, SaveCalendar } from "@/components/pension-stats";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { UNKNOWN } from "@/lib/format";
 import { toDashboardMock } from "@/lib/live-mock";
+import { mock } from "@/mocks";
 
 import { liveDashboard } from "../../test/fixtures/live-dashboard";
 
@@ -48,5 +49,44 @@ describe("the Investments tile on a live page", () => {
     expect(page.stats.investments).toBe(0);
     const html = renderToStaticMarkup(createElement(TooltipProvider, null, createElement(PensionStats, { stats: page.stats, days: page.days, now: page.now, mode: "profit" })));
     expect(tile(html)).toContain(">0</span>");
+  });
+});
+
+/**
+ * A LABEL AND A FIGURE, NOTHING UNDER THEM (owner, 10-23: "títulos simples y
+ * concisos"). No tile keeps a sub line, in the sample or on a live page; what a
+ * reader needs went into the label, and a live figure taken over the loaded
+ * pages says so on hover only.
+ */
+describe("the stat tiles", () => {
+  const stats = (props: Parameters<typeof PensionStats>[0]): string => renderToStaticMarkup(createElement(TooltipProvider, null, createElement(PensionStats, props)));
+  const labels = (html: string): string[] => [...html.matchAll(/<dt[^>]*>([^<]*)<\/dt>/g)].map((match) => match[1]!);
+  /** Each tile's title on its figure, by label. */
+  const titles = (html: string): Record<string, string | null> =>
+    Object.fromEntries([...html.matchAll(/<dt[^>]*>([^<]*)<\/dt><dd([^>]*)>/g)].map((match) => [match[1]!, /title="([^"]*)"/.exec(match[2]!)?.[1] ?? null]));
+
+  it("are a label and a figure each, in the sample", () => {
+    const html = stats({ stats: mock.stats, days: mock.days, now: mock.now, ...(mock.rule.mode === undefined ? {} : { mode: mock.rule.mode }) });
+    expect(labels(html)).toEqual(["This week", "Avg per trade", "Volume", "Biggest save", "Streak", "Investments", "Active days", "Yearly pace"]);
+    expect(html.match(/<dd/g)).toHaveLength(8);
+    expect(html).not.toContain("text-xs text-muted-foreground");
+  });
+
+  it("are a label and a figure each on a live page, the loaded-history note on hover", () => {
+    const page = toDashboardMock(liveDashboard(), { complete: false });
+    const html = stats({ stats: page.stats, days: page.days, now: page.now, mode: "profit" });
+    expect(html.match(/<dd/g)).toHaveLength(labels(html).length);
+    expect(html.replace(/<[^>]+>/g, " ")).not.toContain("loaded history");
+    expect(titles(html)["Biggest save"]).toBe("at today&#x27;s SOL price · in the loaded history");
+    expect(titles(html)["Investments"]).toBe("in the loaded history");
+    // Every label short enough for one line in a 375 px phone's two-column tile.
+    expect(labels(html)).toContain("Avg settlement");
+  });
+
+  it("say nothing about the loaded history once every page is loaded", () => {
+    const page = toDashboardMock(liveDashboard(), { complete: true });
+    const html = stats({ stats: page.stats, days: page.days, now: page.now, mode: "profit" });
+    expect(html).not.toContain("loaded history");
+    expect(titles(html)["Investments"]).toBeNull();
   });
 });

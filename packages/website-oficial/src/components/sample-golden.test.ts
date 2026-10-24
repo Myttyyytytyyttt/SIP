@@ -12,6 +12,27 @@
 // frozen: a diff here is a change to the sample, and it is reviewed as one,
 // never refreshed with `-u` to make a run green.
 //
+// ONE PROP THE SAMPLE DOES PASS (owner, 10-22: "en el mock también puede
+// aparecer pero con los datos del mock claro"): `share`, the Live page's share
+// button, with a card of the sample's own figures marked as the example
+// (exampleShareCardOf). pension-panel and dashboard-main were re-taken for it,
+// on purpose, and changed by the button's markup alone — the figure's row
+// around it and the button itself; nothing else in the sample moved. The
+// landing's app-loop video was not re-recorded (owner: no new video). The row
+// was re-taken once more the same day for its `data-hero-row="tight"` (review:
+// the button wrapped under the figure at some widths; pension-panel.tsx).
+//
+// RE-TAKEN ON PURPOSE FOR THE TEXT TRIM (owner, 10-23: "títulos simples y
+// concisos ... quita esos textos que aparecen de forma de subtítulo", and the
+// chart's range selector "obstruyendo la línea"). pension-panel, pension-stats
+// and dashboard-main changed by exactly that: the line under the hero figure and
+// every stat tile's sub line gone, two tiles renamed ("Biggest save", "Yearly
+// pace"), and the range tabs moved off the plot onto a row above it — and by
+// one class on the figure's row, `w-max max-w-full`, because that line had been
+// what kept the share button beside the figure (ROW_EXACT, pension-panel.tsx).
+// The landing's app-loop video still shows the old subtitles; it was not
+// re-rendered.
+//
 // renderToString, NOT renderToStaticMarkup: the static renderer glues adjacent
 // text nodes together, so splitting one text run into two nodes — which once
 // moved the sample's glyphs by a sub-pixel — would pass unseen. renderToString
@@ -37,6 +58,7 @@ import { ActivityRow } from "@/components/activity-row";
 import { DashboardMain, PENSION_SLOT, RULE_SLOT } from "@/components/dashboard-main";
 import { DashboardSource } from "@/components/DashboardSource";
 import { LiveLoading } from "@/components/live/LiveStates";
+import { ShareSavings } from "@/components/live/ShareSavings";
 import { PensionHoldings } from "@/components/pension-holdings";
 import { PensionPanel } from "@/components/pension-panel";
 import { PensionStats } from "@/components/pension-stats";
@@ -47,6 +69,7 @@ import { Sheet } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WalletActivity } from "@/components/wallet-activity";
 import { MODE_COPY } from "@/lib/live-copy";
+import { exampleShareCardOf } from "@/lib/live-share";
 import { mock } from "@/mocks";
 
 const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = mock;
@@ -78,6 +101,9 @@ const golden = (name: (typeof GOLDENS)[number]): string => {
   expect(existsSync(new URL(path, import.meta.url)), `missing golden ${path}: it is frozen, never re-created by a run`).toBe(true);
   return path;
 };
+
+/** The sample's share button, as MockBody puts it beside the figure: the example's own card. */
+const share = createElement(ShareSavings, { card: exampleShareCardOf({ stats, rule, now }) });
 
 /** The sample's notice, as MockBody puts it over the page. */
 const source = createElement(DashboardSource, { source: "mock", notice: MODE_COPY.sample });
@@ -113,7 +139,7 @@ describe("the sample's markup is frozen", () => {
   });
 
   it("PensionPanel, chart and all", async () => {
-    await expect(html(createElement(PensionPanel, { stats, curve, holdings, days, rule, now, trades, className: PENSION_SLOT }))).toMatchFileSnapshot(golden("pension-panel"));
+    await expect(html(createElement(PensionPanel, { stats, curve, holdings, days, rule, now, trades, share, className: PENSION_SLOT }))).toMatchFileSnapshot(golden("pension-panel"));
   });
 
   it("PensionStats and PensionHoldings, as the panel mounts them", async () => {
@@ -159,7 +185,7 @@ describe("the sample's markup is frozen", () => {
             Fragment,
             null,
             createElement(SavingsRulePanel, { rule, stats, activity, now, className: RULE_SLOT }),
-            createElement(PensionPanel, { stats, curve, holdings, days, rule, now, trades, className: PENSION_SLOT }),
+            createElement(PensionPanel, { stats, curve, holdings, days, rule, now, trades, share, className: PENSION_SLOT }),
           ),
         }),
       ),

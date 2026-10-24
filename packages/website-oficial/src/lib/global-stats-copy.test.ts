@@ -40,20 +40,41 @@ describe("the dashboard's copy", () => {
     expect(sentences.filter((sentence) => /\bvolume\b/.test(sentence))).toEqual([]);
   });
 
-  it("never puts a dollar on screen without saying which price made it", () => {
-    // The two sentences a dollar figure is ever printed in, and the price each one names.
-    expect(GLOBAL_STATS_COPY.dollars("$27.96")).toBe("≈ $27.96 at today’s SOL price");
-    expect(GLOBAL_STATS_COPY.sampleDollars("$27.96")).toBe("≈ $27.96 at a sample SOL price");
-    expect(GLOBAL_STATS_COPY.atLeastDollars("$27.96")).toBe("at least ≈ $27.96 at today’s SOL price");
-    expect(GLOBAL_STATS_COPY.atLeastSampleDollars("$27.96")).toBe("at least ≈ $27.96 at a sample SOL price");
+  it("never puts a dollar on screen without a hover that says which price made it", () => {
+    // The dollar value is a figure; the price that made it is its hover (owner, 10-24: no subtext).
+    expect(GLOBAL_STATS_COPY.dollars("$27.96")).toBe("≈ $27.96");
+    expect(GLOBAL_STATS_COPY.atLeastDollars("$27.96")).toBe("at least ≈ $27.96");
+    expect(GLOBAL_STATS_COPY.dollarsHint).toBe("At today’s SOL price, not what it was worth on the day");
+    expect(GLOBAL_STATS_COPY.sampleDollarsHint).toBe("At a sample SOL price");
     // Nothing else carries a dollar sign: every series and every other figure is in SOL or USDC.
     expect(sentences.filter((sentence) => sentence.includes("$"))).toEqual([]);
   });
 
-  it("names the zone wherever it names days", () => {
-    for (const sentence of [GLOBAL_STATS_COPY.daysUtc, GLOBAL_STATS_COPY.sheet, GLOBAL_STATS_COPY.footnote, ...Object.values(GLOBAL_STATS_COPY.charts).flatMap((chart) => (typeof chart === "object" ? [chart.description] : []))]) {
-      expect(sentence, sentence).toMatch(/UTC/);
-    }
+  it("names the zone wherever it names days: the hover of the dates under the title, and of the strip's day", () => {
+    for (const sentence of [GLOBAL_STATS_COPY.daysUtc, GLOBAL_STATS_COPY.strip.todayIsUtc]) expect(sentence, sentence).toMatch(/UTC/);
+  });
+
+  it("says nothing under a title or a figure: no description, caption or footnote is left to print", () => {
+    // The kinds of sentence the owner asked to go (10-24). A caveat that must stay is a `hint` (a hover) or, on three cards, an `info` (a "?").
+    const keys: string[] = [];
+    const walk = (value: unknown, path: string): void => {
+      if (value !== null && typeof value === "object") for (const [key, entry] of Object.entries(value)) walk(entry, path === "" ? key : `${path}.${key}`);
+      else keys.push(path);
+    };
+    walk(GLOBAL_STATS_COPY, "");
+    expect(keys.filter((key) => /(^|\.)(subtitle|description|caption|footnote|sampleFootnote|body|provenance|sheet)$/.test(key))).toEqual([]);
+    expect(keys.filter((key) => /(^|\.)info$/.test(key)).sort()).toEqual(["leaders.info", "saved.info", "traded.info"]);
+  });
+
+  it("keeps every way the traded figure falls short when the '?' got shorter", () => {
+    // Moved, never dropped (review 10-24): the first settlements recorded no trading, and nothing else on the page says so.
+    for (const caveat of [/measured differently/, /no SOL side/, /early settlements recorded none/]) expect(GLOBAL_STATS_COPY.traded.info).toMatch(caveat);
+  });
+
+  it("titles a chart with Daily|Weekly or a running total without a period those controls would make false", () => {
+    // Active pensions draws one bar per day and nothing else, so its "per day" holds.
+    const { saved, settlements, invested } = GLOBAL_STATS_COPY.charts;
+    for (const title of [saved.title, settlements.title, invested.title]) expect(title, title).not.toMatch(/per (day|week)|daily|weekly/i);
   });
 
   it("labels the sample as a sample", () => {

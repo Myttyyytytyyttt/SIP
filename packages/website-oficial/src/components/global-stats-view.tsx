@@ -4,7 +4,14 @@
  * The reference's composition (owner, 09-30: Uniswap's board on Blockworks, "a
  * nuestro estilo shadcn"), top to bottom: two wide cards with one large centred
  * figure, a row of counters, two stacked-bar charts, two single-figure cards,
- * two more charts. Each card: a title with its "?", one grey line, the figure.
+ * two more charts. Each card: a short title, then the figure.
+ *
+ * NO GREY LINES (owner, 10-24: "lo que esté de más, quítalo", as on the
+ * pension page the day before). Nothing under the page title, under a card's
+ * title or under a figure explains anything, and there is no footnote. What a
+ * figure must still say — that days are UTC, why it is "at least", which price
+ * made a dollar, why a dash — is in the hover of that figure or title. A "?" is kept on three cards
+ * only, where the figure is read wrong without it (src/lib/global-stats-copy.ts).
  *
  * WHAT IT NEVER DOES: print a 0 for something it could not read, print the
  * sample without saying so, or print a figure without its unit. The model
@@ -22,7 +29,7 @@ import { RunningTotalCard } from "@/components/global-stats-area";
 import { StackedBarsCard, type HeadlineProps } from "@/components/global-stats-chart";
 import { InfoTip } from "@/components/info-tip";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatSolAtMost, formatSol, formatUsd } from "@/lib/amounts";
 import { MONO } from "@/lib/classes";
@@ -55,8 +62,12 @@ export const DASHBOARD_PATH = "/dashboard";
 
 const reasonText = (reason: Reason): string => COPY.reason[reason];
 
-/** "1 pension" / "24 pensions". */
-const pensionsText = (n: number): string => (n === 1 ? "1 pension" : `${count(n)} pensions`);
+/** A hover, or none: the notes that are there, joined. */
+const titled = (...notes: readonly (string | null | undefined)[]): { readonly title?: string } => {
+  const title = notes.filter((note): note is string => note !== null && note !== undefined && note !== "").join(" · ");
+  return title === "" ? {} : { title };
+};
+
 const settlementsText = (n: number): string => (n === 1 ? "1 settlement" : `${count(n)} settlements`);
 
 /**
@@ -81,62 +92,45 @@ function SampleBadge({ sample }: { readonly sample: boolean }) {
   ) : null;
 }
 
-/** A card's head: title, its "?", the sample badge, and one grey line. */
-function Head({ title, info, description, sample }: { readonly title: string; readonly info: string; readonly description?: string; readonly sample: boolean }) {
+/** A card's head: its short title and the sample badge. Nothing under it. */
+function Head({ title, sample }: { readonly title: string; readonly sample: boolean }) {
   return (
     <CardHeader>
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         <CardTitle>{title}</CardTitle>
-        <InfoTip label={title}>{info}</InfoTip>
         <SampleBadge sample={sample} />
       </div>
-      {description === undefined ? null : <CardDescription>{description}</CardDescription>}
     </CardHeader>
   );
 }
 
-/** The large centred figure and what it is, with any qualifier before it. */
-function Figure({ value, qualifier, caption, title, size = "hero" }: { readonly value: string; readonly qualifier?: string | null; readonly caption: string; readonly title?: string; readonly size?: "hero" | "tile" }) {
+/** The large centred figure: a label or qualifier before it, its unit after it, and every digit and caveat in its hover. */
+function Figure({ value, qualifier = null, unit = null, title }: { readonly value: string; readonly qualifier?: string | null; readonly unit?: string | null; readonly title?: string }) {
   return (
-    <div className="flex flex-col items-center gap-1 text-center">
-      <div className="flex flex-wrap items-baseline justify-center gap-x-2">
-        {qualifier === null || qualifier === undefined ? null : <span className="text-base text-muted-foreground">{qualifier}</span>}
-        <span
-          className={cn(MONO, "font-semibold tracking-tight", size === "hero" ? "text-4xl sm:text-5xl" : "text-3xl sm:text-4xl")}
-          {...(title === undefined ? {} : { title })}
-        >
-          {value}
-        </span>
-      </div>
-      <div className="text-sm">{caption}</div>
+    <div className="flex flex-wrap items-baseline justify-center gap-x-2 text-center" {...titled(title)}>
+      {qualifier === null ? null : <span className="text-base text-muted-foreground">{qualifier}</span>}
+      <span className={cn(MONO, "text-3xl font-semibold tracking-tight sm:text-4xl")}>{value}</span>
+      {unit === null ? null : <span className="text-sm text-muted-foreground">{unit}</span>}
     </div>
   );
 }
 
-/** A figure nobody could read: a dash, and why. Never a 0. */
-function Unread({ caption, reason, size = "hero" }: { readonly caption: string; readonly reason: Reason; readonly size?: "hero" | "tile" }) {
+/** A figure nobody could read: a dash, and why in its hover. Never a 0. */
+function Unread({ reason }: { readonly reason: Reason }) {
   return (
-    <div className="flex flex-col items-center gap-1 text-center" data-reason={reason}>
-      <Figure value="—" caption={caption} size={size} />
-      <p className="max-w-xs text-xs text-muted-foreground">{reasonText(reason)}</p>
+    <div data-reason={reason}>
+      <Figure value={UNKNOWN} title={reasonText(reason)} />
     </div>
   );
 }
 
-/** The pension count as the provenance of a total: "across 3 pensions", or "at least" when the count is a floor. */
-function acrossText(model: GlobalStatsModel): string | null {
-  if (model.pensions.kind !== "known") return null;
-  const { count: n, bound } = model.pensions.value;
-  return bound === "at-least" ? COPY.acrossAtLeast(pensionsText(n)) : COPY.across(pensionsText(n));
-}
-
-/** The dollar sentence under a SOL headline: a floor when the total is one, never $0 for a price nobody read. */
-function dollarLine(total: Stat<{ readonly lamports: Raw }>, price: Stat<Raw>, sample: boolean, atLeast: boolean): string | null {
+/** The dollar value under a SOL headline, the price that made it in its hover: a floor when the total is one, never $0 for a price nobody read. */
+function dollarLine(total: Stat<{ readonly lamports: Raw }>, price: Stat<Raw>, sample: boolean, atLeast: boolean): HeadlineProps["dollars"] {
   if (total.kind === "unavailable") return null;
   const dollars = dollarsFor(total, price);
-  if (dollars.kind === "unavailable") return COPY.noDollars(reasonText(dollars.reason));
+  if (dollars.kind === "unavailable") return { text: COPY.noDollars, title: reasonText(dollars.reason) };
   const usd = formatUsd(BigInt(dollars.value));
-  return sample ? (atLeast ? COPY.atLeastSampleDollars(usd) : COPY.sampleDollars(usd)) : atLeast ? COPY.atLeastDollars(usd) : COPY.dollars(usd);
+  return { text: atLeast ? COPY.atLeastDollars(usd) : COPY.dollars(usd), title: sample ? COPY.sampleDollarsHint : COPY.dollarsHint };
 }
 
 /** "+12.4% in 7 days" — only from a running total that stood above zero a week before, and only when that week was read whole. */
@@ -146,45 +140,42 @@ function growthText(rows: readonly DayValues[], end: UtcDay, series: readonly st
   return bps === null || bps <= 0 ? null : COPY.growth(pct(bps, 1));
 }
 
+/**
+ * NO PROVENANCE LINE UNDER THE TOTAL (10-24). "across 3 pensions" repeated the
+ * strip and the Pensions tile, and "since Sep 19" the span under the page
+ * title; a cut read says so in the figure's hover, beside its "at least".
+ */
 function savedHeadline(model: GlobalStatsModel, sample: boolean, days: readonly DayValues[] | null, partial: boolean, end: UtcDay): HeadlineProps {
   const { saved } = model;
-  if (saved.kind === "unavailable") return { value: "—", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [reasonText(saved.reason)] };
+  if (saved.kind === "unavailable") return { value: UNKNOWN, qualifier: null, unit: "SOL", title: reasonText(saved.reason), delta: null, dollars: null };
   const floor = saved.value.bound === "at-least";
-  const pensions = model.pensions.kind === "known" ? model.pensions.value : null;
-  // A cut read's first day is only the oldest day that was READ: no "since" then.
-  const provenance = [
-    ...[acrossText(model)].filter((part): part is string => part !== null),
-    ...(!floor && model.firstDayProven && model.firstDay.kind === "known" && model.firstDay.value !== null ? [COPY.since(dateLabel(model.firstDay.value))] : []),
-  ].join(" · ");
   const figure = heroSol(saved.value.lamports);
   return {
     value: figure.text,
     qualifier: floor ? COPY.saved.atLeast : null,
     unit: "SOL",
-    exact: figure.exact,
+    title: titled(figure.exact, floor ? COPY.saved.atLeastHint : null).title ?? null,
     delta: days === null ? null : growthText(days, end, ["saved"], partial || floor),
-    lines: [dollarLine(saved, model.solPrice, sample, floor), provenance].filter((line): line is string => line !== null && line !== ""),
+    dollars: dollarLine(saved, model.solPrice, sample, floor),
   };
 }
 
 function tradedHeadline(model: GlobalStatsModel, sample: boolean, days: readonly DayValues[] | null, partial: boolean, end: UtcDay): HeadlineProps {
   const { traded } = model;
-  if (traded.kind === "unavailable") return { value: "—", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [reasonText(traded.reason)] };
+  if (traded.kind === "unavailable") return { value: UNKNOWN, qualifier: null, unit: "SOL", title: reasonText(traded.reason), delta: null, dollars: null };
   const figure = heroSol(traded.value.lamports);
   return {
     value: figure.text,
-    // Approximate, always: never "at least" — the measure can over-count as well as under-count.
+    // Approximate, always: never "at least" — the measure can over-count as well as under-count. Its "?" says how.
     qualifier: "≈",
     unit: "SOL",
-    exact: figure.exact,
+    title: titled(figure.exact, traded.value.partial ? COPY.traded.partial : null).title ?? null,
     delta: days === null ? null : growthText(days, end, ["profit", "volume"], partial || traded.value.partial),
-    lines: [dollarLine(traded, model.solPrice, sample, false), traded.value.partial ? `${COPY.traded.provenance} ${COPY.traded.partial}` : COPY.traded.provenance].filter(
-      (line): line is string => line !== null,
-    ),
+    dollars: dollarLine(traded, model.solPrice, sample, false),
   };
 }
 
-/** A figure the page could not read on the strip: a dash, its reason in the title. */
+/** One figure on the strip: its label, its value, and in its hover what it needs said — a dash's reason among them. */
 function StripItem({ label, value, title }: { readonly label: string; readonly value: string; readonly title?: string }) {
   return (
     <div className="flex items-baseline gap-1.5 whitespace-nowrap" {...(title === undefined ? {} : { title })}>
@@ -197,8 +188,10 @@ function StripItem({ label, value, title }: { readonly label: string; readonly v
 /**
  * THE STRIP UNDER THE TITLE: the reference's "ETH Price · Transactions (24H) ·
  * Pairs · Fees (24H)", in this protocol's terms. "Today" is the UTC day the
- * figures were added up on. An item nobody published is left out; one that
- * could not be read is a dash.
+ * figures were added up on — said in the hover of the two items it dates, no
+ * longer as a grey sentence at the strip's end (10-24), which took a row of
+ * its own on a phone. An item nobody published is left out; one that could
+ * not be read is a dash.
  */
 function StatsStrip({ model, sample, end }: { readonly model: GlobalStatsModel; readonly sample: boolean; readonly end: UtcDay }) {
   const items: { readonly key: string; readonly label: string; readonly value: string; readonly title?: string }[] = [];
@@ -216,7 +209,7 @@ function StatsStrip({ model, sample, end }: { readonly model: GlobalStatsModel; 
     // "Today" only when the series' last day IS the day the totals were added
     // up; a block kept from an earlier read names its own day instead.
     const isToday = model.computedAt.kind === "known" && model.computedAt.value.slice(0, 10) === end;
-    const why = unread ? { title: COPY.charts.partial } : {};
+    const why = titled(isToday ? COPY.strip.todayIsUtc : COPY.daysUtc, unread ? COPY.charts.partial : null);
     items.push({ key: "today-settlements", label: isToday ? COPY.strip.todaySettlements : COPY.strip.settlementsOn(dayLabel(end)), value: unread ? UNKNOWN : count(settled), ...why });
     items.push({ key: "today-saved", label: isToday ? COPY.strip.todaySaved : COPY.strip.savedOn(dayLabel(end)), value: unread ? UNKNOWN : `${formatSolAtMost(put, 4)} SOL`, ...why });
   } else if (daily.reason !== "not-served-yet") {
@@ -224,16 +217,15 @@ function StatsStrip({ model, sample, end }: { readonly model: GlobalStatsModel; 
   }
   if (model.pensions.kind === "known") {
     const { count: n, bound } = model.pensions.value;
-    items.push({ key: "pensions", label: COPY.strip.pensions, value: bound === "at-least" ? `≥ ${count(n)}` : count(n) });
+    items.push({ key: "pensions", label: COPY.strip.pensions, value: bound === "at-least" ? `≥ ${count(n)}` : count(n), title: COPY.pensions.hint });
   }
   items.push({ key: "assets", label: COPY.strip.assets, value: count(model.shelf.offered.length) });
 
   return (
     <dl className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border bg-card/60 px-4 py-3 text-sm" data-card="strip">
       {items.map((item) => (
-        <StripItem key={item.key} label={item.label} value={item.value} {...(item.title === undefined ? {} : { title: item.title })} />
+        <StripItem key={item.key} label={item.label} value={item.value} {...titled(item.title)} />
       ))}
-      <div className="ml-auto text-xs text-muted-foreground">{COPY.strip.todayIsUtc}</div>
     </dl>
   );
 }
@@ -258,45 +250,45 @@ function Spark({ bars, tone }: { readonly bars: readonly number[] | null; readon
   );
 }
 
-/** A counter: its figure, what it counts, and the last two weeks of it under it when they were read whole. */
+/**
+ * A counter: label and figure, and the last two weeks of it under it when they
+ * were read whole. What the count includes, and the count behind it, are the
+ * figure's hover (10-24): no line under it.
+ */
 function Tile({
   id,
   title,
-  info,
   sample,
   figure,
-  caption,
+  hint,
   spark = null,
   tone = "count",
   children,
 }: {
   readonly id: string;
   readonly title: string;
-  readonly info: string;
   readonly sample: boolean;
   readonly figure: Stat<{ readonly text: string; readonly qualifier?: string | null; readonly unit?: string }>;
-  readonly caption: string;
+  readonly hint?: string | null;
   readonly spark?: readonly number[] | null;
   readonly tone?: "count" | "money" | "invested";
   readonly children?: React.ReactNode;
 }) {
   return (
     <Card className="min-w-0" data-card={id}>
-      <Head title={title} info={info} sample={sample} />
+      <Head title={title} sample={sample} />
       <CardContent className="flex flex-1 flex-col">
         {figure.kind === "known" ? (
-          <div className="flex flex-wrap items-baseline gap-x-1.5">
+          <div className="flex flex-wrap items-baseline gap-x-1.5" {...titled(hint)}>
             {figure.value.qualifier === null || figure.value.qualifier === undefined ? null : <span className="text-sm text-muted-foreground">{figure.value.qualifier}</span>}
             <span className={cn(MONO, "text-3xl font-semibold tracking-tight")}>{figure.value.text}</span>
             {figure.value.unit === undefined ? null : <span className="text-sm text-muted-foreground">{figure.value.unit}</span>}
           </div>
         ) : (
-          <div data-reason={figure.reason}>
+          <div data-reason={figure.reason} title={reasonText(figure.reason)}>
             <span className={cn(MONO, "text-3xl font-semibold tracking-tight")}>{UNKNOWN}</span>
-            <p className="mt-1 text-xs text-muted-foreground">{reasonText(figure.reason)}</p>
           </div>
         )}
-        <p className="mt-1 text-xs text-muted-foreground">{caption}</p>
         {children}
         <Spark bars={spark} tone={tone} />
       </CardContent>
@@ -318,18 +310,20 @@ function Tiles({ model, sample, series, end }: { readonly model: GlobalStatsMode
   // Not published yet: named once in the panel below, not drawn as an empty card here.
   const showInvested = !(invested.kind === "unavailable" && invested.reason === "not-served-yet");
   const paying = model.payingSettlements.kind === "known" ? model.payingSettlements.value : null;
-  const settlementsCaption =
-    paying === null ? COPY.settlements.caption : COPY.settlements.paying(paying.bound === "at-least" ? `${COPY.atLeast} ${count(paying.count)}` : count(paying.count));
+  // The paying count was the line under Settlements; it is in the hover now, beside what the figure includes.
+  const settlementsHint = titled(
+    COPY.settlements.hint,
+    paying === null ? null : COPY.settlements.paying(paying.bound === "at-least" ? `${COPY.atLeast} ${count(paying.count)}` : count(paying.count)),
+  ).title;
   const tiles = [
-    <Tile key="pensions" id="pensions" title={COPY.pensions.title} info={COPY.pensions.info} sample={sample} figure={countedFigure(model.pensions)} caption={COPY.pensions.caption} spark={sparkOf(series.pensions, end, ["pensions"])} />,
+    <Tile key="pensions" id="pensions" title={COPY.pensions.title} sample={sample} figure={countedFigure(model.pensions)} hint={COPY.pensions.hint} spark={sparkOf(series.pensions, end, ["pensions"])} />,
     <Tile
       key="settlements"
       id="settlements"
       title={COPY.settlements.title}
-      info={COPY.settlements.info}
       sample={sample}
       figure={countedFigure(model.settlements)}
-      caption={settlementsCaption}
+      hint={settlementsHint}
       spark={sparkOf(series.settlements, end, ["profit", "volume"])}
     />,
     ...(showInvested
@@ -338,26 +332,19 @@ function Tiles({ model, sample, series, end }: { readonly model: GlobalStatsMode
             key="invested"
             id="invested"
             title={COPY.invested.title}
-            info={COPY.invested.info}
             sample={sample}
             figure={
               invested.kind === "known" ? { kind: "known", value: { text: usdcText(invested.value.usdcRaw), unit: "USDC", qualifier: invested.value.bound === "at-least" ? COPY.atLeast : null } } : invested
             }
-            caption={invested.kind === "known" && invested.value.buys !== null ? COPY.invested.caption(count(invested.value.buys), invested.value.buys === 1) : COPY.invested.captionNoBuys}
+            // In the hover: the Assets table's Purchases column is hidden below md.
+            hint={invested.kind === "known" && invested.value.buys !== null ? COPY.invested.buys(count(invested.value.buys), invested.value.buys === 1) : null}
             spark={sparkOf(series.invested, end, ["invested"])}
             tone="invested"
           />,
         ]
       : []),
-    <Tile
-      key="shelf"
-      id="shelf"
-      title={COPY.shelf.title}
-      info={COPY.shelf.info}
-      sample={sample}
-      figure={{ kind: "known", value: { text: count(shelf.offered.length) } }}
-      caption={COPY.shelf.caption(shelf.offered.join(", "), count(shelf.listed))}
-    >
+    // Which assets are on offer, and of how many: the badges below say it, filled or outlined.
+    <Tile key="shelf" id="shelf" title={COPY.shelf.title} sample={sample} figure={{ kind: "known", value: { text: count(shelf.offered.length) } }} hint={COPY.shelf.hint}>
       <div className="mt-3 flex flex-wrap gap-1.5">
         {shelf.assets.map((asset) => (
           <Badge key={asset.mint} variant={asset.offered ? "secondary" : "outline"} className={cn("font-mono font-normal", asset.offered ? "" : "text-muted-foreground")}>
@@ -375,7 +362,7 @@ function Tiles({ model, sample, series, end }: { readonly model: GlobalStatsMode
 function ByModeCard({ model, sample }: { readonly model: GlobalStatsModel; readonly sample: boolean }) {
   const { byMode } = model;
   const body = (() => {
-    if (byMode.kind === "unavailable") return <Unread caption={COPY.byMode.caption} reason={byMode.reason} size="tile" />;
+    if (byMode.kind === "unavailable") return <Unread reason={byMode.reason} />;
     const profit = BigInt(byMode.value.profit?.savedRaw ?? "0");
     const volume = BigInt(byMode.value.volume?.savedRaw ?? "0");
     const total = profit + volume;
@@ -389,7 +376,8 @@ function ByModeCard({ model, sample }: { readonly model: GlobalStatsModel; reado
     ];
     return (
       <div className="flex flex-col gap-4">
-        <Figure value={pct(profitBps, 2)} qualifier={floor ? "≈" : null} caption={COPY.byMode.caption} size="tile" />
+        {/* "Profit" before the share: the line under it that said whose share it is went on 10-24. */}
+        <Figure value={pct(profitBps, 2)} qualifier={floor ? `${COPY.byMode.label} ≈` : COPY.byMode.label} title={COPY.byMode.hint} />
         <div aria-hidden className="flex h-2 w-full gap-0.5 overflow-hidden rounded-full">
           {sides.map((side) => (side.bps === 0 ? null : <div key={side.key} className={cn("h-full", SERIES[side.key].swatch)} style={{ width: `${side.bps / 100}%` }} />))}
         </div>
@@ -413,7 +401,7 @@ function ByModeCard({ model, sample }: { readonly model: GlobalStatsModel; reado
   })();
   return (
     <Card className="min-w-0" data-card="by-mode">
-      <Head title={COPY.byMode.title} info={COPY.byMode.info} description={COPY.byMode.description} sample={sample} />
+      <Head title={COPY.byMode.title} sample={sample} />
       <CardContent>{body}</CardContent>
     </Card>
   );
@@ -423,15 +411,15 @@ function ByModeCard({ model, sample }: { readonly model: GlobalStatsModel; reado
 function AverageCard({ model, sample }: { readonly model: GlobalStatsModel; readonly sample: boolean }) {
   const { average } = model;
   const body = (() => {
-    if (average.kind === "unavailable") return <Unread caption={COPY.average.caption} reason={average.reason} size="tile" />;
+    if (average.kind === "unavailable") return <Unread reason={average.reason} />;
     if (average.value === null) return <p className="py-6 text-center text-sm text-muted-foreground">{COPY.average.nothing}</p>;
     const figure = heroSol(average.value.lamports);
-    // A floor over a floor is neither: an estimate.
-    return <Figure value={figure.text} title={figure.exact} qualifier={average.value.bound === "at-least" ? "≈" : null} caption={COPY.average.caption} size="tile" />;
+    // A floor over a floor is neither: an estimate. The unit sits beside the figure: the line under it that named SOL went on 10-24.
+    return <Figure value={figure.text} unit="SOL" title={titled(figure.exact, COPY.average.hint).title} qualifier={average.value.bound === "at-least" ? "≈" : null} />;
   })();
   return (
     <Card className="min-w-0" data-card="average">
-      <Head title={COPY.average.title} info={COPY.average.info} description={COPY.average.description} sample={sample} />
+      <Head title={COPY.average.title} sample={sample} />
       <CardContent className="flex min-h-32 flex-col justify-center">{body}</CardContent>
     </Card>
   );
@@ -443,7 +431,6 @@ function ComingCard() {
     <Card className="border border-dashed ring-0" data-card="coming">
       <CardHeader>
         <CardTitle>{COPY.coming.title}</CardTitle>
-        <CardDescription>{COPY.coming.body}</CardDescription>
       </CardHeader>
       <CardContent>
         <AppLink href={urlWithMode(DASHBOARD_PATH, "mock")} className="text-sm font-medium underline underline-offset-4 hover:text-foreground">
@@ -499,8 +486,7 @@ function LeadCards({ model, sample, series, end, first }: { readonly model: Glob
       <RunningTotalCard
         id="saved"
         title={COPY.saved.title}
-        description={COPY.saved.description}
-        info={model.saved.kind === "known" && model.saved.value.bound === "at-least" ? `${COPY.saved.info} ${COPY.saved.atLeastInfo}` : COPY.saved.info}
+        info={COPY.saved.info}
         sample={sample}
         headline={savedHeadline(model, sample, rowsOf(series.saved), partialOf(series.saved), end)}
         days={series.saved}
@@ -515,12 +501,10 @@ function LeadCards({ model, sample, series, end, first }: { readonly model: Glob
       <StackedBarsCard
         id="traded"
         title={COPY.traded.title}
-        description={COPY.charts.traded.description}
         info={COPY.traded.info}
         sample={sample}
         headline={tradedHeadline(model, sample, rowsOf(series.traded), partialOf(series.traded), end)}
         approximate
-        daysOf="traded"
         series={["profit", "volume"]}
         unit={{ label: "SOL", decimals: 9 }}
         days={series.traded}
@@ -535,11 +519,13 @@ function LeadCards({ model, sample, series, end, first }: { readonly model: Glob
   );
 }
 
+/**
+ * The four per-day charts. A title each, the unit in it where the axis has
+ * none, and what it counts in the title's hover — no line under the title, no
+ * count of days under the bars, and no per-asset footer, which repeated the
+ * Assets table's Invested column (10-24).
+ */
 function Charts({ model, sample, series, end, first }: { readonly model: GlobalStatsModel; readonly sample: boolean; readonly series: DailySeries; readonly end: UtcDay; readonly first: UtcDay | null }) {
-  const byAsset =
-    model.invested.kind === "known" && model.invested.value.byAsset !== null && model.invested.value.byAsset.length > 0
-      ? `${COPY.charts.byAsset}: ${model.invested.value.byAsset.map((asset) => `${model.shelf.symbolOf[asset.mint] ?? shortHex(asset.mint)} ${usdcText(asset.usdcRaw)} USDC`).join(" · ")}`
-      : null;
   const common = { sample, end, first } as const;
 
   return (
@@ -549,12 +535,9 @@ function Charts({ model, sample, series, end, first }: { readonly model: GlobalS
           {...common}
           id="saved-per-day"
           title={COPY.charts.saved.title}
-          description={COPY.charts.saved.description}
-          info={COPY.charts.saved.info}
           series={["profit", "volume"]}
           unit={{ label: "SOL", decimals: 9 }}
           days={series.savedByMode}
-          daysOf="saving"
           periods={["day", "week"]}
           views={["period", "cumulative", "share"]}
           emptyCaption={COPY.charts.empty}
@@ -564,8 +547,7 @@ function Charts({ model, sample, series, end, first }: { readonly model: GlobalS
           {...common}
           id="settlements-per-day"
           title={COPY.charts.settlements.title}
-          description={COPY.charts.settlements.description}
-          info={COPY.charts.settlements.info}
+          hint={COPY.charts.settlements.hint}
           series={["profit", "volume"]}
           unit={{ label: null, decimals: 0 }}
           days={series.settlements}
@@ -584,8 +566,7 @@ function Charts({ model, sample, series, end, first }: { readonly model: GlobalS
           {...common}
           id="pensions-per-day"
           title={COPY.charts.pensions.title}
-          description={COPY.charts.pensions.description}
-          info={COPY.charts.pensions.info}
+          hint={COPY.charts.pensions.hint}
           series={["pensions"]}
           unit={{ label: null, decimals: 0 }}
           days={series.pensions}
@@ -599,8 +580,7 @@ function Charts({ model, sample, series, end, first }: { readonly model: GlobalS
           {...common}
           id="invested-per-day"
           title={COPY.charts.invested.title}
-          description={COPY.charts.invested.description}
-          info={COPY.charts.invested.info}
+          hint={COPY.charts.invested.hint}
           series={["invested"]}
           unit={{ label: "USDC", decimals: 6 }}
           days={series.invested}
@@ -608,8 +588,6 @@ function Charts({ model, sample, series, end, first }: { readonly model: GlobalS
           views={["period", "cumulative"]}
           emptyCaption={COPY.charts.emptyInvested}
           unavailableCaption={unavailableCaption(series.invested)}
-          daysOf="purchase"
-          footer={byAsset}
         />
       </div>
     </>
@@ -631,7 +609,6 @@ function LeadersTable({ model, sample, mode }: { readonly model: GlobalStatsMode
           <InfoTip label={COPY.leaders.title}>{COPY.leaders.info}</InfoTip>
           <SampleBadge sample={sample} />
         </div>
-        <CardDescription>{COPY.leaders.description}</CardDescription>
         <CardAction>
           <AppLink href={mode === null ? "/leaderboard" : urlWithMode("/leaderboard", mode)} className="text-sm font-medium text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">
             {COPY.leaders.seeAll}
@@ -691,6 +668,8 @@ function LeadersTable({ model, sample, mode }: { readonly model: GlobalStatsMode
 function AssetsTable({ model, sample }: { readonly model: GlobalStatsModel; readonly sample: boolean }) {
   const { invested, shelf } = model;
   const spent = invested.kind === "known" ? invested.value.byAsset : null;
+  // Spend not read: each dash carries the reason in its hover, no sentence under the table (10-24).
+  const unread = spent === null ? titled(reasonText(invested.kind === "unavailable" ? invested.reason : "field-unreadable")) : {};
   const total = spent === null ? 0n : spent.reduce((sum, asset) => sum + BigInt(asset.usdcRaw), 0n);
   const known = new Set(shelf.assets.map((asset) => asset.mint));
   // An asset bought but no longer in the catalogue is still listed, by its address.
@@ -706,10 +685,8 @@ function AssetsTable({ model, sample }: { readonly model: GlobalStatsModel; read
       <CardHeader>
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <CardTitle>{COPY.assets.title}</CardTitle>
-          <InfoTip label={COPY.assets.title}>{COPY.assets.info}</InfoTip>
           <SampleBadge sample={sample} />
         </div>
-        <CardDescription>{COPY.assets.description}</CardDescription>
       </CardHeader>
       <CardContent>
         <Table>
@@ -737,7 +714,9 @@ function AssetsTable({ model, sample }: { readonly model: GlobalStatsModel; read
                       ) : null}
                     </div>
                   </TableCell>
-                  <TableCell className={cn(MONO, "text-right")}>{spent === null ? UNKNOWN : asset.spend === null ? "0.00" : usdcText(asset.spend.usdcRaw)}</TableCell>
+                  <TableCell className={cn(MONO, "text-right")} {...unread}>
+                    {spent === null ? UNKNOWN : asset.spend === null ? "0.00" : usdcText(asset.spend.usdcRaw)}
+                  </TableCell>
                   <TableCell className="hidden sm:table-cell">
                     {bps === null ? null : (
                       <div className="flex items-center gap-2">
@@ -748,13 +727,14 @@ function AssetsTable({ model, sample }: { readonly model: GlobalStatsModel; read
                       </div>
                     )}
                   </TableCell>
-                  <TableCell className={cn(MONO, "hidden text-right md:table-cell")}>{spent === null ? UNKNOWN : count(asset.spend?.buys ?? 0)}</TableCell>
+                  <TableCell className={cn(MONO, "hidden text-right md:table-cell")} {...unread}>
+                    {spent === null ? UNKNOWN : count(asset.spend?.buys ?? 0)}
+                  </TableCell>
                 </TableRow>
               );
             })}
           </TableBody>
         </Table>
-        {spent === null ? <p className="mt-3 text-xs text-muted-foreground">{reasonText(invested.kind === "unavailable" ? invested.reason : "field-unreadable")}</p> : null}
       </CardContent>
     </Card>
   );
@@ -765,10 +745,13 @@ function SampleStrip() {
     <div role="status" className="flex items-start gap-2.5 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
       <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
       <p className="min-w-0">
-        <Badge variant="secondary" className="mr-1.5 align-baseline text-[0.6875rem]">
-          {COPY.sampleBadge}
-        </Badge>
-        {COPY.sampleNotice}{" "}
+        {/* What the sample is for is the hover; that it is not real stays on screen. */}
+        <span title={COPY.sampleNoticeHint}>
+          <Badge variant="secondary" className="mr-1.5 align-baseline text-[0.6875rem]">
+            {COPY.sampleBadge}
+          </Badge>
+          {COPY.sampleNotice}
+        </span>{" "}
         <AppLink href={urlWithMode(DASHBOARD_PATH, "live")} className="font-medium text-foreground underline underline-offset-4">
           {COPY.seeLive}
         </AppLink>
@@ -785,7 +768,6 @@ function Failed({ reason }: { readonly reason: Reason }) {
           <TriangleAlert aria-hidden className="size-4 text-amber-600 dark:text-amber-400" />
           {COPY.failedTitle}
         </CardTitle>
-        <CardDescription>{COPY.failedDescription}</CardDescription>
       </CardHeader>
       <CardContent className="text-sm text-muted-foreground">{reasonText(reason)}</CardContent>
     </Card>
@@ -794,9 +776,9 @@ function Failed({ reason }: { readonly reason: Reason }) {
 
 export function GlobalStatsView({ model, now, mode = null }: { readonly model: GlobalStatsModel; readonly now: string; readonly mode?: UrlMode | null }) {
   const sample = model.source === "sample";
+  // "Days are UTC" is the hover of these, not one of them (10-24).
   const meta = [
     ...(model.computedAt.kind === "known" ? [COPY.updated(timeAgo(model.computedAt.value, now))] : []),
-    COPY.daysUtc,
     ...(model.firstDay.kind === "known" && model.firstDay.value === null ? [COPY.noSettlementYet] : []),
     // "From" only a first day the history provably starts on; a cut read's oldest day is not one.
     ...(model.firstDay.kind === "known" && model.firstDay.value !== null && model.lastDay.kind === "known" && model.lastDay.value !== null
@@ -818,24 +800,39 @@ export function GlobalStatsView({ model, now, mode = null }: { readonly model: G
     <div className="flex flex-col gap-4 lg:gap-6">
       <section className="rise-in flex flex-col gap-2">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{COPY.title}</h1>
-        <p className="max-w-prose text-sm text-muted-foreground sm:text-base">{COPY.subtitle}</p>
-        <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          {meta.map((item, index) => (
-            <span key={item} className="flex items-center gap-3">
-              {index === 0 ? null : <span aria-hidden>·</span>}
-              {item}
-            </span>
-          ))}
-          {/* The way to the sample from Live on every screen size: the header's Live|Mock is not shown on a phone. */}
-          {sample ? null : (
-            <span className="flex items-center gap-3">
-              <span aria-hidden>·</span>
-              <AppLink href={urlWithMode(DASHBOARD_PATH, "mock")} className="underline underline-offset-4 hover:text-foreground">
-                {COPY.seeSample}
-              </AppLink>
-            </span>
-          )}
-        </p>
+        {/*
+          NO ROW STARTS WITH A BARE "·" (10-24): on a phone this line wraps, and
+          a dot written between items began the second and third rows. Every
+          item carries its dot before it; the line is pulled left by one dot
+          and its gap, and clipped, so the dot that opens any row falls outside.
+          The clip stands 4px off the text on three sides (the p's pb-1 is the
+          fourth): the keyboard ring of "See sample data" is drawn outside the
+          link, and a clip flush with the text cut its top or left edge (review
+          10-24). The dot sits 12–16px left of the text, so it stays clipped.
+        */}
+        <div className="-mx-1 -mt-1 overflow-hidden px-1 pt-1">
+          <p className="-ml-4 flex flex-wrap gap-x-3 gap-y-1 pb-1 text-xs text-muted-foreground">
+            {meta.map((item) => (
+              <span key={item} className="flex items-center gap-3" title={COPY.daysUtc}>
+                <span aria-hidden className="w-1 text-center">
+                  ·
+                </span>
+                {item}
+              </span>
+            ))}
+            {/* The way to the sample from Live on every screen size: the header's Live|Mock is not shown on a phone. */}
+            {sample ? null : (
+              <span className="flex items-center gap-3">
+                <span aria-hidden className="w-1 text-center">
+                  ·
+                </span>
+                <AppLink href={urlWithMode(DASHBOARD_PATH, "mock")} className="underline underline-offset-4 hover:text-foreground">
+                  {COPY.seeSample}
+                </AppLink>
+              </span>
+            )}
+          </p>
+        </div>
       </section>
 
       {sample ? <SampleStrip /> : null}
@@ -860,8 +857,6 @@ export function GlobalStatsView({ model, now, mode = null }: { readonly model: G
           </div>
         </>
       )}
-
-      <p className="text-xs text-muted-foreground">{sample ? COPY.sampleFootnote : COPY.footnote}</p>
     </div>
   );
 }

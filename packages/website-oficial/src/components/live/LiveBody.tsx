@@ -94,6 +94,7 @@ import { LiveHeartbeat } from "@/components/live/LiveHeartbeat";
 import { LoadOlderButton } from "@/components/live/LoadOlderButton";
 import { PendingRows, toldBy, usePendingView } from "@/components/live/LivePending";
 import { Reveal } from "@/components/live/Reveal";
+import { ShareSavings } from "@/components/live/ShareSavings";
 import { heardLinesOf } from "@/components/live/heard-lines";
 import { useWriteJudge } from "@/components/live/last-write-context";
 import { heroPillOf, pillShown, useArrivals } from "@/components/live/use-arrivals";
@@ -109,12 +110,16 @@ import { HeaderContributions } from "@/components/header-contributions";
 import { SiteHeader } from "@/components/site-header";
 import { useSolanaConfigOrNull } from "@/app/providers";
 import { useWalletsOpener } from "@/components/wallets-host";
+import { WalletName } from "@/components/wallets/WalletName";
 import type { LiveLiveness, LiveOlder, LiveStale } from "@/hooks/use-live-dashboard";
+import { LABEL } from "@/lib/classes";
 import { whenLabel } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY } from "@/lib/live-copy";
 import { rawFrom } from "@/lib/amounts";
 import { anchorOf, toDashboardMock } from "@/lib/live-mock";
 import { pendingLines, pendingSteps } from "@/lib/live-pending";
+import { streakProofOf } from "@/lib/live-figures";
+import { shareCardOf, type ShareLinkSource } from "@/lib/live-share";
 import type { LiveDashboard } from "@/lib/live-types";
 import { seatProblem } from "@/lib/trading-wallets";
 import type { WalletsSection } from "@/lib/wallets-sections";
@@ -257,6 +262,14 @@ export function LiveBody({
   const pulse = { pill: heroPillOf(arrivals.saving, page.trades, data.nowMs), shown: pillShown(arrivals.saving, data.nowMs) };
   // The rule card's: the steps as the rows draw them, and the same arrivals.
   const rulePulse = rulePulseOf({ rows: pending.rows, history: data.rows, arrived: arrivals.arrived });
+  // THE SHARE CARD'S FIGURES (owner, 10-22): the hero's and the rule's, and the
+  // vault's raw counter for whether anything was saved — with or without a price.
+  const shareCard = shareCardOf({ lifetimeSaved: data.vault.lifetimeSaved, stats: page.stats, rule: page.rule, now: page.now });
+  // AND ITS LINK (owner, 10-22: "Enlace con vista previa"): the server reads the
+  // card again from the chain and signs a /c/ link, and the streak is proven
+  // from one settlement a day (live-figures.ts streakProofOf). Asked only once
+  // the dialog opens.
+  const shareLink: ShareLinkSource = { kind: "live", owner: pensionKey, proof: streakProofOf(data) };
 
   /** A wallet's own label, so a settlement says which one it came from. */
   const labelOf = (wallet: string | null): string => {
@@ -325,6 +338,8 @@ export function LiveBody({
       onManageWallets={onManageWallets}
       className={inSheet ? "min-h-0 flex-1" : "sticky top-14 h-[calc(100dvh-3.5rem)]"}
       live={{
+        // The lead wallet's name, renamable where the list's are (owner, 10-23).
+        ...(lead === null ? {} : { name: <WalletName address={lead.address} name={lead.label} className={LABEL} /> }),
         below: lead === null ? null : <LeadNotes wallet={lead} />,
         list: <WalletList wallets={data.wallets} usdcRawPerSol={rawFrom(data.prices?.usdcRawPerSol)} />,
         banner: activityUnreadable ? <FeedBanner onRetry={onRefresh} retryAt={retryAt} readyAt={readyAt} /> : null,
@@ -461,6 +476,7 @@ export function LiveBody({
                     now={page.now}
                     trades={page.trades}
                     pulse={pulse}
+                    share={<ShareSavings card={shareCard} link={shareLink} />}
                     {...(page.calendar === undefined ? {} : { calendar: page.calendar })}
                     {...(page.vault === undefined ? {} : { vault: page.vault })}
                     {...(page.unit === undefined ? {} : { unit: page.unit })}

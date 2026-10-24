@@ -8,15 +8,12 @@ import { describe, expect, it } from "vitest";
 
 import { RunningTotalCard } from "@/components/global-stats-area";
 import { BarsTooltip, Headline, StackedBarsCard, valueText, type StackedBarsCardProps } from "@/components/global-stats-chart";
-import { GLOBAL_STATS_COPY } from "@/lib/global-stats-copy";
 import { known, unavailable } from "@/lib/global-stats-model";
-import { bucketize, toPlotRows } from "@/lib/global-stats-series";
+import { bucketize, toPlotRows, type DayValues } from "@/lib/global-stats-series";
 
 const props = (over: Partial<StackedBarsCardProps>): StackedBarsCardProps => ({
   id: "saved",
-  title: "Put aside",
-  description: "SOL put aside by settlements, by mode. Days are UTC.",
-  info: "Each bar is what settlements put aside.",
+  title: "Put aside (SOL)",
   sample: false,
   series: ["profit", "volume"],
   unit: { label: "SOL", decimals: 9 },
@@ -25,7 +22,7 @@ const props = (over: Partial<StackedBarsCardProps>): StackedBarsCardProps => ({
   first: null,
   periods: ["day", "week"],
   views: ["period", "cumulative", "share"],
-  emptyCaption: "No settlement yet. The first one starts this chart.",
+  emptyCaption: "No settlements yet",
   unavailableCaption: "This figure is not published yet.",
   ...over,
 });
@@ -40,7 +37,7 @@ describe("a chart with nothing to draw", () => {
 
   it("served and empty is a different sentence", () => {
     const html = renderToStaticMarkup(createElement(StackedBarsCard, props({})));
-    expect(html).toContain("No settlement yet. The first one starts this chart.");
+    expect(html).toContain("No settlements yet");
   });
 
   it("built from the sample, says so on the card", () => {
@@ -117,14 +114,23 @@ describe("a value as the tooltip prints it", () => {
 
 describe("a lead card's headline", () => {
   it("puts the qualifier right before the figure, the unit after it, and the growth beside it", () => {
-    const html = renderToStaticMarkup(createElement(Headline, { value: "18.9759", qualifier: "≈", unit: "SOL", exact: "18.9759 SOL", delta: "+12.4% in 7 days", lines: ["An approximate measure, not an accounting figure."] }));
+    const html = renderToStaticMarkup(
+      createElement(Headline, { value: "18.9759", qualifier: "≈", unit: "SOL", title: "18.9759 SOL", delta: "+12.4% in 7 days", dollars: { text: "≈ $2,846.39", title: "At today’s SOL price, not what it was worth on the day" } }),
+    );
     expect(html).toMatch(/>≈<\/span><span[^>]*title="18\.9759 SOL"[^>]*>18\.9759<\/span><span[^>]*>SOL<\/span>/);
     expect(html).toContain("+12.4% in 7 days");
-    expect(html).toContain("An approximate measure");
+  });
+
+  it("prints the dollars as a figure, with the price that made them in its hover, and nothing else under the figure", () => {
+    const html = renderToStaticMarkup(
+      createElement(Headline, { value: "0.2879", qualifier: null, unit: "SOL", title: "0.287866794 SOL", delta: null, dollars: { text: "≈ $29.55", title: "At today’s SOL price, not what it was worth on the day" } }),
+    );
+    expect(html).toMatch(/<p[^>]*title="At today’s SOL price, not what it was worth on the day"[^>]*>≈ \$29\.55<\/p>/);
+    expect(html.match(/<p\b/g)).toHaveLength(1);
   });
 
   it("under a headline, a series not published yet draws no band: the page says it once", () => {
-    const headline = { value: "0.1864", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [] };
+    const headline = { value: "0.1864", qualifier: null, unit: "SOL", title: null, delta: null, dollars: null };
     const quiet = renderToStaticMarkup(createElement(StackedBarsCard, props({ headline, days: unavailable("not-served-yet") })));
     expect(quiet).toContain("0.1864");
     expect(quiet).not.toContain("border-dashed");
@@ -137,10 +143,9 @@ describe("a lead card's headline", () => {
     const base = {
       id: "saved",
       title: "Put aside so far",
-      description: "Across every pension, in SOL.",
-      info: "What settlements have put aside.",
+      info: "What went in: withdrawals are not taken off.",
       sample: false,
-      headline: { value: "0.1864", qualifier: null, unit: "SOL", exact: null, delta: null, lines: [] },
+      headline: { value: "0.1864", qualifier: null, unit: "SOL", title: null, delta: null, dollars: null },
       series: "saved" as const,
       unit: { label: "SOL" as const, decimals: 9 as const },
       end: "2026-10-06",
@@ -156,9 +161,60 @@ describe("a lead card's headline", () => {
   });
 });
 
-describe("the count under a chart", () => {
-  it("names what it counts: a day with trading measured is not a day with a settlement", () => {
-    expect(GLOBAL_STATS_COPY.charts.tradedDays(2)).toBe("2 days with trading measured");
-    expect(GLOBAL_STATS_COPY.charts.tradedDays(1)).toBe("1 day with trading measured");
+/**
+ * NO SUBTEXT (owner, 10-24): no line under a chart's title, none under its
+ * bars. What it counts, and days nobody could read, are its title's hover.
+ */
+describe("a chart card's text", () => {
+  const rows: readonly DayValues[] = [
+    { day: "2026-10-05", values: { profit: "36634582", volume: "1000000" } },
+    { day: "2026-10-06", values: { profit: "12000000" } },
+  ];
+
+  it("is its title, its controls and its legend: no description, no count of days, no footer", () => {
+    const html = renderToStaticMarkup(createElement(StackedBarsCard, props({ days: known({ rows, partial: false }) })));
+    expect(html).toContain(">Put aside (SOL)<");
+    // The bars are drawn (their controls are there), and nothing is written around them.
+    expect(html).toContain(">Daily<");
+    expect(html).not.toContain('data-slot="card-description"');
+    expect(html).not.toMatch(/days? (with|that)/);
+    expect(html).not.toContain("Running total since");
+    // No "?" unless the page passes one.
+    expect(html).not.toContain('data-slot="popover-trigger"');
+  });
+
+  it("puts what it counts in the title's hover, and adds the days nobody could read", () => {
+    const whole = renderToStaticMarkup(createElement(StackedBarsCard, props({ hint: "Including the ones that put nothing aside", days: known({ rows, partial: false }) })));
+    expect(whole).toMatch(/title="Including the ones that put nothing aside"[^>]*>Put aside \(SOL\)</);
+    const cut = renderToStaticMarkup(createElement(StackedBarsCard, props({ hint: "Including the ones that put nothing aside", days: known({ rows, partial: true }) })));
+    expect(cut).toMatch(/title="Including the ones that put nothing aside · Some days could not be read"/);
+    expect(cut).not.toMatch(/<p[^>]*>[^<]*Some days could not be read/);
+  });
+
+  it("keeps a '?' where the page passes one", () => {
+    const html = renderToStaticMarkup(createElement(StackedBarsCard, props({ info: "Approximate: Profit and Volume are measured differently." })));
+    expect(html).toContain("Approximate: Profit and Volume are measured differently.");
+  });
+
+  it("the running-total card says the days nobody could read in its title's hover, not under the curve", () => {
+    const html = renderToStaticMarkup(
+      createElement(RunningTotalCard, {
+        id: "saved",
+        title: "Put aside so far",
+        info: "What went in: withdrawals are not taken off.",
+        sample: false,
+        headline: { value: "0.0496", qualifier: null, unit: "SOL", title: null, delta: null, dollars: null },
+        days: known({ rows: [{ day: "2026-10-05", values: { saved: "37634582" } }], partial: true }),
+        series: "saved",
+        unit: { label: "SOL", decimals: 9 },
+        end: "2026-10-06",
+        first: "2026-10-05",
+        emptyCaption: "No settlements yet",
+        unavailableCaption: "This figure was missing from the answer.",
+      }),
+    );
+    expect(html).toMatch(/title="Some days could not be read"[^>]*>Put aside so far</);
+    expect(html).not.toContain("Running total since");
+    expect(html).not.toContain('data-slot="card-description"');
   });
 });

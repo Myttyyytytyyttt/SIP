@@ -92,7 +92,14 @@ export function PrivyProvider({ children }: { children: ReactNode }): ReactNode 
   return children;
 }
 
-export function usePrivy(): PrivyStubState & { login: () => void; logout: () => Promise<void> } {
+/**
+ * A fixed stand-in for Privy's access token, and null without a session, as
+ * the real getAccessToken answers. The screenshot script answers
+ * /api/wallet-names itself (page.route): no server ever verifies this string.
+ */
+export const STUB_ACCESS_TOKEN = "stub-access-token";
+
+export function usePrivy(): PrivyStubState & { login: () => void; logout: () => Promise<void>; getAccessToken: () => Promise<string | null> } {
   const current = useSyncExternalStore(subscribe, clientSnapshot, serverSnapshot);
   const login = useCallback(() => {
     const next = injected();
@@ -106,7 +113,8 @@ export function usePrivy(): PrivyStubState & { login: () => void; logout: () => 
     next.user = null;
     announce();
   }, []);
-  return { ready: current.ready, authenticated: current.authenticated, user: current.user, login, logout };
+  const getAccessToken = useCallback(async () => (injected().authenticated && injected().user !== null ? STUB_ACCESS_TOKEN : null), []);
+  return { ready: current.ready, authenticated: current.authenticated, user: current.user, login, logout, getAccessToken };
 }
 
 /** What Privy hands every useLogin's onComplete. */

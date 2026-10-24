@@ -319,6 +319,11 @@ export function useLiveDashboard(input: {
   /** Which of privyWallets were imported: they are named apart (src/lib/wallet-labels.ts). */
   readonly importedWallets?: readonly string[];
   /**
+   * The account's own names for its wallets (owner, 10-23: wallet-names-context.tsx).
+   * A rename re-models the screen from what is held and reads nothing again.
+   */
+  readonly walletNames?: Readonly<Record<string, string>>;
+  /**
    * Whether this caller needs the HISTORY as well as the snapshot. Default true.
    *
    * FALSE IS NOT AN OPTIMISATION, IT IS A CORRECTION. A caller that wants only
@@ -338,6 +343,8 @@ export function useLiveDashboard(input: {
   // A string, so a new array with the same wallets does not read again.
   const walletsKey = input.privyWallets.join(",");
   const importedKey = (input.importedWallets ?? []).join(",");
+  // The same for the names: one string, so a new object with the same names re-models nothing.
+  const namesKey = JSON.stringify(Object.entries(input.walletNames ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 
   /**
    * WHAT THE READS BROUGHT, IN ONE STATE (lib/live-commit.ts LiveData): the
@@ -870,6 +877,7 @@ export function useLiveDashboard(input: {
       linkEntries,
       privyWallets: walletsKey === "" ? [] : walletsKey.split(","),
       importedWallets: importedKey === "" ? [] : importedKey.split(","),
+      walletNames: Object.fromEntries(JSON.parse(namesKey) as [string, string][]),
       walletChanges,
     });
     const stale =
@@ -881,7 +889,7 @@ export function useLiveDashboard(input: {
             since: failure.since,
           };
     return { kind: "ready", data, stale };
-  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey, walletChanges]);
+  }, [pensionKey, snapshot, entries, linkEntries, activityMeta, failure, walletsKey, importedKey, namesKey, walletChanges]);
 
   /*
    * WHETHER A STEP IS UNDER WAY (src/lib/live-pending.ts), from the model the

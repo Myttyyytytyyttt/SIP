@@ -21,17 +21,19 @@
  */
 
 import { Mail } from "lucide-react";
-import Image from "next/image";
 
 import { AppLink } from "@/components/app-link";
+import { SipMark } from "@/components/sip-mark";
 import { Separator } from "@/components/ui/separator";
 import { LABEL, MONO } from "@/lib/classes";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
+import { DOCS_HOME } from "@/lib/docs/pages";
 import { cn } from "@/lib/utils";
 
 /**
- * PLACEHOLDERS, and the `#` is the honest part: none of these pages exist yet,
- * exactly like the header's own nav. `/wallets` is deliberately NOT here — the
+ * THE APP'S PAGES, then the docs and the fine print. Privacy and Terms are
+ * placeholders, and the `#` is the honest part: those pages do not exist yet.
+ * `/wallets` is deliberately NOT here — the
  * way into wallet management is the sidebar's "Manage wallets", which opens a
  * modal over the dashboard; a second, worse door in the footer would undo that.
  */
@@ -44,7 +46,8 @@ const LINKS = [
   { title: "Leaderboard", href: "/leaderboard" },
   // Every pension added up. Below md the header's tabs are gone, so this is a phone's one door to it.
   { title: "Dashboard", href: "/dashboard" },
-  { title: "Docs", href: "#" },
+  // The docs (owner, 10-22): the same for the sample and for a pension, so they take no mode (hrefOf below).
+  { title: "Docs", href: DOCS_HOME, modeless: true },
   { title: "Privacy", href: "#" },
   { title: "Terms", href: "#" },
 ] as const;
@@ -67,8 +70,9 @@ const QUIET =
 export function SiteFooter({ now, className, mode = null }: { now: string; className?: string; /** The mode the app's own links carry; see SiteHeader. */ mode?: UrlMode | null }) {
   // ISO 8601, always `YYYY-…` — the same string the rest of the page dates from.
   const year = now.slice(0, 4);
-  // Only the app's own pages take the mode; an anchor or anywhere else is left as it is.
-  const hrefOf = (href: string): string => (mode !== null && href.startsWith("/") ? urlWithMode(href, mode) : href);
+  // Only the app's own pages take the mode; the docs, an anchor or anywhere else is left as it is.
+  const hrefOf = (link: (typeof LINKS)[number]): string =>
+    mode !== null && link.href.startsWith("/") && !("modeless" in link) ? urlWithMode(link.href, mode) : link.href;
 
   return (
     <footer className={cn("border-t", className)}>
@@ -104,10 +108,10 @@ export function SiteFooter({ now, className, mode = null }: { now: string; class
               column — four rows since the dashboard joined, so the four pages stay in the first column.
             */}
             <ul className="mt-4 grid w-fit grid-flow-col grid-rows-4 gap-x-12 gap-y-2.5 text-sm">
-              {LINKS.map(({ title, href }) => (
-                <li key={title}>
-                  <AppLink className={QUIET} href={hrefOf(href)}>
-                    {title}
+              {LINKS.map((link) => (
+                <li key={link.title}>
+                  <AppLink className={QUIET} href={hrefOf(link)}>
+                    {link.title}
                   </AppLink>
                 </li>
               ))}
@@ -151,33 +155,8 @@ export function SiteFooter({ now, className, mode = null }: { now: string; class
   );
 }
 
-/**
- * THE MARK, ONE PER THEME.
- *
- * The source art is two flat PNGs with no alpha — black on white, white on
- * black — so either one dropped straight in would paint its own rectangle over
- * the page. `public/logo/sip-mark-*.png` are the ink cut out of them: the same
- * shape, transparent ground, trimmed to the glyph (218 x 256 of the original
- * 5504 x 3072 sheet, which was almost all margin).
- *
- * Two <Image>s rather than one recoloured asset, because a PNG cannot take
- * `currentColor`. `dark:` is the class-strategy variant next-themes sets on
- * <html> before React hydrates, so the right one is on screen from the first
- * paint — no flash of the wrong ink.
- *
- * alt="" on purpose: the wordmark beside it already says SIP, and a screen
- * reader announcing the name twice is worse than not announcing the image.
- */
-const MARK = { width: 218, height: 256 } as const;
-
-export function SipMark({ className }: { className?: string }) {
-  return (
-    <>
-      <Image alt="" className={cn("dark:hidden", className)} src="/logo/sip-mark-black.png" {...MARK} />
-      <Image alt="" className={cn("hidden dark:block", className)} src="/logo/sip-mark-white.png" {...MARK} />
-    </>
-  );
-}
+/** The mark, one per theme: its own module, so the docs can draw it without this footer (sip-mark.tsx). */
+export { SipMark } from "@/components/sip-mark";
 
 /**
  * Brand marks, inline. `currentColor` and `size-4` so they take the link's

@@ -5,6 +5,8 @@ import { Geist, Geist_Mono } from "next/font/google";
 import { RouteLoaderProvider } from "@/components/route-loader";
 import { ThemeProvider } from "@/components/theme-provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { rootMetadata } from "@/lib/seo";
+import { siteUrl } from "@/lib/site-url";
 
 import "./globals.css";
 
@@ -16,26 +18,20 @@ const sans = Geist({ subsets: ["latin"], variable: "--font-sans", display: "swap
 const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
 
 /**
- * One sentence, used by the page description and by both social cards, so a
- * change cannot land in one of the three and not the others.
+ * EVERY PAGE'S DEFAULTS, from src/lib/seo.ts: the landing's title and
+ * description, the site's social card, and metadataBase — the configured site
+ * address (src/lib/site-url.ts) that every relative canonical and image URL is
+ * made absolute against. Phantom reads og:title before <title>, so og:title is
+ * "SaverFi" here and on every page where a wallet connects. Each page adds its
+ * own canonical, robots and card text (SITE_PAGES).
+ *
+ * NO `icons` KEY ON PURPOSE. Declaring one here overrides Next's file
+ * convention, and the icons now come from src/app/{favicon.ico,icon.png,
+ * apple-icon.png} — generated from the brand mark, content-hashed, and
+ * emitted with their own sizes and types. The old public/favicon.ico was
+ * Nuvem's mark and is gone: it would also have collided with app/favicon.ico.
  */
-const DESCRIPTION =
-  "A pension you build one trade at a time. A slice of your trading is put aside and invested in the assets you chose.";
-
-export const metadata: Metadata = {
-  title: "SaverFi — A pension that builds itself, on Solana",
-  description: DESCRIPTION,
-  // NO IMAGES AND NO `url`, so no metadataBase is needed: Next warns only for a
-  // relative image URL. Phantom reads og:title before <title>, so the wallet
-  // prompt says SaverFi; /wallets inherits this openGraph from the root layout.
-  openGraph: { title: "SaverFi", siteName: "SaverFi", description: DESCRIPTION, type: "website" },
-  twitter: { card: "summary", title: "SaverFi", description: DESCRIPTION },
-  // NO `icons` KEY ON PURPOSE. Declaring one here overrides Next's file
-  // convention, and the icons now come from src/app/{favicon.ico,icon.png,
-  // apple-icon.png} — generated from the brand mark, content-hashed, and
-  // emitted with their own sizes and types. The old public/favicon.ico was
-  // Nuvem's mark and is gone: it would also have collided with app/favicon.ico.
-};
+export const metadata: Metadata = rootMetadata(siteUrl());
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (

@@ -54,8 +54,8 @@ export const formatSol = (lamports: bigint): string => formatUnits(lamports, SOL
  * Lamports as SOL text rounded to at most `decimals` places, for a face that
  * has to be read at a glance.
  *
- * ONE OF THE TWO ROUNDINGS IN THIS FILE (formatSolAtLeast is the other), and
- * both are DISPLAY roundings: everything else here never rounds, because a
+ * ONE OF THE THREE ROUNDINGS IN THIS FILE (formatSolAtLeast and formatSolDown
+ * are the others), and all are DISPLAY roundings: everything else here never rounds, because a
  * lamport lost is a transaction that differs from what somebody typed. A strip chip is not a transaction — it is a
  * glance — and "+0.036634582" in a 9-character pill is unreadable. Every
  * caller must keep the exact figure within reach; the chips put it in their
@@ -93,6 +93,31 @@ export function formatSolAtLeast(lamports: bigint, decimals: number): string {
   if (lamports < 0n) return `-${formatSolAtLeast(-lamports, decimals)}`;
   const scale = 10n ** BigInt(SOL_DECIMALS - decimals);
   return formatUnits((lamports + scale - 1n) / scale, decimals, { grouped: true });
+}
+
+/**
+ * Lamports as SOL text cut DOWN to exactly `decimals` places, for a balance
+ * read at a glance (owner, 10-23: "aparece x.xxx SOL, no tanto número de SOL"
+ * in the wallet list).
+ *
+ * THE THIRD DISPLAY ROUNDING, and the one for what a wallet HOLDS: never more
+ * than it has. formatSolAtMost rounds half-up, so 2.4339 would read 2.434 —
+ * SOL the wallet does not have. Cut down, what is printed is always there.
+ * Every place kept, trailing zeros included, so a list of balances lines up.
+ * The exact figure stays within reach: the caller puts formatSol in a tooltip.
+ *
+ * A POSITIVE BALANCE NEVER READS AS ZERO (formatSolAtMost's rule): under one
+ * unit of the last place it is "<0.001", not "0.000". Toward zero for a
+ * negative amount, so its size is never overstated either.
+ */
+export function formatSolDown(lamports: bigint, decimals: number): string {
+  if (lamports < 0n) return `-${formatSolDown(-lamports, decimals)}`;
+  const scale = 10n ** BigInt(SOL_DECIMALS - decimals);
+  const cut = lamports / scale;
+  if (cut === 0n && lamports > 0n) return `<${formatUnits(1n, decimals)}`;
+  const whole = group((cut / 10n ** BigInt(decimals)).toString());
+  if (decimals === 0) return whole;
+  return `${whole}.${(cut % 10n ** BigInt(decimals)).toString().padStart(decimals, "0")}`;
 }
 
 /**

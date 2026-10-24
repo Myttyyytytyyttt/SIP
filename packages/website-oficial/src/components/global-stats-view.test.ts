@@ -73,6 +73,10 @@ const live = (feed: LeaderboardBodyResult = today(), price = known("150000000"))
 const sampleModel = (): GlobalStatsModel =>
   buildGlobalStats({ source: "sample", feed: { ok: true, body: sampleGlobalStatsBody(NOW, ["mintA", "mintB"]) }, price: known(SAMPLE_USDC_RAW_PER_SOL), shelf: SHELF });
 const render = (model: GlobalStatsModel): string => renderToStaticMarkup(createElement(GlobalStatsView, { model, now: NOW }));
+/** What a reader sees without hovering: the markup's text, with every tag — and so every title attribute — taken out. */
+const visible = (html: string): string => html.replace(/<[^>]*>/g, "\n");
+/** The hover of the element whose whole text is `text`. */
+const hoverOf = (html: string, text: string): string | undefined => html.match(new RegExp(`title="([^"]*)"[^>]*>${text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}<`))?.[1];
 /** The markup of one card, by its data-card: up to the next card, so a capture can never span two. */
 function card(html: string, id: string): string {
   const start = html.indexOf(`data-card="${id}"`);
@@ -89,16 +93,23 @@ describe("the live page with today's keeper", () => {
   it("shows the real totals, the traded one as an approximation", () => {
     expect(html).toContain("0.1864");
     expect(html).toContain("Put aside so far");
-    expect(html).toContain("≈ $27.96 at today’s SOL price");
+    // The dollars are a figure; the price that made them is their hover.
+    expect(hoverOf(card(html, "saved"), "≈ $27.96")).toBe("At today’s SOL price, not what it was worth on the day");
+    expect(visible(html)).not.toContain("today’s SOL price");
     // The "≈" sits right before the figure itself, not anywhere in the card.
     expect(card(html, "traded")).toMatch(/>≈<\/span><span[^>]*>18\.9759<\/span>/);
-    expect(html).toContain("Days are UTC");
     expect(html).toContain("Updated 3m ago");
     expect(html).toContain("Settlements from Sep 19, 2026 to Sep 25, 2026");
   });
 
+  it("says that days are UTC in the hover of the dates under the title, not as one of them", () => {
+    expect(html).toMatch(/title="Days are UTC"><span aria-hidden="true"[^>]*>·<\/span>Settlements from Sep 19, 2026 to Sep 25, 2026</);
+    expect(visible(html)).not.toMatch(/UTC/);
+  });
+
   it("names what is not published once, with the way to the sample, and draws no empty chart", () => {
-    expect(html.match(/Daily charts are not available yet/g)).toHaveLength(1);
+    expect(html.match(/No daily charts yet/g)).toHaveLength(1);
+    expect(html).toContain(">See them in the sample<");
     expect(html).toContain('href="/dashboard?mode=mock"');
     // The two lead cards stand on their headlines; the per-day charts are not drawn at all.
     expect(html).toContain("AREA:saved");
@@ -112,7 +123,14 @@ describe("the live page with today's keeper", () => {
     expect(strip).toContain("SOL price");
     expect(strip).toContain("$150.00");
     expect(strip).toContain("Pensions");
+    expect(strip).toMatch(/title="With at least one settlement: not every pension created, and not a count of people"><dt[^>]*>Pensions</);
     expect(strip).not.toContain("Settlements today");
+  });
+
+  it("puts what each assets cell could not read in its hover, not in a sentence under the table", () => {
+    const assets = card(html, "assets");
+    expect(assets).toMatch(/title="This figure is not published yet\."[^>]*>—</);
+    expect(visible(assets)).not.toContain("This figure is not published yet.");
   });
 
   it("lists the real leading pensions, each linked to the chain", () => {
@@ -136,18 +154,20 @@ describe("the live page with today's keeper", () => {
 });
 
 describe("what the live page does with what it could not read", () => {
-  it("a price it could not read is no dollar line, never $0", () => {
+  it("a price it could not read is no dollar value, never $0, and says why in its hover", () => {
     const html = render(live(today(), unavailable("price-unconfigured")));
-    expect(html).toContain("No dollar value: this deployment cannot read the SOL price.");
+    expect(hoverOf(card(html, "saved"), "No dollar value")).toBe("This deployment cannot read the SOL price.");
+    expect(card(html, "strip")).toMatch(/title="This deployment cannot read the SOL price\."><dt[^>]*>SOL price<\/dt><dd[^>]*>—</);
+    expect(visible(html)).not.toContain("cannot read the SOL price");
     expect(html).not.toContain("$");
     expect(html).toContain("0.1864");
   });
 
-  it("a count it could not read is a dash and why, never 0", () => {
+  it("a count it could not read is a dash with why in its hover, never 0", () => {
     const html = render(live(today({ settlements: 9, firstDay: "2026-09-19", lastDay: "2026-09-25" })));
     const pensions = card(html, "pensions");
-    expect(pensions).toContain("—");
-    expect(pensions).toContain("This figure was missing from the answer.");
+    expect(pensions).toMatch(/data-reason="field-unreadable" title="This figure was missing from the answer\."><span[^>]*>—<\/span>/);
+    expect(visible(pensions)).not.toContain("This figure was missing from the answer.");
     expect(pensions).not.toMatch(/>0</);
     // And the total it bounds stops claiming to be whole.
     expect(card(html, "saved")).toContain("at least");
@@ -160,7 +180,7 @@ describe("what the live page does with what it could not read", () => {
   ] as const)("a source that failed (%s) is one card that says so, and no figure", (reason, feed) => {
     const html = render(live(feed));
     expect(html).toContain(`data-reason="${reason}"`);
-    expect(html).toContain("This is not a page of zeros: nothing was read.");
+    expect(html).toContain("The figures could not be read");
     expect(html).not.toContain("Put aside so far");
     expect(html).not.toMatch(/keeper/i);
     expect(html).not.toContain("SIP_SOLANA");
@@ -171,18 +191,18 @@ describe("a total the payload cannot prove whole", () => {
   // Three pensions counted, one on the board: the sum is a floor.
   const html = render(live(today({ subjects: 3, settlements: 20, firstDay: "2026-09-19", lastDay: "2026-09-25" })));
 
-  it("says 'at least' on the figure, on its dollars, and drops the 'since' a cut read cannot vouch for", () => {
+  it("says 'at least' on the figure and on its dollars, and why in the figure's hover", () => {
     const saved = card(html, "saved");
-    expect(saved).toMatch(/>at least<\/span><span[^>]*>0\.1864<\/span>/);
-    expect(saved).toContain("at least ≈ $27.96 at today’s SOL price");
-    expect(saved).toContain("across 3 pensions");
-    expect(saved).not.toContain("since");
+    expect(saved).toMatch(/>at least<\/span><span[^>]*title="0\.1864 SOL · The history was cut: the real figure is higher"[^>]*>0\.1864<\/span>/);
+    expect(saved).toContain(">at least ≈ $27.96<");
+    // No provenance line under it: the pension count is the strip's and the tile's, the first day the page's.
+    expect(visible(saved)).not.toMatch(/across|since/);
   });
 
-  it("and when the count itself is a floor, so is the 'across'", () => {
+  it("and when the count itself is a floor, the tile and the strip say so", () => {
     const old = render(live(today({ subjects: 100, settlements: 900, firstDay: "2024-01-01", lastDay: "2026-09-25" })));
-    expect(card(old, "saved")).toContain("across at least 100 pensions");
     expect(card(old, "pensions")).toMatch(/>at least<\/span><span[^>]*>100<\/span>/);
+    expect(card(old, "strip")).toContain(">≥ 100<");
   });
 });
 
@@ -217,7 +237,23 @@ describe("what the page says about how old and how whole its figures are", () =>
     const empty: LeaderboardBodyResult = feed.ok
       ? { ok: true, body: { ...(feed.body as Record<string, unknown>), boards: { total: { season: [], all: [] }, ahorro: { season: [], all: [] }, volumen: { season: [], all: [] } } } }
       : feed;
-    expect(card(render(live(empty)), "leaders")).toContain("No settlement has put anything aside yet.");
+    expect(card(render(live(empty)), "leaders")).toContain("Nothing put aside yet");
+  });
+
+  it("dates the strip's 'today' in its hover, as the UTC day the figures were added up", () => {
+    const html = render(live(withStats({ v: 1, truncated: false, computedAt: "2026-10-06T18:27:00.000Z", daily: [] })));
+    expect(card(html, "strip")).toMatch(/title="Today is the UTC day the figures were added up"><dt[^>]*>Settlements today</);
+    expect(visible(card(html, "strip"))).not.toMatch(/UTC/);
+  });
+
+  it("a single-figure card it could not read is a dash with why in its hover", () => {
+    // Daily rows served, the split and the paying count not: both cards are drawn, each a dash.
+    const html = render(live(withStats({ v: 1, truncated: false, computedAt: "2026-10-06T18:27:00.000Z", daily: [] })));
+    for (const id of ["by-mode", "average"]) {
+      const markup = card(html, id);
+      expect(markup, id).toMatch(/data-reason="not-served-yet"><div[^>]*title="This figure is not published yet\."[^>]*><span[^>]*>—<\/span>/);
+      expect(visible(markup), id).not.toContain("This figure is not published yet.");
+    }
   });
 });
 
@@ -227,6 +263,8 @@ describe("the sample", () => {
   it("is labelled at the top, with the way back to the real figures", () => {
     expect(html).toContain("Sample data");
     expect(html).toContain("Not real pensions.");
+    expect(html).toContain('title="Example figures for invented pensions, to show how this page reads"');
+    expect(visible(html)).not.toContain("Example figures");
     expect(html).toContain('href="/dashboard?mode=live"');
   });
 
@@ -241,8 +279,20 @@ describe("the sample", () => {
     expect(html).toContain("CHART:traded");
     for (const id of ["saved", "settlements", "pensions", "invested"]) expect(html).toContain(`CHART:${id}-per-day`);
     expect(html).toContain("Profit and Volume");
-    expect(html).toContain("Per settlement");
-    expect(html).not.toContain("Daily charts are not available yet");
+    expect(html).toContain("Avg settlement");
+    expect(html).not.toContain("No daily charts yet");
+  });
+
+  it("labels the large share with whose share it is, and puts the average's unit beside it", () => {
+    expect(card(html, "by-mode")).toMatch(/title="Share of what was put aside that came from Profit pensions"><span[^>]*>Profit<\/span><span[^>]*>\d+\.\d\d%<\/span>/);
+    expect(card(html, "average")).toMatch(/title="[\d.]+ SOL · Settlements that put nothing aside are left out"><span[^>]*>[\d.]+<\/span><span[^>]*>SOL<\/span>/);
+  });
+
+  it("puts each counter's caveat and the count behind it in the figure's hover", () => {
+    expect(card(html, "settlements")).toMatch(/title="Including the ones that put nothing aside · [\d,]+ put something aside"/);
+    expect(card(html, "invested")).toMatch(/title="[\d,]+ purchases"/);
+    expect(card(html, "shelf")).toContain('title="From the app’s own list, not from the chain"');
+    expect(card(html, "pensions")).toContain('title="With at least one settlement: not every pension created, and not a count of people"');
   });
 
   it("draws two weeks of bars under each counter it has a series for", () => {
@@ -261,9 +311,49 @@ describe("the sample", () => {
     expect(assets).toMatch(/style="width:\d+(\.\d+)?%"/);
   });
 
-  it("prices its dollars at a sample price, and says so in the sentence", () => {
-    expect(html).toMatch(/≈ \$[\d,.]+ at a sample SOL price/);
+  it("prices its dollars at a sample price, and says so in their hover", () => {
+    expect(html).toMatch(/title="At a sample SOL price"[^>]*>≈ \$[\d,.]+</);
     expect(html).not.toContain("today’s SOL price");
+  });
+});
+
+/**
+ * NO SUBTEXT (owner, 10-24: "lo que esté de más, quítalo"). Nothing under the
+ * page title, a card's title or a figure explains anything, and there is no
+ * footnote; a "?" is kept only on the leading pensions here (the two lead
+ * cards keep theirs, drawn by the chart cards).
+ */
+describe("what the page says without a hover", () => {
+  const pages = { live: render(live()), sample: render(sampleModel()) };
+
+  it.each(Object.entries(pages))("%s: no line under a title, a figure or the page", (_, html) => {
+    expect(html).not.toContain('data-slot="card-description"');
+    const text = visible(html);
+    for (const gone of [
+      "Every SaverFi pension, added up",
+      "All days are UTC",
+      "Today is the UTC day",
+      "across",
+      "since",
+      "both modes",
+      "with a settlement",
+      "purchases",
+      "listed",
+      "of what was put aside came from",
+      "on average",
+      "the settlements that put something aside",
+      "The top of the all-time leaderboard",
+      "What a pension can buy",
+      "not an accounting figure",
+      "The first one starts this chart",
+    ]) {
+      expect(text, gone).not.toContain(gone);
+    }
+  });
+
+  it.each(Object.entries(pages))("%s: one '?', on the leading pensions", (_, html) => {
+    expect(html.match(/data-slot="popover-trigger"/g)).toHaveLength(1);
+    expect(card(html, "leaders")).toContain("Ranked by leaderboard points, not by size alone.");
   });
 });
 

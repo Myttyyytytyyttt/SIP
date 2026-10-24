@@ -8,7 +8,10 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { buildCommitOf, privyStubAlias } from "../next.config.mjs";
+import htmlBots from "next/dist/shared/lib/router/utils/html-bots.js";
+
+import { HTML_LIMITED_BOTS, blobStubAlias, buildCommitOf, privyStubAlias } from "../next.config.mjs";
+import { securityHeaders } from "../security-headers.mjs";
 
 const PRIVY = "@privy-io/react-auth";
 const PRIVY_SOLANA = "@privy-io/react-auth/solana";
@@ -37,12 +40,113 @@ describe("when the stub alias is applied", () => {
   });
 });
 
+/**
+ * THE DEV-ONLY BLOB STUB (10-23), held to the same three guards: the short
+ * share links' proof keeps its records in a folder, and a production build that
+ * did would hand out links that die with the instance.
+ */
+describe("when the Blob stub alias is applied", () => {
+  it("is applied in development WITH its flag, to the SDK the store imports", () => {
+    expect(blobStubAlias({ NODE_ENV: "development", SIP_WEB_BLOB_STUB: "1" })).toEqual({ "@vercel/blob": "./test/stubs/vercel-blob.ts" });
+  });
+
+  it("is NEVER applied in production, and not without its own flag", () => {
+    expect(blobStubAlias({ NODE_ENV: "production", SIP_WEB_BLOB_STUB: "1" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "development" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "development", SIP_WEB_PRIVY_STUB: "1" })).toEqual({});
+    expect(blobStubAlias({ NODE_ENV: "test", SIP_WEB_BLOB_STUB: "true" })).toEqual({});
+  });
+});
+
 describe("the config itself", () => {
-  it("carries no turbopack alias at all when the stub is off", async () => {
+  it("carries no turbopack alias at all when the stubs are off", async () => {
     vi.resetModules();
     vi.stubEnv("SIP_WEB_PRIVY_STUB", "");
+    vi.stubEnv("SIP_WEB_BLOB_STUB", "");
     const config = (await import("../next.config.mjs")).default;
     expect(config.turbopack).toBeUndefined();
+  });
+});
+
+/**
+ * THE HEADERS THE CONFIG ADDS (10-22): the security policy on every path, and a
+ * year-long cache on the docs' clips alone, whose URLs carry their file's
+ * version (src/lib/docs/clips.ts). Anything else cached that way would keep a
+ * changed file from ever reaching a browser that has the old one.
+ */
+describe("the headers the config adds", () => {
+  it("sends the security headers on every path", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect((await config.headers())[0]).toEqual({ source: "/:path*", headers: securityHeaders() });
+  });
+
+  it("caches the docs' clips and the share card's plates for a year, immutable, only at a versioned URL, and nothing else", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    const cached = (await config.headers()).filter((rule) => rule.headers.some((header) => header.key.toLowerCase() === "cache-control"));
+    expect(cached).toEqual([
+      {
+        source: "/docs/clips/:file*",
+        // The ?v= every docs page's clip URL carries (src/lib/docs/clips.ts): a bare address keeps public/'s default.
+        has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+      {
+        source: "/share/:file*",
+        // The ?v= every plate URL carries (src/lib/share-plates.ts), checked by check:plates.
+        has: [{ type: "query", key: "v", value: "[0-9a-f]{8}" }],
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+      },
+    ]);
+  });
+});
+
+/**
+ * A SHARED CARD (owner, 10-22: "Enlace con vista previa"): its page is never
+ * indexed, every link-preview crawler gets its metadata in <head>, and its
+ * picture's fonts and plates reach a standalone build.
+ */
+describe("the shared card's pages", () => {
+  it("say noindex, follow in a header on every /c/ path; a short link's page alone is kept at Vercel's CDN for a year (10-23)", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect((await config.headers()).filter((rule) => rule.source.startsWith("/c/"))).toEqual([
+      { source: "/c/:path*", headers: [{ key: "X-Robots-Tag", value: "noindex, follow" }] },
+      { source: "/c/:code([0-9A-Za-z]{8})", headers: [{ key: "Vercel-CDN-Cache-Control", value: "max-age=31536000" }] },
+    ]);
+  });
+
+  it("match a short link's page and nothing else under /c/: not a long token, not the sample, not a picture", async () => {
+    // Next's own matcher for a rule's source, as it applies them.
+    const { getPathMatch } = await import("next/dist/shared/lib/router/utils/path-match");
+    const short = getPathMatch("/c/:code([0-9A-Za-z]{8})");
+    expect(["/c/aZ09bY18", "/c/00000000"].map((path) => short(path) !== false)).toEqual([true, true]);
+    for (const path of ["/c/example", "/c/example/vault", "/c/aZ09bY18/card.png", "/c/aZ09bY1", "/c/aZ09bY18x", "/c/aZ09bY1-", "/c/eyJ2IjoxfQ.PQ_sBKvRw9XufMsNMy0DLQ"]) {
+      expect(short(path), path).toBe(false);
+    }
+  });
+
+  it("give their metadata in <head> to Next's own HTML-limited bots, and to Mastodon's and Bluesky's — not to a browser", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect([config.htmlLimitedBots.source, config.htmlLimitedBots.flags]).toEqual([HTML_LIMITED_BOTS.source, "i"]);
+    expect(HTML_LIMITED_BOTS.source.startsWith(htmlBots.HTML_LIMITED_BOT_UA_RE.source)).toBe(true);
+    for (const agent of [
+      "Twitterbot/1.0",
+      "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+      "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)",
+      "TelegramBot (like TwitterBot)",
+      "WhatsApp/2.23.20.0",
+      "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+      "LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)",
+      "http.rb/5.1.1 (Mastodon/4.2.0; +https://mastodon.social/) Bot",
+      "Mozilla/5.0 (compatible; Bluesky Cardyb/1.1; +mailto:support@bsky.app)",
+    ]) {
+      expect(HTML_LIMITED_BOTS.test(agent), agent).toBe(true);
+    }
+    expect(HTML_LIMITED_BOTS.test("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")).toBe(false);
+  });
+
+  it("carry the picture's fonts and plates into the traced build, for the one route that draws at run time", async () => {
+    const config = (await import("../next.config.mjs")).default;
+    expect(config.outputFileTracingIncludes).toEqual({ "/c/[token]/card.png": ["./assets/share-og/**/*"] });
   });
 });
 
@@ -53,6 +157,8 @@ describe("the stub modules refuse to load in a production build", () => {
     await expect(import("../test/stubs/privy-react-auth")).rejects.toThrow(/must never ship/);
     vi.resetModules();
     await expect(import("../test/stubs/privy-react-auth-solana")).rejects.toThrow(/must never ship/);
+    vi.resetModules();
+    await expect(import("../test/stubs/vercel-blob")).rejects.toThrow(/must never ship/);
   });
 });
 

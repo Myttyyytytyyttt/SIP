@@ -151,16 +151,25 @@ export function PensionChart({
   }
 
   return (
-    // The range tabs float in the plot's top-left corner — where a curve that
-    // only ever rises has not reached yet — instead of taking a row of their
-    // own: that row was height the holdings needed to be seen without a scroll.
-    <div className="relative flex w-full flex-col xl:min-h-0 xl:flex-1">
+    /*
+     * THE RANGE TABS ON A ROW OF THEIR OWN, ABOVE THE PLOT (owner, 10-23: "el
+     * selector de tiempo del chart está obstruyendo la línea; ponlo arriba o
+     * abajo"). They used to float in the plot's top-left corner, where a rising
+     * curve was supposed not to reach yet — but a window that opens on savings
+     * made before it starts its line off the floor (in the 1h view, near the
+     * top), and the line ran under the tabs. The row's height comes out of the
+     * same text trim: the line under the hero figure and every tile's sub line
+     * are gone, so the holdings sit no lower than before. A fixed row,
+     * left-aligned with everything else in the card: switching range moves
+     * nothing.
+     */
+    <div className="flex w-full flex-col gap-2 xl:min-h-0 xl:flex-1">
       <Tabs
         value={shown}
         onValueChange={(value) => {
           if (isRange(value)) setRange(value);
         }}
-        className="absolute top-0 left-0 z-10"
+        className="self-start"
       >
         <TabsList aria-label="One point per" className="h-7">
           {hours === null ? null : (
@@ -177,7 +186,7 @@ export function PensionChart({
         </TabsList>
       </Tabs>
 
-      {/* The panel's h-64/h-72 sizes the plot itself; on the column, the tabs row would eat 44px of it. */}
+      {/* The panel's h-64/h-72 sizes the plot itself, below the tabs' row; on xl the plot takes what the column leaves. */}
       <ChartContainer config={chartConfig} className={cn("aspect-auto w-full", className)}>
         <AreaChart accessibilityLayer data={points} margin={{ top: 8, right: 0, bottom: 0, left: 0 }}>
           <CartesianGrid vertical={false} />

@@ -45,6 +45,7 @@ import { FeedSkeleton } from "@/components/live/FeedSkeleton";
 import { LiveBody } from "@/components/live/LiveBody";
 import { LiveFirstRead } from "@/components/live/LiveFirstRead";
 import { LiveKeylessCard, LiveLoading, LivePrivyStalled, LiveUnavailableCard, LiveUnreadable } from "@/components/live/LiveStates";
+import { ShareSavings } from "@/components/live/ShareSavings";
 import { DisconnectButton, PensionKeyChip, worthFrom } from "@/components/account-chip";
 import { Num } from "@/components/num";
 import { PensionPanel } from "@/components/pension-panel";
@@ -57,6 +58,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { WalletActivity } from "@/components/wallet-activity";
 import { OnboardingHost } from "@/components/onboarding/OnboardingHost";
 import { WalletsOpenerOverride, useWalletsClosed, useWalletsDisconnect, useWalletsModalOpen, useWalletsOpener } from "@/components/wallets-host";
+import { useWalletNames } from "@/components/wallets/wallet-names-context";
 import { useLiveDashboard, type LiveDashboardStore } from "@/hooks/use-live-dashboard";
 import { useOnboardingClosed } from "@/hooks/use-onboarding-closed";
 import { useVaultFollowsLive } from "@/hooks/use-vault-follow";
@@ -65,6 +67,7 @@ import { decideDashboard, readUrlMode, toggleModeOf, urlWithMode, type Dashboard
 import { formatUsd } from "@/lib/amounts";
 import { usd } from "@/lib/format";
 import { ACTIVITY_COPY, LIVE_COPY, MODE_COPY } from "@/lib/live-copy";
+import { exampleShareCardOf } from "@/lib/live-share";
 import { onboardingWanted, setupIsTheDoor, vaultPresenceOf } from "@/lib/onboarding";
 import { ONBOARDING_DONE_KEY, forgetOnboarding, setOnboardingClosed } from "@/lib/onboarding-memory";
 import { pensionKeyOf } from "@/lib/pension-key";
@@ -344,7 +347,9 @@ function ConfiguredFrame({
     window.history.replaceState(setupState(setupEntryOf(window.history.state)), "", state.replaceUrlWith);
   }, [state.replaceUrlWith, state.kind, pathname, router]);
 
-  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets, importedWallets });
+  // The account's own wallet names (owner, 10-23), laid over the derived ones in the model.
+  const { names: walletNames } = useWalletNames();
+  const live = useLiveDashboard({ pensionKey: state.kind === "live" ? pensionKey : null, privyWallets, importedWallets, walletNames });
   const liveStage = live.view.kind === "ready" ? live.view.data.stage : null;
 
   // Once the setup has been on screen for this key — or was asked for — a read
@@ -537,6 +542,9 @@ function Body({
 
 // ── the view each page renders ───────────────────────────────────────────────
 
+/** The sample's Post on X links to its fixed pages (/c/example), built from the same sample: nobody's pension, nothing signed. */
+const EXAMPLE_LINK = { kind: "example" } as const;
+
 /**
  * The sample: today's components, today's data, one notice over it.
  *
@@ -546,6 +554,12 @@ function Body({
  *
  * AND /activity IS AN ACTIVITY PAGE: the history full width (activity-main.tsx),
  * under the same notice — not the pension page with a different tab underlined.
+ *
+ * THE SHARE BUTTON, WITH THE SAMPLE'S OWN FIGURES (owner, 10-22: "en el mock
+ * también puede aparecer pero con los datos del mock claro"): the Live page's
+ * button and dialog, fed the card of what this hero shows and marked as the
+ * example (lib/live-share.ts exampleShareCardOf) — "Example" on the image, no
+ * "my pension" in the post.
  */
 function MockBody({ load, control, account, current }: { readonly load: DashboardLoadJson; readonly control: ReactNode; readonly account: ReactNode; readonly current: "pension" | "activity" }) {
   const { now, wallet, rule, stats, curve, days, holdings, trades, activity } = load.data;
@@ -600,7 +614,17 @@ function MockBody({ load, control, account, current }: { readonly load: Dashboar
             cards={
               <>
                 <SavingsRulePanel rule={rule} stats={stats} activity={activity} now={now} className={RULE_SLOT} />
-                <PensionPanel stats={stats} curve={curve} holdings={holdings} days={days} rule={rule} now={now} trades={trades} className={PENSION_SLOT} />
+                <PensionPanel
+                  stats={stats}
+                  curve={curve}
+                  holdings={holdings}
+                  days={days}
+                  rule={rule}
+                  now={now}
+                  trades={trades}
+                  share={<ShareSavings card={exampleShareCardOf({ stats, rule, now })} link={EXAMPLE_LINK} />}
+                  className={PENSION_SLOT}
+                />
               </>
             }
           />

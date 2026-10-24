@@ -172,8 +172,22 @@
 <div data-slot="card-header" class="group/card-header @container/card-header auto-rows-min items-start rounded-t-xl px-(--card-spacing) has-data-[slot=card-action]:grid-cols-[1fr_auto] has-data-[slot=card-description]:grid-rows-[auto_auto] [.border-b]:pb-(--card-spacing) flex flex-col gap-4 @md/panel:flex-row @md/panel:items-start @md/panel:justify-between">
 <div class="space-y-1">
 <p class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Saved so far</p>
+<div class="flex min-w-0 flex-wrap items-center gap-x-3 w-max max-w-full" data-hero-row="tight">
 <p class="font-mono text-4xl font-semibold tracking-tight tabular-nums sm:text-5xl xl:short:text-4xl">$2,073.42</p>
-<div data-slot="card-description" class="text-sm text-muted-foreground">Now <span class="font-mono tabular-nums">1%</span> <!-- -->of every buy and sell<!-- --> <!-- -->· saving since <span class="font-mono tabular-nums">Jun 10, 2026</span>
+<button data-slot="tooltip-trigger" data-variant="ghost" data-size="icon" class="group/button inline-flex items-center justify-center border border-transparent bg-clip-padding text-sm font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:border-destructive/50 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 size-8 shrink-0 rounded-full ring-1 ring-inset bg-emerald-500/12 ring-emerald-500/35 hover:bg-emerald-500/20 aria-expanded:bg-emerald-500/20 dark:hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 hover:text-emerald-700 aria-expanded:text-emerald-700 dark:hover:text-emerald-400 dark:aria-expanded:text-emerald-400" type="button" aria-label="Share this example" data-share-savings="saved" aria-haspopup="dialog" aria-expanded="false" data-state="closed">
+<span aria-hidden="true" class="relative flex size-5 items-center justify-center">
+<span class="live-halo pointer-events-none text-emerald-500/50" data-share-halo="">
+</span>
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-share relative size-4" aria-hidden="true">
+<path d="M12 2v13">
+</path>
+<path d="m16 6-4-4-4 4">
+</path>
+<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8">
+</path>
+</svg>
+</span>
+</button>
 </div>
 </div>
 <div class="hidden @2xl/panel:flex @2xl/panel:self-center">
@@ -376,8 +390,8 @@
 </dl>
 </div>
 <div data-slot="card-content" class="px-(--card-spacing) xl:flex xl:min-h-0 xl:flex-1 xl:flex-col">
-<div class="relative flex w-full flex-col xl:min-h-0 xl:flex-1">
-<div dir="ltr" data-orientation="horizontal" data-slot="tabs" class="group/tabs flex gap-2 data-horizontal:flex-col absolute top-0 left-0 z-10">
+<div class="flex w-full flex-col gap-2 xl:min-h-0 xl:flex-1">
+<div dir="ltr" data-orientation="horizontal" data-slot="tabs" class="group/tabs flex gap-2 data-horizontal:flex-col self-start">
 <div role="tablist" aria-orientation="horizontal" data-slot="tabs-list" data-variant="default" class="group/tabs-list inline-flex w-fit items-center justify-center rounded-lg p-[3px] text-muted-foreground group-data-horizontal/tabs:h-8 group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col data-[variant=line]:rounded-none bg-muted h-7" aria-label="One point per" tabindex="-1" data-orientation="horizontal" style="outline:none">
 <button type="button" role="tab" aria-selected="false" aria-controls="radix-_R_3b_-content-1h" data-state="inactive" id="radix-_R_3b_-trigger-1h" data-slot="tabs-trigger" class="relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent py-0.5 font-medium whitespace-nowrap text-foreground/60 transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 dark:text-muted-foreground dark:hover:text-foreground group-data-[variant=default]/tabs-list:data-active:shadow-sm group-data-[variant=line]/tabs-list:data-active:shadow-none [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100 px-2 text-xs" title="A point an hour, the last 7 days" tabindex="-1" data-orientation="horizontal" data-radix-collection-item="">1h</button>
 <button type="button" role="tab" aria-selected="true" aria-controls="radix-_R_3b_-content-1d" data-state="active" id="radix-_R_3b_-trigger-1d" data-slot="tabs-trigger" class="relative inline-flex h-[calc(100%-1px)] flex-1 items-center justify-center gap-1.5 rounded-md border border-transparent py-0.5 font-medium whitespace-nowrap text-foreground/60 transition-all group-data-vertical/tabs:w-full group-data-vertical/tabs:justify-start hover:text-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 dark:text-muted-foreground dark:hover:text-foreground group-data-[variant=default]/tabs-list:data-active:shadow-sm group-data-[variant=line]/tabs-list:data-active:shadow-none [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 group-data-[variant=line]/tabs-list:bg-transparent group-data-[variant=line]/tabs-list:data-active:bg-transparent dark:group-data-[variant=line]/tabs-list:data-active:border-transparent dark:group-data-[variant=line]/tabs-list:data-active:bg-transparent data-active:bg-background data-active:text-foreground dark:data-active:border-input dark:data-active:bg-input/30 dark:data-active:text-foreground after:absolute after:bg-foreground after:opacity-0 after:transition-opacity group-data-horizontal/tabs:after:inset-x-0 group-data-horizontal/tabs:after:bottom-[-5px] group-data-horizontal/tabs:after:h-0.5 group-data-vertical/tabs:after:inset-y-0 group-data-vertical/tabs:after:-right-1 group-data-vertical/tabs:after:w-0.5 group-data-[variant=line]/tabs-list:data-active:after:opacity-100 px-2 text-xs" title="A point a day, the last 30 days" tabindex="-1" data-orientation="horizontal" data-radix-collection-item="">1d</button>
@@ -415,38 +429,29 @@
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">$118.32</span>
 </dd>
-<dd class="text-xs text-muted-foreground">
-<span class="font-mono tabular-nums">$632.50</span> this month</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
 <dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Avg per trade</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">$11.52</span>
 </dd>
-<dd class="text-xs text-muted-foreground">
-<span class="font-mono tabular-nums">180</span> <!-- -->trades</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
 <dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Volume</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">$207.3K</span>
 </dd>
-<dd class="text-xs text-muted-foreground">
-<span class="font-mono tabular-nums">$63.2K</span> this month</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
-<dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Biggest</dt>
+<dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Biggest save</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">$27.34</span>
 </dd>
-<dd class="text-xs text-muted-foreground">put aside by one trade</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
 <dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Streak</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">2</span> <span class="text-sm font-normal text-muted-foreground">days</span>
-</dd>
-<dd class="text-xs text-muted-foreground">longest <span class="font-mono tabular-nums">12</span>
 </dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
@@ -454,22 +459,18 @@
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">105</span>
 </dd>
-<dd class="text-xs text-muted-foreground">every <span class="font-mono tabular-nums">$10.00</span>
-</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
 <dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Active days</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">74</span> <span class="text-sm font-normal text-muted-foreground">of</span> <span class="font-mono tabular-nums">90</span>
 </dd>
-<dd class="text-xs text-muted-foreground">days with a save</dd>
 </div>
 <div class="min-w-0 space-y-1 bg-card p-4 xl:px-4 xl:py-2.5 xl:short:py-2">
-<dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">At this pace</dt>
+<dt class="text-xs font-medium uppercase tracking-wide text-muted-foreground">Yearly pace</dt>
 <dd class="text-lg font-medium whitespace-nowrap">
 <span class="font-mono tabular-nums">$8,408.87</span>
 </dd>
-<dd class="text-xs text-muted-foreground">over a year</dd>
 </div>
 </dl>
 </section>

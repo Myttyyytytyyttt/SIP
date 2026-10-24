@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetClose, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { urlWithMode, type UrlMode } from "@/lib/dashboard-mode";
+import { DOCS_HOME } from "@/lib/docs/pages";
 import { cn } from "@/lib/utils";
 
 /**
@@ -38,6 +39,7 @@ import { cn } from "@/lib/utils";
  */
 export function SiteHeader({
   activitySheet,
+  sheet = true,
   control = null,
   contributions = null,
   account,
@@ -47,6 +49,12 @@ export function SiteHeader({
 }: {
   /** This state's sidebar, for the sheet below lg. */
   activitySheet: React.ReactNode;
+  /**
+   * False leaves out the sheet and the button below lg that opens it: a page
+   * with no sidebar offers no empty drawer (/dashboard, since 10-24). Every
+   * other page leaves it at true.
+   */
+  readonly sheet?: boolean;
   /** The Live/Mock control. A slot, so the header stays ignorant of what it switches. */
   control?: React.ReactNode;
   /**
@@ -90,9 +98,11 @@ export function SiteHeader({
     // A REAL PAGE, AND A PUBLIC ONE: /leaderboard mounts no Privy provider, so
     // this link works for a visitor who has never connected anything.
     { label: "Leaderboard", href: tab("/leaderboard"), current: current === "leaderboard", className: undefined },
-    // A placeholder ("#"), so it is the one that gives way between md and lg:
-    // with the tabs, the Dashboard, the Live|Mock control and the account, 768 px overflowed.
-    { label: "Docs", href: "#", current: false, className: "hidden lg:inline-flex" },
+    // THE DOCS (owner, 10-22), public and modeless: they are the same for the
+    // sample and for a pension, so no ?mode. Still the one that gives way between
+    // md and lg: with the tabs, the Dashboard, the Live|Mock control and the
+    // account, 768 px overflowed. Below lg the footer carries it.
+    { label: "Docs", href: DOCS_HOME, current: false, className: "hidden lg:inline-flex" },
   ];
   // Every pension added up (owner, 10-06): public as well, and it follows the
   // mode like the rest — the sample in Mock, the real figures in Live. On the
@@ -117,27 +127,29 @@ export function SiteHeader({
   return (
     <header className="sticky top-0 z-40 h-14 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex h-14 items-center gap-3 px-4 lg:px-6">
-        <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-          <SheetTrigger asChild>
-            <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open activity">
-              <PanelLeft aria-hidden />
-            </Button>
-          </SheetTrigger>
-          {/* bg-background, not the stock bg-popover: the feed's sticky day headers paint bg-background and would band in dark mode. */}
-          <SheetContent side="left" showCloseButton={false} className="gap-0 bg-background p-0 data-[side=left]:w-80">
-            {/* Own close row: the stock X sits absolute top-right, over the wallet block's Manage wallets link. First tabbable too, so opening focuses it, not the copy button (whose tooltip would pop). */}
-            <SheetHeader className="flex-row items-center justify-between border-b py-2 pl-4 pr-2">
-              <SheetTitle className="text-sm">Activity</SheetTitle>
-              <SheetClose asChild>
-                <Button variant="ghost" size="icon" aria-label="Close activity">
-                  <X aria-hidden />
-                </Button>
-              </SheetClose>
-            </SheetHeader>
-            <SheetDescription className="sr-only">What this pension did, newest first.</SheetDescription>
-            {activitySheet}
-          </SheetContent>
-        </Sheet>
+        {sheet ? (
+          <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+            <SheetTrigger asChild>
+              <Button variant="ghost" size="icon" className="lg:hidden" aria-label="Open activity">
+                <PanelLeft aria-hidden />
+              </Button>
+            </SheetTrigger>
+            {/* bg-background, not the stock bg-popover: the feed's sticky day headers paint bg-background and would band in dark mode. */}
+            <SheetContent side="left" showCloseButton={false} className="gap-0 bg-background p-0 data-[side=left]:w-80">
+              {/* Own close row: the stock X sits absolute top-right, over the wallet block's Manage wallets link. First tabbable too, so opening focuses it, not the copy button (whose tooltip would pop). */}
+              <SheetHeader className="flex-row items-center justify-between border-b py-2 pl-4 pr-2">
+                <SheetTitle className="text-sm">Activity</SheetTitle>
+                <SheetClose asChild>
+                  <Button variant="ghost" size="icon" aria-label="Close activity">
+                    <X aria-hidden />
+                  </Button>
+                </SheetClose>
+              </SheetHeader>
+              <SheetDescription className="sr-only">What this pension did, newest first.</SheetDescription>
+              {activitySheet}
+            </SheetContent>
+          </Sheet>
+        ) : null}
 
         {/*
           The brand's mark before its name, as the footer wears it — in the ink

@@ -17,12 +17,10 @@ import type { Metadata } from "next";
 import { PricesView } from "@/components/prices-view";
 import { SiteFooter } from "@/components/site-footer";
 import { loadPrices } from "@/lib/prices-data";
+import { SITE_PAGES, pageMetadata } from "@/lib/seo";
 
-export const metadata: Metadata = {
-  title: "Prices — SaverFi",
-  description:
-    "SOL/USDC against Pyth, SPYx against its push account, ANTHROPIC against the issuer's own marks and its mint's transfer fee, and why each of the eight PreStocks is or is not offered. Read on the server, every figure with its age.",
-};
+/** Indexed (10-22). Its description fits a search result: the old one ran past 220 characters. */
+export const metadata: Metadata = pageMetadata(SITE_PAGES.prices);
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";

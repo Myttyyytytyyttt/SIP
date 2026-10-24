@@ -199,8 +199,9 @@ describe("an activity read that failed", () => {
     expect(data.stats.settlementsLifetime).toBe(3n);
 
     const html = render({ data, activityUnreadable: true });
-    // The sample's "Avg per trade" tile, counting what this chain records.
-    expect(seen(html)).toContain("3 settlements");
+    // The sample's "Avg per trade" tile, worked out of the chain's own count.
+    // Its "3 settlements" sub line went with the owner's text trim (10-23).
+    expect(seen(html)).toContain("Avg settlement");
     expect(html).not.toContain(ACTIVITY_COPY.empty);
   });
 });

@@ -199,7 +199,7 @@ function CreateVault({ state, volumeOffered, write, progress }: { readonly state
           // An explicit object: the flow gets the limits shown, never a click event.
           onClick={() => {
             if (limits.ok) {
-              // A vault made on Volume starts at 1 % of every buy and every sell (owner, 09-25), not the program's 2 %.
+              // A vault made on Volume starts at 2 % of every buy and every sell (owner, 10-22): the program's rate, the one its label says.
               void write.createVault({ mode, maxContribution: limits.maxContribution, walletReserve: limits.walletReserve, ...(mode === MODE_VOLUME ? { volumeBps: VOLUME_START_BPS } : {}) });
             }
           }}

@@ -57,6 +57,7 @@ import { TradingWalletRow, type TradingWalletRowData } from "@/components/wallet
 import { TxProgress, useStepStartedAt } from "@/components/wallets/TxProgress";
 import { useWriteSyncing } from "@/components/live/last-write-context";
 import { VAULT_CARD_ID } from "@/components/wallets/VaultScreen";
+import { useWalletNames } from "@/components/wallets/wallet-names-context";
 import { WalletsSectionContext } from "@/components/wallets/wallets-section-context";
 import { useCreateAndLink } from "@/hooks/use-create-and-link";
 import { useImportAndLink } from "@/hooks/use-import-and-link";
@@ -86,6 +87,8 @@ export function TradingWalletsCard() {
   const showSection = useContext(WalletsSectionContext);
   const config = useSolanaConfig();
   const { user } = usePrivy();
+  // The account's own names (owner, 10-23): renamed in a row here, renamed on the dashboard too.
+  const { names } = useWalletNames();
   const screen = useVaultScreen();
   const { run, created, outcome, dismiss, write } = useCreateAndLink(config);
   const importer = useImportAndLink(config);
@@ -105,15 +108,15 @@ export function TradingWalletsCard() {
     const known = (address: string | null): address is string => address !== null && !wallets.some((wallet) => wallet.address === address);
     // An imported wallet Privy's record does not list yet is named with the rest, so it can never share a name.
     const pendingImport = known(importer.imported) ? importer.imported : null;
-    // The same names as the live dashboard's (src/lib/wallet-labels.ts), from Privy's own list.
-    const labels = tradingWalletLabels([...wallets, ...(pendingImport === null ? [] : [{ address: pendingImport, imported: true }])]);
+    // The same names as the live dashboard's (src/lib/wallet-labels.ts), from Privy's own list and the account's own names.
+    const labels = tradingWalletLabels([...wallets, ...(pendingImport === null ? [] : [{ address: pendingImport, imported: true }])], names);
     const listed: TradingWalletRowData[] = wallets.map((wallet) => ({ ...wallet, listed: true, label: labels.get(wallet.address) ?? wallet.address }));
     if (known(created)) listed.push({ address: created, id: null, walletIndex: null, imported: false, listed: false, label: "New trading wallet" });
     if (pendingImport !== null) {
       listed.push({ address: pendingImport, id: null, walletIndex: null, imported: true, listed: false, label: labels.get(pendingImport) ?? "Imported wallet" });
     }
     return listed;
-  }, [user, created, importer.imported]);
+  }, [user, created, importer.imported, names]);
   // An account whose only Privy wallets are imported: Privy refuses to create one more (createRefusal).
   const cannotCreate = createRefusal(user);
 

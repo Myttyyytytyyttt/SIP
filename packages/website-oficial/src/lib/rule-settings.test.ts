@@ -1,10 +1,12 @@
-// The vault settings' shared shapes (owner, 09-25): the rate ranges, the $10
-// base threshold whatever the basket, and picking assets.
+// The vault settings' shared shapes (owner, 09-25): the rate ranges, where
+// Volume starts (owner, 10-22), the $10 base threshold whatever the basket,
+// and picking assets.
 
 import { describe, expect, it } from "vitest";
 
-import { BASE_THRESHOLD_RAW, evened, minimumFor, pickToggled, RATE_RANGES, shareTotal, thresholdUsdOf, withShare } from "@/lib/rule-settings";
-import { PROFIT_BPS_MAX, PROFIT_BPS_MIN, VOLUME_BPS_MAX, VOLUME_BPS_MIN } from "@sip/solana-core/client";
+import { BASE_THRESHOLD_RAW, evened, minimumFor, pickToggled, RATE_RANGES, shareTotal, thresholdUsdOf, VOLUME_START_BPS, withShare } from "@/lib/rule-settings";
+import { VOLUME_RATE, ratePercent } from "@/lib/vault-copy";
+import { DEFAULT_RATES, PROFIT_BPS_MAX, PROFIT_BPS_MIN, VOLUME_BPS_MAX, VOLUME_BPS_MIN } from "@sip/solana-core/client";
 
 describe("the rate ranges are the program's", () => {
   it("profit and volume, with their presets inside them", () => {
@@ -18,6 +20,15 @@ describe("the rate ranges are the program's", () => {
         expect(preset).toBeLessThanOrEqual(RATE_RANGES[mode].max);
       }
     }
+  });
+});
+
+describe("Volume starts at 2 % (owner, 10-22)", () => {
+  it("is the program's product rate and the rate the create form's label says, never the 1 % it was under a 2 % label", () => {
+    expect(VOLUME_START_BPS).toBe(DEFAULT_RATES.volumeBps);
+    expect(VOLUME_START_BPS).toBe(200);
+    expect(ratePercent(VOLUME_START_BPS)).toBe(VOLUME_RATE);
+    expect(RATE_RANGES.volume.presets).toContain(VOLUME_START_BPS);
   });
 });
 

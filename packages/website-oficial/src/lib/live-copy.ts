@@ -359,6 +359,12 @@ export const LIVE_COPY = {
   badgeLinkUnreadable: "Link status unreadable",
   settlementCount: (count: string): string => `${count} ${count === "1" ? "settlement" : "settlements"}`,
   settlementCountUnknown: "settlements unknown",
+  /**
+   * A linked wallet that cannot settle yet, as its badge says it (owner, 10-23:
+   * the wallet card is two rows, so the reserve note rides in the badge, and
+   * reserveNoteShort is its tooltip and its words for a screen reader).
+   */
+  badgeCannotSettle: "Can’t settle yet",
   /** Why a linked wallet still saves nothing: it holds no more than it always keeps. */
   reserveNote: (reserve: string): string => `Holds no more than the ${reserve} SOL it always keeps, so nothing can be settled from it yet.`,
   /** The same, where the reserve figure is already on screen beside it. */
@@ -962,4 +968,294 @@ export const PENDING_COPY = {
     volume: "A saving follows once 0.001 SOL is owed, or an hour after your oldest unsaved trade",
     unknown: `${BRAND} checks about once a minute`,
   },
+} as const;
+
+/**
+ * THE SHARE CARD (owner, 10-22): "Saved $X", an image for X and anywhere else,
+ * from the button beside the hero's figure (live/ShareSavings.tsx), drawn in
+ * the browser (live/share-canvas.ts) from the figures the page already holds.
+ *
+ * AN IMAGE AND NOTHING ELSE, FOR NOW (owner, 10-22): no referral and no link of
+ * the person's own on it yet — that comes later. Dollars by default, SOL on
+ * request. No vault, wallet or handle on it, in its file name or in the post:
+ * the only address is the site's own.
+ *
+ * AND NO KEY TO THE VAULT EITHER (review, 10-22). The public leaderboard prints
+ * every vault's lifetime SOL to four places beside its address, so a card with
+ * that figure on it named its vault — and the dialog had promised the opposite.
+ * The card's SOL is now to two places (like the dollar's cents), the dollar's
+ * note no longer carries the SOL figure, and "since" is a month, not the vault's
+ * creation day. The dialog promises only what is true: no address, wallet or
+ * name — not that nobody could ever match an amount to a vault.
+ *
+ * IN THE FIRST PERSON ON THE CARD — "My pension" — because it is the owner
+ * who posts it; in the second person in the dialog, which speaks to him.
+ *
+ * BUT NOT ON THE LINK'S CARD (S1; owner, 10-23: 'usa "SaverFi's Vault"').
+ * /api/share signs a card for any pension key it is handed, with no proof
+ * whose it is, so the picture under a /c/<token> post could be somebody else's
+ * pension under "My pension". The card the server draws for a link is
+ * "SaverFi’s Vault", in the third person (page.card), its page's headline
+ * starts with that title, and nothing on the link's page or card says "my" or
+ * "I". The image the dialog downloads, copies and films —
+ * made in the owner's own browser, from his own connected Live page — keeps
+ * "My pension".
+ */
+/** The link's card's title, and the head of its page's headline (owner, 10-23). */
+const LINK_TITLE = `${BRAND}’s Vault`;
+
+export const SHARE_COPY = {
+  // ── the button beside the figure ─────────────────────────────────────────
+  trigger: "Share your pension",
+  triggerTip: "Share an image of your pension",
+  /** The vault's total could not be read: nothing to draw, and the button says why it is off. */
+  triggerUnknown: "Your savings could not be read yet, so there is nothing to share",
+
+  // ── the dialog ───────────────────────────────────────────────────────────
+  title: "Share your pension",
+  description: "An image of what you’ve saved, ready to post. No address, wallet or name is on it.",
+  /** Nothing saved yet: the card states the rule instead of a zero. */
+  descriptionZero: "An image of your savings rule, ready to post. No address, wallet or name is on it.",
+  background: "Background",
+  backgrounds: { grid: "Grid", streaks: "Streaks", vault: "Vault" },
+  showIn: "Show in",
+  /** No price read: the dollar figure does not exist, and the card shows the chain's SOL. */
+  noPrice: "No SOL price right now, so the image shows SOL.",
+  drawing: "Drawing your image",
+  share: "Share image",
+  copy: "Copy image",
+  copyShort: "Copy",
+  /**
+   * ONE DOWNLOAD, TWO FILES (owner, 10-23: "Dentro de Download"): where this
+   * browser can make the video, Download opens a menu of the two; elsewhere it
+   * is the image's own button, and says nothing more.
+   */
+  download: "Download",
+  downloadImage: "Image (PNG)",
+  downloadVideo: "Video (MP4)",
+  postOnX: "Post on X",
+  /** The preview's motion is a loop that never ends: it can be stopped (WCAG 2.2.2). */
+  pauseMotion: "Pause the motion",
+  playMotion: "Play the motion",
+  /**
+   * SAID BEFORE THE CLICK, under the actions (review, 10-22): X opens in a new
+   * tab, in front, so whatever the dialog says after the click is behind it.
+   * X's composer cannot take an image from a link — the person pastes it.
+   */
+  xHint: "Post on X copies the image first: paste it into your post.",
+  xHintNoCopy: "To post on X, download the image, then attach it to your post.",
+  /**
+   * WITH THE CARD'S OWN LINK (owner, 10-22: "Enlace con vista previa"): the post
+   * carries a link to this card, and X shows the card under it — nothing to
+   * paste. Said before the click, like the hints above. Where the clipboard
+   * takes an image it is copied too, and that is said after the click
+   * (copiedLinked): the hint sits beside four buttons at 1440 and wrapped to
+   * three lines with one clause more (measured 10-22). What the link does not
+   * carry is the token's rule (lib/share-token.ts), and the dialog's
+   * description already says the card has no address.
+   *
+   * NOT "THIS CARD" ANY MORE (S1; owner, 10-23): the link's card is titled
+   * "SaverFi’s Vault" where this one says "My pension" (page.card), and the
+   * hint says so before the click rather than let X show a card that is not
+   * the one in the dialog. The sample's link IS its card (example.xHintLinked).
+   * Measured 10-23 beside four buttons at 1440: the hint's column is 145 px,
+   * and "Post on X adds a link: its card reads …" took three lines with the
+   * name split across two. This one takes two there, as the old hint did (one
+   * at 375), and the name is joined by a no-break space so a line never breaks
+   * inside it.
+   */
+  xHintLinked: `Post on X shares it as “${LINK_TITLE.replace(" ", "\u00a0")}”.`,
+  /** While the server signs the link: Post on X waits for it — a second or two, never more than a few. */
+  xHintPending: "Getting this card’s link for X…",
+  /** The dialog's own code did not arrive (a dropped connection, a new deploy): said in the frame. Only a reload fetches it again. */
+  loadFailed: "This did not load. Reload the page to try again.",
+  reload: "Reload",
+
+  // ── what an action says it did — a refusal says so, silence reads as success
+  copied: "Image copied. Paste it into your post.",
+  copiedForX: "Image copied. Paste it into your post on X.",
+  /** Post on X with the card's link, where the image was copied as well. */
+  copiedLinked: "Image copied too. X shows the card from the link.",
+  copyFailed: "This browser would not copy the image. Download it instead.",
+  /** Post on X where nothing can be copied: X opens, and the image has to be attached by hand. */
+  noCopyForX: "Download the image, then attach it to your post on X.",
+  shareFailed: "That did not share. Download the image instead.",
+  drawFailed: "This browser could not draw the image.",
+
+  // ── the video (owner, 10-22: "Vídeo corto MP4"): made in this browser, on request —
+  // since 10-23 inside Download's menu ("Dentro de Download"), with no row and no sheet of its own
+  video: {
+    /** Beside "Video (MP4)" in the menu: how long it runs. */
+    length: (seconds: number): string => `${seconds} s`,
+    /** In the menu while it is made; the percent beside it is a number, not words. */
+    making: "Making the video…",
+    /** For a screen reader, once: not every percent. */
+    makingSaid: "Making the video.",
+    cancel: "Cancel",
+    ready: (seconds: number, size: string): string => `Ready: ${seconds} seconds, ${size}.`,
+    /** The one click left when the video outlived the click that asked for it (SharePanel's DOWNLOADED AT THE END says when). */
+    save: "Download video",
+    /** Said in words: a video that silently never comes reads as one that worked. */
+    failed: "This browser could not make the video. The image still works.",
+    /** The plate did not download (offline, a flaky network): the network's fault, not the browser's — so Try again is worth a tap (review, 10-22). */
+    failedNetwork: "Couldn’t load the video’s background. Check your connection and try again.",
+    retry: "Try again",
+  },
+
+  // ── the post's text: X adds the site's link after it ─────────────────────
+  post: (figure: string): string => `I’ve saved ${figure} for my pension with ${BRAND} so far.`,
+  postZero: (rule: string): string => `I’m building my pension with ${BRAND}: ${rule}, put aside for later.`,
+  /** Nothing saved and the rule paused: nothing is being put aside, so the post claims no rule. */
+  postZeroPaused: `I’m building my pension with ${BRAND}.`,
+  /** The preview's description for a screen reader: what the image says, in a sentence. */
+  alt: (figure: string): string => `Your ${BRAND} image: ${figure} saved for your pension`,
+  altZero: (rule: string): string => `Your ${BRAND} image: ${rule}, put aside for your pension`,
+  altZeroPaused: (rule: string): string => `Your ${BRAND} image: ${rule}, paused for now`,
+
+  // ── the card's own words ─────────────────────────────────────────────────
+  card: {
+    brand: BRAND,
+    /** The dialog's image — PNG, copy, MP4 — in the owner's voice; the link's card says page.card's instead (S1; owner, 10-23). */
+    titleSaved: "My pension",
+    titleZero: "Building my pension",
+    since: (date: string): string => `since ${date}`,
+    /** Beside the rate on a card with nothing saved yet, the landing's words in the first person. */
+    zeroMeasure: { profit: "of my trading gains,", volume: "of every buy and sell," },
+    zeroAside: "put aside for later.",
+    /** The same line while the rule is paused: nothing is being put aside. */
+    zeroPaused: "paused for now.",
+    savingNow: "Saving now",
+    /** A paused rule's row: not "Saving now", which it is not. */
+    rule: "Rule",
+    /** "20% of trading gains" — the rule is today's, the total is lifetime (pension-panel.tsx, 09-25). */
+    measure: { profit: "of trading gains", volume: "of every buy and sell" },
+    /** The same, in the first person, for the post. */
+    measureMine: { profit: "of my trading gains", volume: "of every buy and sell" },
+    paused: "paused",
+    streak: "Streak",
+    /** "13 days in a row", "45+ days in a row" — the count as live-share.ts streakText writes it. */
+    streakDays: (days: string): string => `${days} days in a row`,
+    investsIn: "Invests in",
+    site: "saverfi.cash",
+    tagline: "A pension that builds itself, on Solana",
+  },
+
+  // ── the card's own page, /c/<token>, and its preview (owner, 10-22) ──────
+  /**
+   * WHAT THE LINK'S PAGE AND ITS PREVIEW SAY, around the card: in the third
+   * person — whoever opens it is not the person who saved — and only what the
+   * card already prints. The page is not indexed (it is one person's moment,
+   * and its figures are dated); its links are followed.
+   *
+   * AND THE CARD ITSELF IS IN THE THIRD PERSON TOO (S1; owner, 10-23: 'usa
+   * "SaverFi's Vault"'): the server signs a card for any pension key it is
+   * handed, so whoever posts a link may not be whose pension it is. The card is
+   * titled "SaverFi’s Vault" (card, below), and the headline starts with it, as
+   * the card does; the image's description is the headline (shared-card-page.tsx).
+   */
+  page: {
+    /** "SaverFi’s Vault: $2,073.42 saved": the preview's headline — the card's title, then its figure. */
+    title: (figure: string): string => `${LINK_TITLE}: ${figure} saved`,
+    /** A card with nothing saved yet: its rule is its news, in the card's own words. */
+    titleZero: (rule: string): string => `${LINK_TITLE}: ${rule}, put aside for later`,
+    /** Paused: nothing is put aside, and the headline says so, as the card does. */
+    titleZeroPaused: (rule: string): string => `${LINK_TITLE}: ${rule}, paused for now`,
+    description: `${BRAND} builds you a pension from your Solana trading: a slice of every trade, put aside for later in a vault only your wallet can open.`,
+    /** Under the card: where the figures came from, and when. */
+    readOn: (day: string): string => `Read from Solana by ${BRAND} on ${day}.`,
+    start: "Start your pension",
+    docs: "How it works",
+    /**
+     * THE LINK'S CARD'S OWN WORDS (S1; owner, 10-23), where the dialog's image
+     * says "My pension" and "of my trading gains": nothing the server draws for
+     * a link says "my" or "I". The rest of the card — the rows, the footer, the
+     * zero card's second line — never did. The sample's link keeps its own
+     * (example.card): it was nobody's already.
+     */
+    card: {
+      titleSaved: LINK_TITLE,
+      titleZero: LINK_TITLE,
+      zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
+    },
+    /** The sample's page: nobody's pension, and it says so wherever the card's figures appear. */
+    example: {
+      title: `Example pension — ${BRAND}`,
+      readOn: `An example made from ${BRAND}’s sample: nobody’s pension.`,
+      alt: (figure: string): string => `Example ${BRAND} image, nobody’s pension: ${figure} saved`,
+    },
+  },
+
+  // ── the sample's card (owner, 10-22: "en el mock también puede aparecer pero con los datos del mock claro")
+  /**
+   * THE EXAMPLE'S OWN WORDS. The sample is nobody's pension, so nothing here
+   * says "your pension" or "my pension" of it: the button and the dialog name
+   * the example, the post is a line about SaverFi, and the image carries the
+   * site's "Example" itself (share-canvas.ts) — so a downloaded or posted copy
+   * can never pass for somebody's real pension.
+   */
+  example: {
+    trigger: "Share this example",
+    triggerTip: "Share an image of this example",
+    title: "Share the example",
+    description: "An image of this example, ready to post. It is marked “Example”: nobody’s pension.",
+    /** The sample's figures are dollars: it has no SOL total, and one made up for the image would be a second invention. */
+    dollarsOnly: "The example is in dollars. An image of your own pension can show SOL too.",
+    /** The post: about SaverFi, never "I’ve saved" — the figure is nobody's. X adds saverfi.cash after it. */
+    post: `${BRAND}: a pension that builds itself from your Solana trading.`,
+    /** The preview's description for a screen reader. */
+    alt: (what: string): string => `Example ${BRAND} image, nobody’s pension: ${what}`,
+    /** Post on X's hint: the sample's link shows the very card in the dialog — "Example pension" in both (xHintLinked says why a pension's does not). */
+    xHintLinked: "Post on X adds a link that shows this card.",
+    /** The pill at the image's top-right corner: the docs clips' label, word for word. */
+    mark: "Example",
+    /**
+     * THE IMAGE'S OWN WORDS, where a pension's card says "My pension" and "of
+     * my trading gains" (review, 10-22: the example's card said "My pension
+     * since Jun 2026" right above "Nobody's pension"). The title is the card's
+     * largest line and the one a crop keeps with the figure, so it carries the
+     * mark itself — and, since the owner took every line from under the figure
+     * (10-22), it is the mark nearest the money; nothing on it says "my".
+     */
+    card: {
+      titleSaved: "Example pension",
+      titleZero: "Example pension",
+      zeroMeasure: { profit: "of trading gains,", volume: "of every buy and sell," },
+    },
+  },
+} as const;
+
+/**
+ * RENAMING A TRADING WALLET (owner, 10-23: "que el nombre de la trading wallet
+ * se pueda editar"): the pencil beside a wallet's name — in the live column and
+ * in Manage wallets' rows — the box it opens, and what a save that failed says.
+ *
+ * A FAILURE STANDS IN THE NAME'S OWN PLACE for a few seconds, beside the status
+ * badge, and the card never grows a line for it — so every failure is a few
+ * words that fit there whole at the column's narrowest (the phone's sheet, next
+ * to "Can’t settle yet": about 20 characters), never a sentence cut by an
+ * ellipsis. The old name is back on screen, so "not saved" goes without saying.
+ * Where there is more to say — the rule a name broke, in its own words
+ * (lib/wallet-names.ts) — it is the failure's tooltip and is read with it.
+ */
+export const RENAME_COPY = {
+  /** The pencil's accessible name: which wallet it renames. */
+  rename: (name: string): string => `Rename ${name}`,
+  /** The box's accessible name. */
+  input: "Wallet name",
+  /** Read with the box, so a keyboard knows how to finish. */
+  hint: "Enter saves, Escape cancels. Leave it empty to go back to the default name.",
+  /** The save did not happen; the old name is back on screen. */
+  failed: "Name not saved.",
+  /** Refused by the rate limit: no time promised, the pencil can be pressed again. */
+  rateLimited: "Too many renames.",
+  /** The session needs renewing before a name can be saved. */
+  signIn: "Sign in again.",
+  /** Longer than a name may be (WALLET_NAME_COPY.tooLong says by how much). */
+  tooLong: "Name too long.",
+  /** A line break or an invisible character (WALLET_NAME_COPY.forbidden). */
+  forbidden: "Hidden characters.",
+  /** The account keeps as many names as it may. */
+  tooManyNames: "Too many names.",
+  /** The day's saves are spent, this account's or the server's (names_budget): the pencil goes until they are back. */
+  paused: "Renaming paused.",
 } as const;

@@ -42,6 +42,8 @@ export function groupByDay(activity: readonly ActivityEvent[]): ReadonlyArray<re
  * the column is the sample's exactly.
  */
 export interface LiveColumnSlots {
+  /** In place of the lead wallet's label: its name, with the pencil that renames it (owner, 10-23). Absent: the label as text. */
+  readonly name?: ReactNode;
   /** Under the lead wallet's balance: whatever about that wallet needs saying (a link it lacks, a reserve it cannot clear). */
   readonly below: ReactNode;
   /** In place of the address and balance when no single wallet can lead: every wallet, listed. */
@@ -127,7 +129,7 @@ export function WalletActivity({
     <div id={id} className={cn("flex h-full flex-col bg-background", className)}>
       <div className="rise-in space-y-3 border-b p-4">
         <div className="flex items-center justify-between gap-2">
-          <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>
+          {wallet !== null && live?.name !== undefined ? live.name : <span className={LABEL}>{wallet?.label ?? "Trading wallets"}</span>}
           {/* The ui Button carries the focus ring either way — link or modal. */}
           {onManageWallets === undefined ? (
             <Button variant="link" size="sm" asChild className={MANAGE}>

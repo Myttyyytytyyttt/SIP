@@ -29,8 +29,9 @@
 
 import { ACTIVITY_COPY } from "@/lib/live-copy";
 import { artForMint, NATIVE_SOL } from "@/lib/asset-art";
-import { formatSol, rawFrom, usdcRawForLamports } from "@/lib/amounts";
+import { formatSol, rawFrom } from "@/lib/amounts";
 import { usd } from "@/lib/format";
+import { createdMsOf, currentStreakOf, dollarsAtSnapshot, firstSaveAtOf, liveRuleOf, streaksOf } from "@/lib/live-figures";
 import { nextInvestment } from "@/lib/live-pending";
 import type { LiveDashboard, LiveRow, LiveWalletView } from "@/lib/live-types";
 import { ratePercent } from "@/lib/vault-copy";
@@ -69,24 +70,6 @@ const dollarsOf = (raw: bigint | null | undefined): number | null => (raw === nu
 
 /** "YYYY-MM-DD" of a UTC midnight. */
 const dayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
-
-/**
- * The sample's streaks, computed the sample's way (src/mocks/data.ts): today
- * is not over, so an empty today does not break the current one.
- */
-function streaksOf(days: readonly { readonly lamports: bigint }[]): { readonly current: number; readonly longest: number } {
-  let current = 0;
-  let index = days.length - 1;
-  if (index >= 0 && days[index]!.lamports === 0n) index -= 1;
-  for (; index >= 0 && days[index]!.lamports > 0n; index -= 1) current += 1;
-  let longest = 0;
-  let run = 0;
-  for (const day of days) {
-    run = day.lamports > 0n ? run + 1 : 0;
-    if (run > longest) longest = run;
-  }
-  return { current, longest };
-}
 
 /**
  * THE CURVE, ONE POINT PER UTC DAY — the sample's own sampling. Its chart
@@ -137,9 +120,8 @@ const ICONS: Readonly<Partial<Record<LiveRow["event"]["kind"], OtherEvent["icon"
 
 export function toDashboardMock(data: LiveDashboard, { complete }: { readonly complete: boolean }): DashboardMock {
   const perSol = rawFrom(data.prices?.usdcRawPerSol);
-  /** Lamports as dollars at the price this snapshot read; null when it read none. */
-  const $ = (lamports: bigint | null | undefined): number | null =>
-    lamports === null || lamports === undefined || perSol === null ? null : Number(usdcRawForLamports(lamports, perSol)) / USDC_UNIT;
+  /** Lamports as dollars at the price this snapshot read; null when it read none (live-figures.ts, which the share route reads too). */
+  const $ = dollarsAtSnapshot(data);
   const labelOf = (wallet: string | null): string =>
     wallet === null ? ACTIVITY_COPY.someWallet : (data.wallets.find((entry) => entry.address === wallet)?.label ?? ACTIVITY_COPY.someWallet);
   const now = new Date(data.nowMs).toISOString();
@@ -180,7 +162,7 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   const legRows = data.holdings.filter((row) => row.kind === "leg");
   const holdingsUsd = legRows.some((row) => row.valueUsdcRaw === null) ? null : dollarsOf(legRows.reduce((total, row) => total + (row.valueUsdcRaw ?? 0n), 0n));
   const streaks = streaksOf(stats.dailySaved);
-  const createdMs = vault.createdAt === null || vault.createdAt <= 0n ? null : Number(vault.createdAt) * 1_000;
+  const createdMs = createdMsOf(data);
   // The sample's own "at this pace": the lifetime total over the days it took,
   // carried to a year. A projection, and the tile says so; not before a day
   // has passed, when a day's saving would be multiplied into a year's.
@@ -231,9 +213,9 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
     // Null while the history is on its way or could not be read: the tile says a dash, not 0.
     investments: stats.investmentsLoaded,
     activeDays: stats.dailySaved.length === 0 ? null : stats.dailySaved.filter((day) => day.lamports > 0n).length,
-    currentStreakDays: stats.dailySaved.length === 0 ? null : streaks.current,
+    currentStreakDays: currentStreakOf(data),
     longestStreakDays: stats.dailySaved.length === 0 ? null : streaks.longest,
-    firstSaveAt: createdMs === null ? null : new Date(createdMs).toISOString(),
+    firstSaveAt: firstSaveAtOf(data),
     projectedYearUsd: $(projected),
     vocabulary: "settlements",
     complete,
@@ -469,13 +451,8 @@ export function toDashboardMock(data: LiveDashboard, { complete }: { readonly co
   return {
     now,
     wallet,
-    rule: {
-      mode: vault.mode === 1 ? "volume" : "profit",
-      rateBps: vault.rateBps ?? 0,
-      thresholdUsd,
-      targets: policy.legs.map((leg) => ({ symbol: leg.symbol, logo: artForMint(leg.mint) ?? undefined, weightBps: leg.weightBps })),
-      paused: vault.paused === true,
-    },
+    // The rule, the dollars, the month and the streak are live-figures.ts's: the share route signs them from there too.
+    rule: liveRuleOf(data, thresholdUsd),
     stats: statsOut,
     curve,
     days,
