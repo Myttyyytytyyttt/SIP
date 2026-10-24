@@ -57,7 +57,8 @@ export const GLOBAL_STATS_COPY = {
   traded: {
     title: "In buys and sells",
     // A "?" KEPT: the one figure on the page that is not an accounting one, and nothing else on the card says how it falls short.
-    info: "Approximate: Profit and Volume are measured differently, and trades with no SOL side are not counted.",
+    // All three ways it falls short stay (review 10-24): "partial" is about missing pensions, not settlements that recorded no trading.
+    info: "Approximate: Profit and Volume are measured differently, trades with no SOL side are not counted, and some early settlements recorded none.",
     partial: "Not every pension is in this figure",
   },
   // The dollar value under a SOL headline. Which price made it is its hover.
@@ -146,10 +147,12 @@ export const GLOBAL_STATS_COPY = {
 
   charts: {
     // The unit in the title: the y axis carries none, and the grey line that named it is gone.
-    saved: { title: "Put aside per day (SOL)" },
-    settlements: { title: "Settlements per day", hint: "Including the ones that put nothing aside" },
+    // No period in a title its own Daily|Weekly or Running total can make false (review 10-24); a share is still of SOL, as its tooltip prints.
+    // Active pensions has neither: one bar per day is all it shows.
+    saved: { title: "Put aside (SOL)" },
+    settlements: { title: "Settlements", hint: "Including the ones that put nothing aside" },
     pensions: { title: "Active pensions per day", hint: "Pensions with at least one settlement that day" },
-    invested: { title: "Invested per day (USDC)", hint: "By the day it was recorded" },
+    invested: { title: "Invested (USDC)", hint: "By the day it was recorded" },
     rangeLabel: "Range",
     range30: "30D",
     range90: "90D",

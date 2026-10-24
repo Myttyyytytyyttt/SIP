@@ -66,6 +66,17 @@ describe("the dashboard's copy", () => {
     expect(keys.filter((key) => /(^|\.)info$/.test(key)).sort()).toEqual(["leaders.info", "saved.info", "traded.info"]);
   });
 
+  it("keeps every way the traded figure falls short when the '?' got shorter", () => {
+    // Moved, never dropped (review 10-24): the first settlements recorded no trading, and nothing else on the page says so.
+    for (const caveat of [/measured differently/, /no SOL side/, /early settlements recorded none/]) expect(GLOBAL_STATS_COPY.traded.info).toMatch(caveat);
+  });
+
+  it("titles a chart with Daily|Weekly or a running total without a period those controls would make false", () => {
+    // Active pensions draws one bar per day and nothing else, so its "per day" holds.
+    const { saved, settlements, invested } = GLOBAL_STATS_COPY.charts;
+    for (const title of [saved.title, settlements.title, invested.title]) expect(title, title).not.toMatch(/per (day|week)|daily|weekly/i);
+  });
+
   it("labels the sample as a sample", () => {
     expect(GLOBAL_STATS_COPY.sampleBadge).toMatch(/Sample/);
     expect(GLOBAL_STATS_COPY.sampleCardBadge).toMatch(/Sample/);

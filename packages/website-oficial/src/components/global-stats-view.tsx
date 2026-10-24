@@ -805,8 +805,12 @@ export function GlobalStatsView({ model, now, mode = null }: { readonly model: G
           a dot written between items began the second and third rows. Every
           item carries its dot before it; the line is pulled left by one dot
           and its gap, and clipped, so the dot that opens any row falls outside.
+          The clip stands 4px off the text on three sides (the p's pb-1 is the
+          fourth): the keyboard ring of "See sample data" is drawn outside the
+          link, and a clip flush with the text cut its top or left edge (review
+          10-24). The dot sits 12–16px left of the text, so it stays clipped.
         */}
-        <div className="overflow-hidden">
+        <div className="-mx-1 -mt-1 overflow-hidden px-1 pt-1">
           <p className="-ml-4 flex flex-wrap gap-x-3 gap-y-1 pb-1 text-xs text-muted-foreground">
             {meta.map((item) => (
               <span key={item} className="flex items-center gap-3" title={COPY.daysUtc}>

@@ -13,7 +13,7 @@ import { bucketize, toPlotRows, type DayValues } from "@/lib/global-stats-series
 
 const props = (over: Partial<StackedBarsCardProps>): StackedBarsCardProps => ({
   id: "saved",
-  title: "Put aside per day (SOL)",
+  title: "Put aside (SOL)",
   sample: false,
   series: ["profit", "volume"],
   unit: { label: "SOL", decimals: 9 },
@@ -173,7 +173,7 @@ describe("a chart card's text", () => {
 
   it("is its title, its controls and its legend: no description, no count of days, no footer", () => {
     const html = renderToStaticMarkup(createElement(StackedBarsCard, props({ days: known({ rows, partial: false }) })));
-    expect(html).toContain(">Put aside per day (SOL)<");
+    expect(html).toContain(">Put aside (SOL)<");
     // The bars are drawn (their controls are there), and nothing is written around them.
     expect(html).toContain(">Daily<");
     expect(html).not.toContain('data-slot="card-description"');
@@ -185,7 +185,7 @@ describe("a chart card's text", () => {
 
   it("puts what it counts in the title's hover, and adds the days nobody could read", () => {
     const whole = renderToStaticMarkup(createElement(StackedBarsCard, props({ hint: "Including the ones that put nothing aside", days: known({ rows, partial: false }) })));
-    expect(whole).toMatch(/title="Including the ones that put nothing aside"[^>]*>Put aside per day \(SOL\)</);
+    expect(whole).toMatch(/title="Including the ones that put nothing aside"[^>]*>Put aside \(SOL\)</);
     const cut = renderToStaticMarkup(createElement(StackedBarsCard, props({ hint: "Including the ones that put nothing aside", days: known({ rows, partial: true }) })));
     expect(cut).toMatch(/title="Including the ones that put nothing aside · Some days could not be read"/);
     expect(cut).not.toMatch(/<p[^>]*>[^<]*Some days could not be read/);
