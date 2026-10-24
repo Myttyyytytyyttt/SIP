@@ -211,6 +211,16 @@ export function sslFor(databaseUrl: string): false | { rejectUnauthorized: false
 }
 
 /**
+ * How long the claim's per-sweep check waits for its SELECT 1. LONGER THAN THE
+ * POOL'S 5 s ON PURPOSE: a check that gives up drops a live lock — a critical
+ * claim-lost page, a dry sweep, a regain a minute later — so a pooler that is
+ * merely slow for a few seconds must not cost that. The sweep waits on it, so a
+ * longer bound only delays a sweep that is already stalled; no answer within it
+ * is still a lock this keeper cannot vouch for, and it is let go.
+ */
+export const CLAIM_CHECK_TIMEOUT_MS = 15_000;
+
+/**
  * Pooled and fault-isolated. With no DATABASE_URL it is a working no-op that
  * reports `enabled: false` — a keeper without a database records no history and
  * settles exactly as before, which is the honest degradation.
@@ -306,11 +316,14 @@ export class SolanaReadModel {
    * independent purchases, each up to max_per_call, plus crank fees burned on
    * the transactions that lose the race and revert.
    *
-   * `onLost` fires when the held session errors, or does not answer the
-   * per-sweep check: the server has dropped it, the lock went with it, and the
-   * caller must stop acting until it claims again.
+   * `onLost` fires, once, with why, when the held session errors or does not
+   * answer the per-sweep check: the server has dropped it, the lock went with
+   * it, and the caller must stop acting until it claims again.
    */
-  async claimSingleton(key: bigint, onLost: () => void): Promise<{ held: boolean; release?: () => void; check?: () => Promise<boolean>; failure?: string }> {
+  async claimSingleton(
+    key: bigint,
+    onLost: (detail: string) => void,
+  ): Promise<{ held: boolean; release?: () => void; check?: () => Promise<true | string>; failure?: string }> {
     // NO DATABASE, NO LOCK — and that is a fact to report, not to paper over.
     // The caller decides what to do with an unenforced singleton.
     if (this.#pool === null) return { held: true };
@@ -323,11 +336,11 @@ export class SolanaReadModel {
       if (result.rows[0]?.locked === true) {
         const held = client;
         let released = false;
-        const lose = (): void => {
+        const lose = (detail: string): void => {
           if (released) return;
           released = true;
           held.release(true);
-          onLost();
+          onLost(detail);
         };
         // THE HELD CLIENT NEEDS ITS OWN ERROR LISTENER. pg-pool removes its
         // idle listener the moment a client is checked out and attaches no
@@ -336,10 +349,9 @@ export class SolanaReadModel {
         // which in Node is an uncaught exception that takes the keeper down.
         held.on("error", (err: Error) => {
           this.#saw(false);
-          this.#warn("the keeper claim's connection errored; the lock is no longer held", {
-            detail: summarizeUpstreamError(err),
-          });
-          lose();
+          const detail = summarizeUpstreamError(err);
+          this.#warn("the keeper claim's connection errored; the lock is no longer held", { detail });
+          lose(`its session errored: ${detail}`);
         });
         return {
           held: true,
@@ -351,22 +363,24 @@ export class SolanaReadModel {
             released = true;
             held.release(true);
           },
-          // ONE ROUND TRIP ON THE HELD SESSION, bounded by query_timeout. No
-          // answer is a lock this keeper can no longer vouch for: it is let go,
-          // and the caller is told exactly as for a socket error.
+          // ONE ROUND TRIP ON THE HELD SESSION, bounded by CLAIM_CHECK_TIMEOUT_MS.
+          // No answer is a lock this keeper can no longer vouch for: it is let
+          // go, and the caller is told exactly as for a socket error.
           check: async () => {
-            if (released) return false;
+            if (released) return "its session was already given up";
             try {
-              await held.query("SELECT 1");
+              // pg reads query_timeout per query (client.js: config.query_timeout ||
+              // the connection's); @types/pg's QueryConfig does not declare it.
+              await held.query({ text: "SELECT 1", query_timeout: CLAIM_CHECK_TIMEOUT_MS } as pg.QueryConfig);
               this.#saw(true);
               return true;
             } catch (error) {
               this.#sawFailure(error);
-              this.#warn("the keeper claim's session did not answer its check; the lock is treated as lost", {
-                detail: summarizeUpstreamError(error),
-              });
-              lose();
-              return false;
+              const detail = summarizeUpstreamError(error);
+              this.#warn("the keeper claim's session did not answer its check; the lock is treated as lost", { detail });
+              const reason = `its session did not answer its check: ${detail}`;
+              lose(reason);
+              return reason;
             }
           },
         };

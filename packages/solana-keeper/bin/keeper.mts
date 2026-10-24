@@ -1325,8 +1325,8 @@ const claim: KeeperClaim = new KeeperClaim({
   attempt: () =>
     // EACH ROLE ITS OWN LOCK (its profile's lockName): the volume keeper never waits
     // on, or takes over, the profit keeper's.
-    readModel.claimSingleton(advisoryKeyFor(profile.lockName), () => {
-      claim.release();
+    readModel.claimSingleton(advisoryKeyFor(profile.lockName), (detail) => {
+      claim.lose(detail);
       // /status stops saying "live" now, not at the next sweep. The remaining
       // turns of a sweep in progress ask isLive() again and act dry.
       health.mode = "dry-run";
@@ -1337,7 +1337,7 @@ const claim: KeeperClaim = new KeeperClaim({
         key: "claim-lost",
         severity: "critical",
         title: "The keeper lost its single-keeper claim",
-        detail: "Its database session dropped. It sweeps as a dry run and retries the claim every sweep.",
+        detail: `Its database session dropped (${detail}). It sweeps as a dry run and retries the claim every sweep.`,
       });
     }),
   onTakeover: () => {

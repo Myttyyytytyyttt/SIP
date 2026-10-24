@@ -60,11 +60,11 @@ export function advisoryKeyFor(name: string): bigint {
  * so holding the claim means holding that handle open.
  *
  * `check`, with a granted claim: asks the held session whether it is still
- * there, false when it is not (and then the attempt's own loss path has already
- * run). `failure`, with a refused one: the attempt could not be asked at all —
- * the database did not answer — which is not "another keeper holds it".
+ * there — true, or why it is not (and then the attempt's own loss path has
+ * already run). `failure`, with a refused one: the attempt could not be asked
+ * at all — the database did not answer — which is not "another keeper holds it".
  */
-export type ClaimAttempt = () => Promise<{ held: boolean; release?: () => void; check?: () => Promise<boolean>; failure?: string }>;
+export type ClaimAttempt = () => Promise<{ held: boolean; release?: () => void; check?: () => Promise<true | string>; failure?: string }>;
 
 export interface KeeperClaimOptions {
   /** False when the keeper is not armed; nothing is claimed and nothing acts. */
@@ -82,7 +82,7 @@ export interface KeeperClaimOptions {
 export class KeeperClaim {
   #held: boolean;
   #release: (() => void) | undefined;
-  #check: (() => Promise<boolean>) | undefined;
+  #check: (() => Promise<true | string>) | undefined;
   #failure: string | null = null;
   readonly #armed: boolean;
   readonly #attempt: ClaimAttempt;
@@ -132,8 +132,9 @@ export class KeeperClaim {
   async ensure(): Promise<boolean> {
     if (!this.#armed) return this.#held;
     if (this.#held) {
-      if (this.#check !== undefined && !(await this.#check())) {
-        this.release();
+      const answered = this.#check === undefined ? true : await this.#check();
+      if (answered !== true) {
+        this.lose(answered);
         return false;
       }
       return this.#held;
@@ -162,5 +163,16 @@ export class KeeperClaim {
     this.#release = undefined;
     this.#check = undefined;
     this.#held = false;
+  }
+
+  /**
+   * The held session went away — its socket errored, or it did not answer the
+   * check: the claim is given up, and `failure` says why, so /status and the
+   * not-acting alert name the database rather than "another keeper". The next
+   * attempt that gets an answer clears it.
+   */
+  lose(reason: string): void {
+    this.release();
+    this.#failure = reason;
   }
 }

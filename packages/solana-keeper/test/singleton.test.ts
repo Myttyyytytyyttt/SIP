@@ -119,8 +119,8 @@ describe("the claim", () => {
             if (sessionAnswers) return true;
             result.release?.();
             lost += 1;
-            holder.release();
-            return false;
+            holder.lose("its session did not answer its check: Query read timeout");
+            return "its session did not answer its check: Query read timeout";
           },
         };
       },
@@ -133,8 +133,17 @@ describe("the claim", () => {
     expect(await holder.ensure(), "the check fails: the claim is given up in this sweep").toBe(false);
     expect(holder.live).toBe(false);
     expect(lost).toBe(1);
+    // AND IT SAYS SO: the database, not "another keeper".
+    expect(holder.failure).toBe("its session did not answer its check: Query read timeout");
     expect(await other.ensure(), "and the other instance takes it at its next").toBe(true);
     expect(lock.holder).toBe("new");
+  });
+
+  it("a check that fails names the database even when nothing else told the claim (the attempt's loss path did not run)", async () => {
+    const claim = new KeeperClaim({ armed: true, attempt: async () => ({ held: true, release: () => {}, check: async () => "its session errored: Connection terminated unexpectedly" }) });
+    expect(await claim.ensure()).toBe(true);
+    expect(await claim.ensure()).toBe(false);
+    expect(claim.failure).toBe("its session errored: Connection terminated unexpectedly");
   });
 
   it("says why a claim was not granted when the database did not answer, and forgets it once an answer comes", async () => {

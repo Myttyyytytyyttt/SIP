@@ -19,6 +19,8 @@ const fake = vi.hoisted(() => {
     releases: [] as unknown[],
     /** The held claim's SELECT 1 fails (its session went away). */
     failCheck: false,
+    /** The query_timeout each SELECT 1 asked for. */
+    checkTimeouts: [] as unknown[],
   };
   class DatabaseError extends Error {
     constructor(
@@ -33,8 +35,10 @@ const fake = vi.hoisted(() => {
     }
   }
   const client = {
-    async query(sql: string) {
+    async query(statement: string | { text: string; query_timeout?: number }) {
+      const sql = typeof statement === "string" ? statement : statement.text;
       if (state.failWith !== null) throw state.failWith;
+      if (sql === "SELECT 1") state.checkTimeouts.push(typeof statement === "string" ? undefined : statement.query_timeout);
       if (sql === "SELECT 1" && state.failCheck) throw new Error("Query read timeout");
       if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: state.locked }] };
       return { rows: [] };
@@ -58,13 +62,13 @@ const fake = vi.hoisted(() => {
 vi.mock("pg", () => ({ default: { Pool: fake.Pool, DatabaseError: fake.DatabaseError } }));
 
 const { Secret } = await import("@sip/solana-log");
-const { SolanaReadModel, databaseAnswered } = await import("../src/read-model.js");
+const { CLAIM_CHECK_TIMEOUT_MS, SolanaReadModel, databaseAnswered } = await import("../src/read-model.js");
 
 const URL_FOR_A_FAKE_POOL = "postgres://nobody@localhost:1/none?sslmode=disable";
 const row = { vaultAddr: "V", target: "T", spentRaw: 1n, receivedRaw: 1n, txRef: "sig", height: 1n };
 
 beforeEach(() => {
-  Object.assign(fake.state, { failConnect: false, failWith: null, locked: true, inspected: 0, releases: [], failCheck: false });
+  Object.assign(fake.state, { failConnect: false, failWith: null, locked: true, inspected: 0, releases: [], failCheck: false, checkTimeouts: [] });
 });
 
 function observed() {
@@ -159,21 +163,24 @@ describe("the claim's connection", () => {
     expect(fake.state.releases).toEqual([true, undefined]);
   });
 
-  it("is checked once a sweep: an answer keeps the claim, no answer destroys the connection and tells the keeper once", async () => {
+  it("is checked once a sweep, with its own longer bound: an answer keeps the claim, no answer destroys the connection and tells the keeper once, with why", async () => {
     const readModel = SolanaReadModel.create(new Secret(URL_FOR_A_FAKE_POOL, "DATABASE_URL"), () => {});
-    let lost = 0;
-    const claim = await readModel.claimSingleton(1n, () => void (lost += 1));
+    const lost: string[] = [];
+    const claim = await readModel.claimSingleton(1n, (detail) => void lost.push(detail));
     expect(claim.held).toBe(true);
     expect(await claim.check!()).toBe(true);
+    // NOT THE POOL'S 5 s: a pooler slow for a few seconds must not drop a live lock.
+    expect(fake.state.checkTimeouts).toEqual([CLAIM_CHECK_TIMEOUT_MS]);
+    expect(CLAIM_CHECK_TIMEOUT_MS).toBeGreaterThan(5_000);
     expect(fake.state.releases).toEqual([]);
     fake.state.failCheck = true;
-    expect(await claim.check!()).toBe(false);
+    expect(await claim.check!()).toBe("its session did not answer its check: Error: Query read timeout");
     expect(fake.state.releases).toEqual([true]);
-    expect(lost).toBe(1);
+    expect(lost).toEqual(["its session did not answer its check: Error: Query read timeout"]);
     // GONE IS GONE: a later check or release neither asks again nor tells the keeper twice.
-    expect(await claim.check!()).toBe(false);
+    expect(await claim.check!()).not.toBe(true);
     claim.release!();
     expect(fake.state.releases).toEqual([true]);
-    expect(lost).toBe(1);
+    expect(lost).toHaveLength(1);
   });
 });
