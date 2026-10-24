@@ -156,6 +156,7 @@ import {
   explainMismatches,
   foldShadowJobs,
   listingsPerMinute,
+  listingsPerTick,
   perDay,
   productionDecisions,
   replayComparison,
@@ -168,6 +169,7 @@ import {
   type ProductionSample,
   type ProxyLine,
   type ShadowWallet,
+  type TickLine,
   type WorkerLogLine,
 } from "../../src/shadow-compare.js";
 
@@ -1940,8 +1942,11 @@ function analyse(): void {
     }
     return false;
   };
-  // REPLAYED from production.jsonl and jobs.jsonl (compare.jsonl is the live loop's record of the same).
-  const rows = replayComparison(readLines<ProductionSample>("production.jsonl"), readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl"));
+  // REPLAYED from production.jsonl and jobs.jsonl (compare.jsonl is the live loop's record of the same), and
+  // JUDGED ON THE COVERAGE CLOCK: a minute outside a covered stretch (the Mac asleep, the fleet down) is not one
+  // the shadow could have answered, so its rows are counted apart and never enter the agreement.
+  const replayed = replayComparison(readLines<ProductionSample>("production.jsonl"), readLines<WorkerLogLine & { process?: unknown }>("jobs.jsonl"));
+  const rows = replayed.filter((row) => inCovered(row.at));
   // A MISMATCH IN A WALLET'S LAST COMPARED MINUTE cannot be explained yet: no later minute exists to show a shift or a
   // recovery. It is "open" — listed, counted as a mismatch in the percentage, apart from "unexplained" — and the next
   // rolling report, with more minutes, explains it or not.
@@ -1993,6 +1998,14 @@ function analyse(): void {
   const quietListing = judged.filter((minute) => !minute.drill);
   const drillListing = judged.filter((minute) => minute.drill);
   const listingGaps = perInterval.flatMap((result) => result.gapsMs);
+  // DISCOVERY PER ACTED TICK, the gate's unit: the minute view above stays as information (a late tick empties a minute).
+  const tickLines = readLines<TickLine>("ticks.jsonl");
+  const perTick = intervals.map((interval) => listingsPerTick(listingCalls, tickLines, (tag) => tag.startsWith("sched-"), interval.from, interval.to, { tickMs: DEFAULT_SWEEP_MS }));
+  const tickInDrill = (tick: { readonly at: number }): boolean => inDrill(tick.at - DEFAULT_SWEEP_MS, tick.at);
+  const quietTicks = perTick.flatMap((result) => result.ticks).filter((tick) => !tickInDrill(tick));
+  const drillTicks = perTick.flatMap((result) => result.ticks).filter(tickInDrill);
+  const quietOrphans = perTick.flatMap((result) => result.orphans).filter((orphan) => !inDrill(orphan.at, orphan.at + 1));
+  const lateTicks = perTick.flatMap((result) => result.late);
   // CREDITS, over the covered time.
   const coveredMs = cov.coveredMs;
   const steady = (tag: string, ts: number): boolean => tag !== "handover" && inCovered(ts);
@@ -2044,6 +2057,7 @@ function analyse(): void {
     window: { from: cov.firstBeatAt === null ? null : iso(cov.firstBeatAt), to: cov.lastBeatAt === null ? null : iso(cov.lastBeatAt), coveredMinutes: Math.round(minutes * 10) / 10 },
     agreement: {
       ...agreement,
+      uncoveredRows: replayed.length - rows.length,
       explained: {
         timing: explained.filter((e) => e.explanation === "timing").length,
         dryRun: explained.filter((e) => e.explanation === "dry-run").length,
@@ -2062,6 +2076,13 @@ function analyse(): void {
       intents: finalDb?.["intents"] ?? null,
     },
     discovery: {
+      quietTicksJudged: quietTicks.length,
+      quietTicksWithExactlyOne: quietTicks.filter((tick) => tick.listings === 1).length,
+      quietTicksNotOne: quietTicks.filter((tick) => tick.listings !== 1).map((tick) => ({ at: iso(tick.at), process: tick.process, listings: tick.listings })),
+      quietOrphanListings: quietOrphans.map((orphan) => ({ at: iso(orphan.at), process: orphan.process })),
+      drillTicksJudged: drillTicks.length,
+      drillTicksWithExactlyOne: drillTicks.filter((tick) => tick.listings === 1).length,
+      lateTicks: { count: lateTicks.length, maxGapMs: lateTicks.length === 0 ? null : Math.max(...lateTicks.map((tick) => tick.gapMs)) },
       quietMinutesJudged: quietListing.length,
       quietMinutesWithExactlyOne: quietListing.filter((minute) => minute.listings === 1).length,
       quietNotOne: quietListing.filter((minute) => minute.listings !== 1).slice(0, 500),
@@ -2113,9 +2134,9 @@ function analyse(): void {
       },
       overlap: { need: "0 rows", have: `max ${overlapMaxSeen}, final ${String(finalOverlap)}`, verdict: overlapMaxSeen === 0 && (finalOverlap === null || finalOverlap === 0) ? "PASS" : "FAIL" },
       discovery: {
-        need: "exactly 1 listing every quiet covered minute",
-        have: `${quietListing.filter((minute) => minute.listings === 1).length}/${quietListing.length}`,
-        verdict: quietListing.length === 0 ? "PENDING" : quietListing.every((minute) => minute.listings === 1) ? "PASS" : "FAIL",
+        need: "exactly 1 listing every quiet acted tick, and no listing outside one",
+        have: `${quietTicks.filter((tick) => tick.listings === 1).length}/${quietTicks.length} ticks, ${quietOrphans.length} orphan listings`,
+        verdict: quietTicks.length === 0 ? "PENDING" : quietTicks.every((tick) => tick.listings === 1) && quietOrphans.length === 0 ? "PASS" : "FAIL",
       },
       credits: {
         need: "≤ +15 % over the model, archival 1 and 10",
@@ -2136,9 +2157,10 @@ function analyse(): void {
     `coverage ${report.coverage.coveredHours} h of ${report.coverage.targetHours} h (${String(report.coverage.percent)} %); ${cov.gaps.length} gaps, ${report.coverage.gapHours} h in all; ${sessions.length || 1} session(s)`,
     ...report.coverage.gaps.slice(-20).map((gap) => `  gap ${gap.from} → ${gap.to} (${gap.minutes} min): ${gap.cause}`),
     `window ${String(report.window.from)} → ${String(report.window.to)} (${report.window.coveredMinutes} covered min)`,
-    `agreement ${a.percent === null ? "n/a" : a.percent.toFixed(2)} % (${a.agree}/${a.compared}); mismatches: timing ${a.explained.timing}, dry-run ${a.explained.dryRun}, transient ${a.explained.transient}, unexplained ${a.explained.unexplained}, open in the data's last minute ${a.explained.openAtEnd}; gaps: no-shadow ${a.noShadow}, no-production ${a.noProduction}; frontier slots equal ${a.frontier.equal}/${a.frontier.compared}`,
+    `agreement ${a.percent === null ? "n/a" : a.percent.toFixed(2)} % (${a.agree}/${a.compared}); mismatches: timing ${a.explained.timing}, dry-run ${a.explained.dryRun}, transient ${a.explained.transient}, unexplained ${a.explained.unexplained}, open in the data's last minute ${a.explained.openAtEnd}; gaps: no-shadow ${a.noShadow}, no-production ${a.noProduction}; frontier slots equal ${a.frontier.equal}/${a.frontier.compared}; rows outside the coverage clock ${a.uncoveredRows}`,
     `overlap audit: max ${report.overlap.maxRowsSeen} rows over ${report.overlap.auditsRun} audits (${report.overlap.auditsUnavailable} unavailable), final ${String(report.overlap.final)}`,
-    `discovery: ${report.discovery.quietMinutesWithExactlyOne}/${report.discovery.quietMinutesJudged} quiet covered minutes with exactly one listing; drill minutes ${report.discovery.drillMinutesWithExactlyOne}/${report.discovery.drillMinutesJudged}; gaps ${String(report.discovery.gapsMs.min)}–${String(report.discovery.gapsMs.max)} ms`,
+    `discovery: ${report.discovery.quietTicksWithExactlyOne}/${report.discovery.quietTicksJudged} quiet acted ticks with exactly one listing, ${report.discovery.quietOrphanListings.length} orphan listings; drill ticks ${report.discovery.drillTicksWithExactlyOne}/${report.discovery.drillTicksJudged}; late ticks ${report.discovery.lateTicks.count} (longest ${String(report.discovery.lateTicks.maxGapMs)} ms)`,
+    `discovery by minute: ${report.discovery.quietMinutesWithExactlyOne}/${report.discovery.quietMinutesJudged} quiet covered minutes with exactly one listing; drill minutes ${report.discovery.drillMinutesWithExactlyOne}/${report.discovery.drillMinutesJudged}; gaps ${String(report.discovery.gapsMs.min)}–${String(report.discovery.gapsMs.max)} ms`,
     `credits/day measured: ${Math.round(measuredDay.archival1)} (archival 1), ${Math.round(measuredDay.archival10)} (archival 10); calls/min ${report.credits.callsPerMinute?.toFixed(2) ?? "n/a"}; refused calls ${report.credits.refusedCalls}`,
     `credits/day over ${quiet.size} quiet minutes: ${Math.round(quietDay.archival1)} (archival 1), ${Math.round(quietDay.archival10)} (archival 10); calls/min ${report.credits.quiet.callsPerMinute?.toFixed(2) ?? "n/a"}`,
     `model: ${prediction === null ? "not given" : JSON.stringify(prediction)}`,

@@ -17,6 +17,7 @@ import {
   explainMismatches,
   foldShadowJobs,
   listingsPerMinute,
+  listingsPerTick,
   perDay,
   investRestsByName,
   productionDecisions,
@@ -71,17 +72,26 @@ describe("production's decision per wallet", () => {
     expect(decided.get(VOLUME_W)).toMatchObject({ settle: "IDLE", invest: "IDLE", servedBy: "volume", at: T0 - 5_000 });
   });
 
-  it("says UNSUPPORTED_MODE when neither keeper serves the wallet, keeps a failed fetch's side out, and reads no invest without the profit keeper", () => {
-    const { profit, volume } = production(T0);
+  it("says UNSUPPORTED_MODE only when both keepers answered that neither serves the wallet", () => {
     const both = productionDecisions(
       { wallets: { X: { settle: "UNSUPPORTED_MODE", invest: "IDLE", detail: "no keeper settles byte 2", at: iso(T0) } } },
       { wallets: { X: { settle: "UNSUPPORTED_MODE", invest: "none (volume keeper)", detail: "", at: iso(T0) } } },
     );
     expect(both.get("X")).toMatchObject({ settle: "UNSUPPORTED_MODE", invest: "IDLE", servedBy: "none" });
-    const volumeOnly = productionDecisions(null, volume);
-    expect(volumeOnly.get(VOLUME_W)).toMatchObject({ settle: "IDLE", invest: null, servedBy: "volume" });
-    expect(productionDecisions(profit, { error: "502" }).get(VOLUME_W)).toMatchObject({ settle: "UNSUPPORTED_MODE", servedBy: "none", invest: "IDLE" });
     expect(productionDecisions("not json", undefined).size).toBe(0);
+  });
+
+  it("leaves a wallet out when a keeper it needs did not answer: no profit keeper, no invest; profit says not mine and no volume keeper, no settle (the 7-day shadow's 10 at 2026-10-15 05:48 and 2026-10-21 09:41–09:43)", () => {
+    const { profit, volume } = production(T0);
+    // THE PROFIT KEEPER'S FETCH GOT NO ANSWER: the volume keeper's settle is there, the invest is not — no decision.
+    expect(productionDecisions(null, volume).size).toBe(0);
+    // THE VOLUME KEEPER'S FETCH GOT NO ANSWER: the profit wallet is whole, the volume wallet has no settle.
+    const noVolume = productionDecisions(profit, { error: "502" });
+    expect([...noVolume.keys()]).toEqual([PROFIT_W]);
+    expect(noVolume.get(PROFIT_W)).toMatchObject({ settle: "IDLE", invest: "NO_POLICY", servedBy: "profit" });
+    // So the comparison lists them as no-production gaps, never as mismatches.
+    const shadow = new Map<string, ShadowWallet>([[VOLUME_W, { wallet: VOLUME_W, vault: VAULT, settle: "IDLE", invest: "IDLE", detail: "", investDetail: null, at: T0, process: "worker-a" }]]);
+    expect(compareAt(T0 + 1_000, noVolume, shadow).find((row) => row.wallet === VOLUME_W)?.verdict).toBe("no-production");
   });
 });
 
@@ -181,9 +191,36 @@ describe("explaining mismatches", () => {
 
   it("calls a failed turn whose next minute agrees transient, and one that stays failed unexplained", () => {
     const once = [row(0, "IDLE", "IDLE"), row(1, "IDLE", "THREW"), row(2, "IDLE", "IDLE")];
-    expect(explainMismatches(once).map((e) => [e.explanation, e.note])).toEqual([["transient", "the shadow's settle THREW: the shadow's detail; the next minute agrees"]]);
+    expect(explainMismatches(once).map((e) => [e.explanation, e.note])).toEqual([["transient", "the shadow's settle THREW: the shadow's detail; the next fresh comparison agrees"]]);
     const stuck = [row(0, "IDLE", "IDLE"), row(1, "IDLE", "THREW"), row(2, "IDLE", "THREW"), row(3, "IDLE", "THREW"), row(4, "IDLE", "THREW")];
     expect(explainMismatches(stuck).every((e) => e.explanation === "unexplained")).toBe(true);
+  });
+
+  it("calls a failed invest transient too — one that threw, or a shadow job that ran out of time before it — and only when every differing half failed", () => {
+    const withInvest = (minute: number, shadowInvest: string | null): CompareRow => {
+      const base = row(minute, "IDLE", "IDLE");
+      return { ...base, verdict: shadowInvest === "IDLE" ? "agree" : "mismatch", shadow: { ...base.shadow!, invest: shadowInvest } };
+    };
+    // 2026-10-13 07:55: a sibling's settle timed out and the job ran out of time before its invest.
+    const outOfTime = [withInvest(0, "IDLE"), withInvest(1, null), withInvest(2, "IDLE")];
+    expect(explainMismatches(outOfTime).map((e) => [e.explanation, e.note])).toEqual([["transient", "the shadow's job ran out of time before its invest; the next fresh comparison agrees"]]);
+    expect(explainMismatches([withInvest(0, "IDLE"), withInvest(1, "THREW"), withInvest(2, "IDLE")])[0]!.explanation).toBe("transient");
+    // A DECIDED SETTLE THAT DIFFERS BESIDE A FAILED INVEST is not excused by the invest's failure.
+    const decided: CompareRow = { ...row(1, "IDLE", "SETTLED"), shadow: { ...row(1, "IDLE", "SETTLED").shadow!, invest: null } };
+    expect(explainMismatches([row(0, "IDLE", "IDLE"), decided, row(2, "IDLE", "IDLE")])[0]!.explanation).toBe("unexplained");
+  });
+
+  it("looks past rows that repeat the failed observation for the recovery (2026-10-20 03:20–03:21: one invest that threw, read twice)", () => {
+    // THE SAME SHADOW JOB, 70 s and then 130 s old, then a new job that agrees.
+    const stale = (minute: number, ageMs: number, invest: string): CompareRow => {
+      const base = row(minute, "IDLE", "IDLE", false, { production: "NO_POLICY", shadow: invest });
+      return { ...base, shadow: { ...base.shadow!, ageMs } };
+    };
+    const rows = [stale(0, 10_000, "NO_POLICY"), stale(1, 70_000, "THREW"), stale(2, 130_000, "THREW"), stale(3, 5_000, "NO_POLICY")];
+    expect(explainMismatches(rows).map((e) => e.explanation)).toEqual(["transient", "transient"]);
+    // A NEW JOB THAT STILL DISAGREES is not a recovery.
+    const still = [stale(0, 10_000, "NO_POLICY"), stale(1, 70_000, "THREW"), stale(2, 130_000, "THREW"), stale(3, 5_000, "IDLE"), stale(4, 5_000, "NO_POLICY")];
+    expect(explainMismatches(still).map((e) => e.explanation).slice(0, 2)).toEqual(["unexplained", "unexplained"]);
   });
 });
 
@@ -205,7 +242,12 @@ describe("the invest is a vault's", () => {
         [PROFIT_W]: { settle: "IDLE", invest: "NO_POLICY", detail: "", at: iso(T0 + 51_000) },
       },
     };
-    const volume = { wallets: { [VOLUME_W]: { settle: "SETTLED", invest: "none (volume keeper)", detail: "settled", at: iso(T0 + 38_000) } } };
+    const volume = {
+      wallets: {
+        [VOLUME_W]: { settle: "SETTLED", invest: "none (volume keeper)", detail: "settled", at: iso(T0 + 38_000) },
+        [OTHER_W]: { settle: "IDLE", invest: "none (volume keeper)", detail: "", at: iso(T0 + 40_000) },
+      },
+    };
     const vaults: Record<string, string> = { [VOLUME_W]: VAULT, [OTHER_W]: VAULT, [PROFIT_W]: "4J3En7ugVHR8ZjupjZKqcYi56dp51jG52Am6CFMBVA9W" };
     const byVault = productionDecisions(profit, volume, (wallet) => vaults[wallet]);
     expect(byVault.get(VOLUME_W)).toMatchObject({ settle: "SETTLED", invest: "INVESTED", investOwn: "IDLE" });
@@ -276,6 +318,38 @@ describe("discovery listings a minute", () => {
     expect(result).toMatchObject({ exactlyOne: 3, judged: 4 });
     // A PARTIAL MINUTE AT EITHER END IS NOT JUDGED.
     expect(listingsPerMinute(lines, (run) => run.startsWith("sched-"), T0 + 30_000, T0 + 200_000).judged).toBe(2);
+  });
+});
+
+describe("discovery listings per acted tick", () => {
+  const call = (ts: number, run: string) => ({ ts, run, method: "getProgramAccounts", status: 200 });
+  const tick = (ts: number, process: string, event = "scheduler tick") => ({ process, ts: iso(ts), event });
+
+  it("gives each listing to its scheduler's next acted tick, so a late tick's empty minute is still one listing a tick (the 7-day shadow's 19 minutes)", () => {
+    const lines = [
+      call(T0 + 1_000, "sched-a"),
+      call(T0 + 61_000, "sched-a"),
+      // A LATE TICK: 123 s after the previous one, so minute 2 has no listing at all.
+      call(T0 + 184_000, "sched-a"),
+      call(T0 + 244_000, "sched-a"),
+    ];
+    const ticks = [tick(T0 + 1_300, "sched-a"), tick(T0 + 61_300, "sched-a"), tick(T0 + 184_300, "sched-a"), tick(T0 + 244_300, "sched-a"), tick(T0 + 250_000, "sched-b", "took the scheduler lock: this tick is a full pass")];
+    expect(listingsPerMinute(lines, (run) => run.startsWith("sched-"), T0, T0 + 300_000).minutes.map((m) => m.listings)).toEqual([1, 1, 0, 1, 1]);
+    const result = listingsPerTick(lines, ticks, (run) => run.startsWith("sched-"), T0, T0 + 300_000);
+    expect(result).toMatchObject({ judged: 4, exactlyOne: 4, notOne: [], orphans: [] });
+    expect(result.late).toEqual([{ at: T0 + 184_300, process: "sched-a", gapMs: 123_000 }]);
+  });
+
+  it("fails a tick that listed twice or not at all, and counts a listing no acted tick took as an orphan", () => {
+    const lines = [call(T0 + 1_000, "sched-a"), call(T0 + 2_000, "sched-a"), call(T0 + 30_000, "sched-b"), call(T0 + 400_000, "sched-b")];
+    const ticks = [tick(T0 + 3_000, "sched-a"), tick(T0 + 63_000, "sched-a")];
+    const result = listingsPerTick(lines, ticks, (run) => run.startsWith("sched-"), T0, T0 + 500_000);
+    expect(result.notOne).toEqual([
+      { at: T0 + 3_000, process: "sched-a", listings: 2 },
+      { at: T0 + 63_000, process: "sched-a", listings: 0 },
+    ]);
+    // THE STANDBY THAT LISTED, and a listing whose tick never ended: neither belongs to an acted tick.
+    expect(result.orphans.map((orphan) => orphan.process)).toEqual(["sched-b", "sched-b"]);
   });
 });
 

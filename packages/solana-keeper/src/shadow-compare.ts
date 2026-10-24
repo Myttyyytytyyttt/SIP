@@ -60,7 +60,7 @@ export function investRestsByName(outcome: string): boolean {
 export interface ProductionWallet {
   readonly wallet: string;
   readonly settle: string;
-  /** The profit keeper's invest outcome for the wallet's vault; null when the profit keeper did not list the wallet. */
+  /** The profit keeper's invest outcome for the wallet's vault; null when its row carries none (a wallet it did not list is left out). */
   readonly invest: string | null;
   readonly detail: string;
   /** When the serving keeper turned the wallet (its row's `at`), ms; null when unreadable. */
@@ -119,6 +119,14 @@ const millis = (value: unknown): number | null => {
  * UNSUPPORTED_MODE, as both answered. The invest is the profit keeper's, PER
  * VAULT where `vaultOf` knows the wallet's vault: the newest acting outcome
  * among the vault's wallets' turns, else the newest resting one (the header).
+ *
+ * A KEEPER THAT DID NOT ANSWER FOR THE WALLET IS NO DECISION, and the wallet is
+ * left out (a no-production gap, never a verdict): without the profit keeper's
+ * row there is no invest, and when the profit keeper says the wallet is not its
+ * own, without the volume keeper's row there is no settle. Before this rule a
+ * /status fetch that got no answer read as "production answered
+ * UNSUPPORTED_MODE" or "production decided no invest" — 10 of the 7-day
+ * shadow's 15 unexplained mismatches, at three minutes with one fetch failed.
  */
 export function productionDecisions(profit: unknown, volume: unknown, vaultOf: (wallet: string) => string | undefined = () => undefined): ReadonlyMap<string, ProductionWallet> {
   const p = rowsOf(profit);
@@ -127,10 +135,12 @@ export function productionDecisions(profit: unknown, volume: unknown, vaultOf: (
   for (const wallet of new Set([...p.keys(), ...v.keys()])) {
     const pr = p.get(wallet);
     const vr = v.get(wallet);
+    if (pr === undefined) continue;
     const serves = (row: StatusRow | undefined): boolean => row !== undefined && text(row.settle) !== null && row.settle !== UNSUPPORTED_MODE;
-    const served: { row: StatusRow; by: "profit" | "volume" } | null = serves(pr) ? { row: pr!, by: "profit" } : serves(vr) ? { row: vr!, by: "volume" } : null;
-    const row = served?.row ?? pr ?? vr!;
-    const investOwn = pr === undefined ? null : text(pr.invest);
+    const served: { row: StatusRow; by: "profit" | "volume" } | null = serves(pr) ? { row: pr, by: "profit" } : serves(vr) ? { row: vr!, by: "volume" } : null;
+    if (served === null && vr === undefined) continue;
+    const row = served?.row ?? pr;
+    const investOwn = text(pr.invest);
     out.set(wallet, {
       wallet,
       settle: text(row.settle) ?? UNSUPPORTED_MODE,
@@ -281,11 +291,40 @@ export interface Explained {
   readonly note: string;
 }
 
-/** A turn that failed rather than decided: what TRANSIENT may excuse when the next minute agrees. */
+/** A settle that failed rather than decided: what TRANSIENT may excuse when a fresh comparison agrees. */
 const FAILED_TURNS = new Set(["THREW", "INCOMPLETE", "RETRY"]);
+
+/** An invest that failed rather than decided. */
+const FAILED_INVESTS = new Set(["THREW", "FAILED"]);
 
 /** How far apart, in comparison rows of the same wallet, a timing explanation may look: two minutes either way. */
 export const TIMING_WINDOW_ROWS = 2;
+
+type Sides = { readonly production: NonNullable<CompareRow["production"]>; readonly shadow: NonNullable<CompareRow["shadow"]> };
+
+/**
+ * Why one half of a mismatch is a failure rather than a decision, and whose;
+ * null when both sides decided. A shadow job with no invest is one that ran
+ * out of time before it (worker-job.ts: the soft deadline ends the settles and
+ * skips the invest) — a failed half, not a decision.
+ */
+function failedHalf(half: "settle" | "invest", { production: p, shadow: s }: Sides): { readonly side: "production" | "shadow"; readonly note: string } | null {
+  if (half === "settle") {
+    if (FAILED_TURNS.has(s.settle)) return { side: "shadow", note: `the shadow's settle ${s.settle}: ${s.detail}` };
+    if (FAILED_TURNS.has(p.settle)) return { side: "production", note: `production's settle ${p.settle}: ${p.detail}` };
+    return null;
+  }
+  if (s.invest === null) return { side: "shadow", note: "the shadow's job ran out of time before its invest" };
+  if (FAILED_INVESTS.has(s.invest)) return { side: "shadow", note: `the shadow's invest ${s.invest}${s.investDetail === null ? "" : `: ${s.investDetail}`}` };
+  if (p.invest !== null && FAILED_INVESTS.has(p.invest)) return { side: "production", note: `production's invest ${p.invest}` };
+  return null;
+}
+
+/** When a side's observation in a row was made: rows that repeat one observation show nothing new. */
+const observedAt = (row: CompareRow, side: "production" | "shadow"): number => {
+  const ageMs = row[side]?.ageMs ?? null;
+  return ageMs === null ? row.at : row.at - ageMs;
+};
 
 /**
  * Each mismatch with its explanation. DRY RUN: the shadow's settle detail says
@@ -294,9 +333,12 @@ export const TIMING_WINDOW_ROWS = 2;
  * TIMING_WINDOW_ROWS rows of the same wallet either way, production showed the
  * shadow's value AND the shadow showed production's — the two read the chain at
  * different instants (a settle and the buy it funds may each land a minute
- * apart). TRANSIENT: one side's settle failed (THREW, INCOMPLETE, RETRY) and
- * the wallet's next compared row agrees. Anything else is unexplained, and the
- * gate fails on it.
+ * apart). TRANSIENT: every half that differs FAILED on one side — a settle that
+ * THREW, was INCOMPLETE or RETRY; an invest that THREW or FAILED, or a shadow
+ * job that ran out of time before its invest — and the wallet's next compared
+ * row with a NEWER observation from each failed side agrees (a row that repeats
+ * the failed observation, because no job ran in between, cannot show a
+ * recovery). Anything else is unexplained, and the gate fails on it.
  */
 export function explainMismatches(rows: readonly CompareRow[]): Explained[] {
   const byWallet = new Map<string, CompareRow[]>();
@@ -327,11 +369,16 @@ export function explainMismatches(rows: readonly CompareRow[]): Explained[] {
         out.push({ row, explanation: "timing", note: `each side showed the other's ${halves.join(" and ")} within two minutes: they read the chain at different instants` });
         return;
       }
-      const next = list.slice(index + 1).find((other) => other.verdict === "agree" || other.verdict === "mismatch");
-      const failed = FAILED_TURNS.has(s.settle) ? `the shadow's settle ${s.settle}: ${s.detail}` : FAILED_TURNS.has(p.settle) ? `production's settle ${p.settle}: ${p.detail}` : null;
-      if (failed !== null && next?.verdict === "agree") {
-        out.push({ row, explanation: "transient", note: `${failed}; the next minute agrees` });
-        return;
+      const failures = halves.map((half) => failedHalf(half, { production: p, shadow: s }));
+      if (failures.length > 0 && failures.every((failure) => failure !== null)) {
+        const sides = [...new Set(failures.map((failure) => failure!.side))];
+        const next = list
+          .slice(index + 1)
+          .find((other) => (other.verdict === "agree" || other.verdict === "mismatch") && sides.every((side) => observedAt(other, side) > observedAt(row, side)));
+        if (next?.verdict === "agree") {
+          out.push({ row, explanation: "transient", note: `${failures.map((failure) => failure!.note).join("; ")}; the next fresh comparison agrees` });
+          return;
+        }
       }
       out.push({ row, explanation: "unexplained", note: `production ${p.settle}/${p.invest ?? "-"} vs shadow ${s.settle}/${s.invest ?? "-"}` });
     });
@@ -450,6 +497,92 @@ export function listingsPerMinute(
   }
   const gapsMs = listings.slice(1).map((call, index) => call.ts - listings[index]!.ts);
   return { minutes, gapsMs, exactlyOne: minutes.filter((minute) => minute.listings === 1).length, judged: minutes.length };
+}
+
+/** One line of the schedulers' tick log as the harness records it (ticks.jsonl): the process, the logger's `ts`, the event. */
+export interface TickLine {
+  readonly process?: unknown;
+  readonly ts?: unknown;
+  readonly event?: unknown;
+}
+
+/** The event an acting scheduler logs at the end of every tick it acted on (bin/scheduler.mts). */
+export const ACTED_TICK_EVENT = "scheduler tick";
+
+/**
+ * Discovery judged PER ACTED TICK, the scheduler's own unit: each listing is
+ * given to the first acted tick its scheduler logged at or after it, within
+ * `maxTickMs` (a listing is made inside a tick, and the tick logs when it ends).
+ * An acted tick logged in [from, to] is judged: exactly one listing, or not. A
+ * listing no acted tick of its scheduler took is an ORPHAN — a standby that
+ * listed, or a tick that died after listing — and is counted apart.
+ *
+ * WHY NOT THE MINUTE ALONE: a tick that runs late (the process frozen for a
+ * while, an RPC that times out) leaves a UTC minute with no listing although
+ * every tick listed once — all 19 of the 7-day shadow's "not one" minutes were
+ * such gaps between two ticks of one scheduler (84–180 s). The late ticks are
+ * listed beside the verdict: a tick more than 1.5 × `tickMs` after its
+ * scheduler's previous one.
+ */
+export function listingsPerTick(
+  lines: readonly ProxyLine[],
+  ticks: readonly TickLine[],
+  isScheduler: (run: string) => boolean,
+  from: number,
+  to: number,
+  options: { readonly tickMs?: number; readonly maxTickMs?: number } = {},
+): {
+  /** Every judged acted tick, in time order, with the listings it took. */
+  readonly ticks: readonly { readonly at: number; readonly process: string; readonly listings: number }[];
+  readonly judged: number;
+  readonly exactlyOne: number;
+  readonly notOne: readonly { readonly at: number; readonly process: string; readonly listings: number }[];
+  readonly orphans: readonly { readonly at: number; readonly process: string }[];
+  readonly late: readonly { readonly at: number; readonly process: string; readonly gapMs: number }[];
+} {
+  const tickMs = options.tickMs ?? 60_000;
+  const maxTickMs = options.maxTickMs ?? 5 * tickMs;
+  const byProcess = new Map<string, number[]>();
+  for (const line of ticks) {
+    if (line.event !== ACTED_TICK_EVENT || typeof line.process !== "string" || !isScheduler(line.process)) continue;
+    const at = millis(line.ts);
+    if (at === null || at < from - maxTickMs || at > to + maxTickMs) continue;
+    const list = byProcess.get(line.process) ?? [];
+    list.push(at);
+    byProcess.set(line.process, list);
+  }
+  for (const list of byProcess.values()) list.sort((a, b) => a - b);
+  const taken = new Map<string, number[]>();
+  for (const [process, list] of byProcess) taken.set(process, list.map(() => 0));
+  const orphans: { at: number; process: string }[] = [];
+  for (const line of lines) {
+    const call = callOf(line);
+    if (call === null || !LISTING_METHODS.has(call.method) || !isScheduler(call.run) || call.ts < from - maxTickMs || call.ts > to) continue;
+    const list = byProcess.get(call.run) ?? [];
+    let lo = 0;
+    let hi = list.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (list[mid]! < call.ts) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo < list.length && list[lo]! - call.ts <= maxTickMs) taken.get(call.run)![lo]! += 1;
+    else if (call.ts >= from) orphans.push({ at: call.ts, process: call.run });
+  }
+  const judgedTicks: { at: number; process: string; listings: number }[] = [];
+  const late: { at: number; process: string; gapMs: number }[] = [];
+  for (const [process, list] of byProcess) {
+    list.forEach((at, index) => {
+      if (at < from || at > to) return;
+      judgedTicks.push({ at, process, listings: taken.get(process)![index]! });
+      const previous = index === 0 ? null : list[index - 1]!;
+      if (previous !== null && at - previous > 1.5 * tickMs) late.push({ at, process, gapMs: at - previous });
+    });
+  }
+  const byTime = <T extends { readonly at: number }>(a: T, b: T): number => a.at - b.at;
+  judgedTicks.sort(byTime);
+  const notOne = judgedTicks.filter((tick) => tick.listings !== 1);
+  return { ticks: judgedTicks, judged: judgedTicks.length, exactlyOne: judgedTicks.length - notOne.length, notOne, orphans: orphans.sort(byTime), late: late.sort(byTime) };
 }
 
 /** Calls and credits by the bill's line, for the calls `accept` takes, at one archival price. */
