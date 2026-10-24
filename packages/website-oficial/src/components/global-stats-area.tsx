@@ -13,15 +13,20 @@
  * Like the bar card, it prints nothing it read off a curve: the tooltip and the
  * tag print the exact strings each point carries. And a series that could not
  * be read is a band with a sentence — the headline above it still stands.
+ *
+ * NO LINE UNDER THE TITLE OR THE CURVE (owner, 10-24). "Running total since"
+ * was the third place to name the first day (the span under the page title
+ * keeps it), and days nobody could read are the title's hover — the tag and
+ * the tooltips mark a floor with "≥" and "at least".
  */
 
 import { useState } from "react";
 import { Area, AreaChart, CartesianGrid, ReferenceLine, XAxis, YAxis } from "recharts";
 
-import { BarsTooltip, Headline, valueText, type HeadlineProps } from "@/components/global-stats-chart";
+import { BarsTooltip, ChartTitle, Headline, hasUnreadDays, valueText, type HeadlineProps } from "@/components/global-stats-chart";
 import { InfoTip } from "@/components/info-tip";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip, type ChartConfig } from "@/components/ui/chart";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatSolAtMost } from "@/lib/amounts";
@@ -73,7 +78,7 @@ function axisFigure(raw: string, unit: Unit): string {
 export interface RunningTotalCardProps {
   readonly id: string;
   readonly title: string;
-  readonly description: string;
+  /** The "?" beside the title: kept on this card, whose figure is what went in, not a balance. */
   readonly info: string;
   readonly sample: boolean;
   readonly headline: HeadlineProps;
@@ -89,14 +94,14 @@ export interface RunningTotalCardProps {
 }
 
 export function RunningTotalCard(props: RunningTotalCardProps) {
-  const { id, title, description, info, sample, headline, days, series, unit, end, first, emptyCaption, unavailableCaption, className } = props;
+  const { id, title, info, sample, headline, days, series, unit, end, first, emptyCaption, unavailableCaption, className } = props;
   const [range, setRange] = useState<Range>("30d");
 
   return (
     <Card className={className} data-chart-card={id}>
       <CardHeader>
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <CardTitle>{title}</CardTitle>
+          <ChartTitle title={title} hint={null} partial={hasUnreadDays(days)} />
           <InfoTip label={title}>{info}</InfoTip>
           {sample ? (
             <Badge variant="secondary" className="font-normal">
@@ -104,7 +109,6 @@ export function RunningTotalCard(props: RunningTotalCardProps) {
             </Badge>
           ) : null}
         </div>
-        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -241,10 +245,6 @@ function Plot({
         </tbody>
       </table>
       </div>
-
-      <p className="text-xs text-muted-foreground">
-        {[COPY.runningSince(dateLabel(rows[0]?.day ?? end)), ...(partial || missing.length > 0 ? [COPY.partial] : [])].join(" · ")}
-      </p>
     </div>
   );
 }

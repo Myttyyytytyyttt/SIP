@@ -27,7 +27,6 @@ import { OpenPension } from "@/components/open-pension";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { toSolanaPublicConfig } from "@/lib/config";
-import { GLOBAL_STATS_COPY } from "@/lib/global-stats-copy";
 import { loadGlobalStats } from "@/lib/global-stats-load";
 import { buildGlobalStats, known, type Shelf } from "@/lib/global-stats-model";
 import { decideGlobalStatsMode } from "@/lib/global-stats-mode";
@@ -92,7 +91,11 @@ export default async function DashboardPage({
         // NO CONNECT BUTTON HERE, as on /leaderboard: connecting needs the
         // Privy provider this page deliberately does not mount.
         account={returning && config !== null ? <LeaderboardAccountHost config={config} /> : <OpenPension returning={returning} mode={mode} />}
-        activitySheet={<p className="p-4 text-sm text-muted-foreground">{GLOBAL_STATS_COPY.sheet}</p>}
+        // NO DRAWER (10-24, the owner's "lo que esté de más, quítalo"): it held
+        // one sentence repeating the page, under a sheet titled "Activity".
+        // The button below lg goes with it.
+        activitySheet={null}
+        sheet={false}
       />
 
       <main className="flex min-w-0 flex-1 flex-col gap-5 p-4 lg:gap-6 lg:p-6">

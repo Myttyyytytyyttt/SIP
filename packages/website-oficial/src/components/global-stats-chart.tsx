@@ -4,9 +4,15 @@
  * ONE STACKED-BAR CARD, FOUR USES on the public dashboard: what was put aside,
  * the settlements, the pensions active each day, and what pensions bought.
  *
- * The reference's anatomy in this site's parts: a title with its "?", a line of
- * description, then the view (per period, running total, share), Daily|Weekly,
- * the legend, the bars. Controls are local state, never the URL.
+ * The reference's anatomy in this site's parts: a short title, then the view
+ * (per period, running total, share), Daily|Weekly, the legend, the bars.
+ * Controls are local state, never the URL.
+ *
+ * NOTHING UNDER THE TITLE OR THE BARS (owner, 10-24). What a chart counts is
+ * its title's hover, and so is a series with days nobody could read — a bar
+ * of a day nobody read also says "Could not be read" in its own tooltip, and
+ * one partly read "at least" ("≈" for what was traded). A "?" only when the
+ * page passes one.
  *
  * WHAT IS PRINTED IS NEVER READ FROM A BAR. recharts needs a number to size a
  * bar; the tooltip prints the exact decimal string each row carries beside it
@@ -25,7 +31,7 @@ import { Bar, BarChart, CartesianGrid, Rectangle, XAxis, YAxis } from "recharts"
 
 import { InfoTip } from "@/components/info-tip";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ChartContainer, ChartTooltip, type ChartConfig } from "@/components/ui/chart";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -150,38 +156,54 @@ export function BarsTooltip({
   );
 }
 
-/** A card's headline figure, as the reference sets it: large, left, its unit beside it and what it means under it. Plain strings, so it crosses from the server. */
+/**
+ * A card's headline figure, as the reference sets it: large, left, its unit
+ * beside it, its dollar value under it. No sentence under it (10-24): every
+ * digit and any caveat are the figure's hover, the price is the dollars'.
+ * Plain strings, so it crosses from the server.
+ */
 export interface HeadlineProps {
   readonly value: string;
   /** "≈", "at least", or nothing. */
   readonly qualifier: string | null;
   readonly unit: string;
-  /** Every digit, for the title attribute. */
-  readonly exact: string | null;
+  /** The figure's hover: every digit and any caveat, or why it is a dash. */
+  readonly title: string | null;
   /** "+12.4% in 7 days", or nothing when there is no honest base to grow from. */
   readonly delta: string | null;
-  readonly lines: readonly string[];
+  /** "≈ $29.55", or "No dollar value"; its hover names the price, or why there is none. */
+  readonly dollars: { readonly text: string; readonly title: string } | null;
 }
 
-export function Headline({ value, qualifier, unit, exact, delta, lines }: HeadlineProps) {
+export function Headline({ value, qualifier, unit, title, delta, dollars }: HeadlineProps) {
   return (
     <div className="flex min-w-0 flex-col gap-1">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         {qualifier === null ? null : <span className="text-sm text-muted-foreground">{qualifier}</span>}
-        <span className={cn(MONO, "text-3xl font-semibold tracking-tight sm:text-4xl")} {...(exact === null ? {} : { title: exact })}>
+        <span className={cn(MONO, "text-3xl font-semibold tracking-tight sm:text-4xl")} {...(title === null ? {} : { title })}>
           {value}
         </span>
         {unit === "" ? null : <span className="text-sm text-muted-foreground">{unit}</span>}
         {delta === null ? null : <span className={cn("rounded-md bg-emerald-500/10 px-1.5 py-0.5 text-xs font-medium", SAVED)}>{delta}</span>}
       </div>
-      {lines.map((line) => (
-        <p key={line} className="text-xs text-muted-foreground">
-          {line}
+      {dollars === null ? null : (
+        <p className="w-fit text-xs text-muted-foreground" title={dollars.title}>
+          {dollars.text}
         </p>
-      ))}
+      )}
     </div>
   );
 }
+
+/** The title of a chart card, with what it counts — and any days nobody could read — in its hover. */
+export function ChartTitle({ title, hint, partial }: { readonly title: string; readonly hint: string | null; readonly partial: boolean }) {
+  const notes = [hint, partial ? COPY.partial : null].filter((note): note is string => note !== null);
+  return <CardTitle {...(notes.length === 0 ? {} : { title: notes.join(" · ") })}>{title}</CardTitle>;
+}
+
+/** Whether a served series has days nobody could read. */
+export const hasUnreadDays = (days: Stat<{ readonly partial: boolean; readonly missing?: readonly UtcDay[] }>): boolean =>
+  days.kind === "known" && (days.value.partial || (days.value.missing ?? []).length > 0);
 
 /** The dashed band in place of a chart: nothing to draw, and why. */
 function Band({ caption }: { readonly caption: string }) {
@@ -210,8 +232,10 @@ const VIEW_ICONS: Readonly<Record<View, { readonly icon: typeof ChartColumnStack
 export interface StackedBarsCardProps {
   readonly id: string;
   readonly title: string;
-  readonly description: string;
-  readonly info: string;
+  /** What the chart counts, as the title's hover. */
+  readonly hint?: string | null;
+  /** A "?" beside the title, only where a reader must know it to read the figure. */
+  readonly info?: string | null;
   /** Built from the sample: a badge on the card, so a screenshot of it still says so. */
   readonly sample: boolean;
   /** Bottom of the stack first. */
@@ -229,10 +253,6 @@ export interface StackedBarsCardProps {
   readonly emptyCaption: string;
   /** The sentence for a series that could not be read. */
   readonly unavailableCaption: string;
-  /** What a day with something on it is called under the chart: "3 days with a settlement" or "with a purchase". A word, not a function: this crosses from the server. */
-  readonly daysOf?: "settlement" | "saving" | "purchase" | "traded";
-  /** A line under the chart, e.g. what each asset took. */
-  readonly footer?: string | null;
   /** The reference's headline above the chart: the figure the bars add up to. */
   readonly headline?: HeadlineProps | null;
   /** Figures that are approximations by nature (what was traded): printed "≈", never "at least". */
@@ -241,7 +261,7 @@ export interface StackedBarsCardProps {
 }
 
 export function StackedBarsCard(props: StackedBarsCardProps) {
-  const { id, title, description, info, sample, series, unit, days, end, first, periods, views, emptyCaption, unavailableCaption, daysOf = "settlement", footer = null, headline = null, approximate = false, className } = props;
+  const { id, title, hint = null, info = null, sample, series, unit, days, end, first, periods, views, emptyCaption, unavailableCaption, headline = null, approximate = false, className } = props;
   const [period, setPeriod] = useState<Period>(periods[0] ?? "day");
   const [view, setView] = useState<View>(views[0] ?? "period");
 
@@ -249,15 +269,14 @@ export function StackedBarsCard(props: StackedBarsCardProps) {
     <Card className={cn("min-w-0", className)} data-chart-card={id}>
       <CardHeader>
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <CardTitle>{title}</CardTitle>
-          <InfoTip label={title}>{info}</InfoTip>
+          <ChartTitle title={title} hint={hint} partial={hasUnreadDays(days)} />
+          {info === null ? null : <InfoTip label={title}>{info}</InfoTip>}
           {sample ? (
             <Badge variant="secondary" className="font-normal">
               {GLOBAL_STATS_COPY.sampleCardBadge}
             </Badge>
           ) : null}
         </div>
-        <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {headline === null ? null : <Headline {...headline} />}
@@ -282,11 +301,9 @@ export function StackedBarsCard(props: StackedBarsCardProps) {
             onView={setView}
             missing={days.value.missing ?? []}
             title={title}
-            daysCaption={daysOf === "purchase" ? COPY.purchaseDays : daysOf === "saving" ? COPY.savingDays : daysOf === "traded" ? COPY.tradedDays : COPY.activeDays}
             approximate={approximate}
           />
         )}
-        {footer === null ? null : <p className="text-xs text-muted-foreground">{footer}</p>}
       </CardContent>
     </Card>
   );
@@ -307,7 +324,6 @@ function Plot({
   view,
   onPeriod,
   onView,
-  daysCaption,
   approximate,
 }: {
   readonly series: readonly SeriesKey[];
@@ -324,7 +340,6 @@ function Plot({
   readonly view: View;
   readonly onPeriod: (period: Period) => void;
   readonly onView: (view: View) => void;
-  readonly daysCaption: (days: number) => string;
   readonly approximate: boolean;
 }) {
   const keys = period === "day" ? dayWindow(end, first) : weekWindow(end, first);
@@ -336,8 +351,6 @@ function Plot({
   const shown = view === "cumulative" ? cumulative(buckets, carryIn(rows, firstKey, series), series, carryUnread) : buckets;
   const plot = toPlotRows(shown, view, series, unit.decimals);
   const config = Object.fromEntries(series.map((key) => [key, { label: SERIES[key].label, color: SERIES[key].color }])) satisfies ChartConfig;
-  const activeDays = rows.filter((row) => row.day <= end && series.some((key) => BigInt(row.values[key] ?? "0") > 0n)).length;
-  const firstServed = rows[0]?.day ?? null;
 
   return (
     <div className="space-y-3">
@@ -452,14 +465,6 @@ function Plot({
         </tbody>
       </table>
       </div>
-
-      <p className="text-xs text-muted-foreground">
-        {[
-          daysCaption(activeDays),
-          ...(view === "cumulative" && firstServed !== null ? [COPY.runningSince(dateLabel(firstServed))] : []),
-          ...(partial || missing.length > 0 ? [COPY.partial] : []),
-        ].join(" · ")}
-      </p>
     </div>
   );
 }

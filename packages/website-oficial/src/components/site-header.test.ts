@@ -118,3 +118,18 @@ describe("the navbar's logo", () => {
     expect(html).toMatch(/<h1[^>]*><a[^>]*href="\/welcome"[^>]*>[\s\S]*SaverFi[\s\S]*<\/a><\/h1>/);
   });
 });
+
+describe("the sheet below lg", () => {
+  it("is offered on every page by default", () => {
+    const html = renderToStaticMarkup(createElement(SiteHeader, { activitySheet: null, control: null, account: null, current: "leaderboard" }));
+    expect(html).toContain('aria-label="Open activity"');
+  });
+
+  it("is left out, with its button, on a page with nothing to put in it (/dashboard, since 10-24)", () => {
+    const html = renderToStaticMarkup(createElement(SiteHeader, { activitySheet: null, sheet: false, control: null, account: null, current: "dashboard" }));
+    expect(html).not.toContain('aria-label="Open activity"');
+    // The rest of the bar is the same.
+    expect(html).toContain(">SaverFi<");
+    expect(html).toMatch(/aria-current="page"[^>]*>Dashboard</);
+  });
+});
