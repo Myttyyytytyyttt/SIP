@@ -66,6 +66,10 @@ describe("the two locks", () => {
     const waiting = (lockName: string) => missingLiveCondition({ armed: true, verification: { kind: "verified" }, claimLive: false, lockName });
     expect(waiting(lockNameFor("volume"))).toBe("another keeper holds the sip-solana-volume-keeper claim; retrying every sweep");
     expect(waiting(lockNameFor("profit"))).toBe("another keeper holds the sip-solana-keeper claim; retrying every sweep");
+    // A CLAIM THE DATABASE DID NOT ANSWER IS NOT ANOTHER KEEPER'S, and /status says which.
+    expect(missingLiveCondition({ armed: true, verification: { kind: "verified" }, claimLive: false, lockName: lockNameFor("volume"), claimFailure: "connect ETIMEDOUT" })).toBe(
+      "the database did not answer the sip-solana-volume-keeper claim (connect ETIMEDOUT); no claim, no acting — retrying every sweep",
+    );
   });
 });
 

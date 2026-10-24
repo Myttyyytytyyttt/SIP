@@ -1111,6 +1111,12 @@ async function refreshHistoryVerdict(): Promise<void> {
 }
 
 async function refreshLeaderboard(): Promise<void> {
+  // ONE ROLE RANKS (src/role-registry.ts, `ranks`): any other answers its /leaderboard
+  // without reading the database at all.
+  if (!profile.ranks) {
+    leaderboard = { unavailable: "this keeper does not compute the rankings: the profit keeper's /leaderboard serves them" };
+    return;
+  }
   if (!readModel.enabled) {
     leaderboard = { unavailable: "this keeper has no database, so it keeps no history to rank" };
     return;
@@ -1354,7 +1360,7 @@ const liveBlocker = (): string | null =>
   // already on the wire is confirmed. Without the cut crankSender is null and
   // this falls through to the line it always was.
   (crankSender?.draining === true ? "draining after SIGTERM: no new send starts while the last ones confirm" : null) ??
-  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName }) ??
+  missingLiveCondition({ armed: config.armed, verification, claimLive: claim.live, lockName: profile.lockName, claimFailure: claim.failure }) ??
   // `on` ACTS ONLY OVER A STORE THAT IS THERE (carryStore.liveBlocker); null otherwise.
   carryStore?.liveBlocker() ??
   null;
@@ -1696,14 +1702,20 @@ async function sweep(): Promise<void> {
         if (!claim.live) {
           notActingSweeps += 1;
           const stale = notActingSweeps >= NOT_ACTING_CRITICAL_AFTER;
+          // SAY WHICH: a claim another keeper holds, or one the database did not answer.
+          const unanswered = claim.failure;
           alerter.fire({
             key: "not-acting",
             severity: stale ? "critical" : "warn",
-            title: "Armed, but another keeper holds the claim",
-            detail: stale
-              ? `This instance has been sweeping in dry run for ${notActingSweeps} sweeps and has charged nothing. ` +
-                "No other instance should be holding the claim for this long: its lock is stale."
-              : "This instance is sweeping in dry run. If no other instance is running, its lock is stale.",
+            title: unanswered === null ? "Armed, but another keeper holds the claim" : "Armed, but the database did not answer its claim",
+            detail:
+              unanswered !== null
+                ? `This instance is sweeping in dry run${stale ? ` for ${notActingSweeps} sweeps and has charged nothing` : ""}: ` +
+                  `the database that holds the single-keeper claim did not answer (${unanswered}). Nothing is charged or bought until it does.`
+                : stale
+                  ? `This instance has been sweeping in dry run for ${notActingSweeps} sweeps and has charged nothing. ` +
+                    "No other instance should be holding the claim for this long: its lock is stale."
+                  : "This instance is sweeping in dry run. If no other instance is running, its lock is stale.",
           });
         } else if (notActingSweeps > 0) {
           notActingSweeps = 0;
@@ -2757,7 +2769,14 @@ if (config.armed) {
   verification = verifyLive(initial, true);
   if (verification?.kind === "verified") {
     await claim.ensure();
-    if (!claim.held) log.warn("another keeper holds the claim — running as a DRY RUN and retrying every sweep");
+    if (!claim.held) {
+      log.warn(
+        claim.failure === null
+          ? "another keeper holds the claim — running as a DRY RUN and retrying every sweep"
+          : "the database did not answer the claim — running as a DRY RUN and retrying every sweep",
+        claim.failure === null ? {} : { detail: claim.failure },
+      );
+    }
   }
 }
 // THE CARRY STORE BEFORE THE FIRST SWEEP: whether its table is there (in `on`,

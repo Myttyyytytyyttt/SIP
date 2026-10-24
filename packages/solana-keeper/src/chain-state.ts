@@ -144,12 +144,17 @@ export function missingLiveCondition(input: {
   readonly claimLive: boolean;
   /** The lock this keeper claims (lockNameFor): the profit keeper's by default. */
   readonly lockName?: string;
+  /** Why the claim could not even be asked (KeeperClaim.failure): the database did not answer. */
+  readonly claimFailure?: string | null;
 }): string | null {
   if (!input.armed) {
     return "not armed: SIP_SOLANA_BROADCAST=1 and the exact SIP_SOLANA_ALLOW_BROADCAST sentence are both required";
   }
   if (input.verification === null) return "the settle key has not been checked against the on-chain ProtocolConfig yet";
   if (input.verification.kind !== "verified") return input.verification.detail;
+  if (!input.claimLive && input.claimFailure != null) {
+    return `the database did not answer the ${input.lockName ?? KEEPER_LOCK_NAME} claim (${input.claimFailure}); no claim, no acting — retrying every sweep`;
+  }
   if (!input.claimLive) return `another keeper holds the ${input.lockName ?? KEEPER_LOCK_NAME} claim; retrying every sweep`;
   return null;
 }

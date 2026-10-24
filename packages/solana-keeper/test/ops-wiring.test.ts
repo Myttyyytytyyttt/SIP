@@ -117,6 +117,15 @@ describe("the alert chain", () => {
   });
 });
 
+describe("one role ranks", () => {
+  it("a keeper whose role does not rank answers /leaderboard before reading anything (the volume keeper ran the full-scan aggregates every 120 s for nobody)", () => {
+    const refresh = body("async function refreshLeaderboard(): Promise<void> {");
+    const guard = refresh.indexOf("if (!profile.ranks) {");
+    expect(guard).toBeGreaterThan(-1);
+    expect(refresh.indexOf("return;", guard)).toBeLessThan(refresh.indexOf("readModel."));
+  });
+});
+
 describe("claim-flap", () => {
   it("tells the watch every takeover, every lost session and every mismatch release — and pages what a regain returns", () => {
     const takeover = body("const claim: KeeperClaim = new KeeperClaim({");

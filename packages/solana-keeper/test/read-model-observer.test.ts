@@ -15,6 +15,10 @@ const fake = vi.hoisted(() => {
     locked: true,
     /** How many times anything asked whether an error is a DatabaseError. */
     inspected: 0,
+    /** Every client.release(argument): true is a destroyed connection, undefined one returned to the pool. */
+    releases: [] as unknown[],
+    /** The held claim's SELECT 1 fails (its session went away). */
+    failCheck: false,
   };
   class DatabaseError extends Error {
     constructor(
@@ -31,10 +35,13 @@ const fake = vi.hoisted(() => {
   const client = {
     async query(sql: string) {
       if (state.failWith !== null) throw state.failWith;
+      if (sql === "SELECT 1" && state.failCheck) throw new Error("Query read timeout");
       if (sql.includes("pg_try_advisory_lock")) return { rows: [{ locked: state.locked }] };
       return { rows: [] };
     },
-    release() {},
+    release(destroy?: unknown) {
+      state.releases.push(destroy);
+    },
     on() {},
   };
   class Pool {
@@ -57,7 +64,7 @@ const URL_FOR_A_FAKE_POOL = "postgres://nobody@localhost:1/none?sslmode=disable"
 const row = { vaultAddr: "V", target: "T", spentRaw: 1n, receivedRaw: 1n, txRef: "sig", height: 1n };
 
 beforeEach(() => {
-  Object.assign(fake.state, { failConnect: false, failWith: null, locked: true, inspected: 0 });
+  Object.assign(fake.state, { failConnect: false, failWith: null, locked: true, inspected: 0, releases: [], failCheck: false });
 });
 
 function observed() {
@@ -97,7 +104,7 @@ describe("the observer", () => {
   it("hears no answer when the database cannot be reached — and every method returns what it always did", async () => {
     const { readModel, seen } = observed();
     fake.state.failConnect = true;
-    expect(await readModel.claimSingleton(1n, () => {})).toEqual({ held: false });
+    expect(await readModel.claimSingleton(1n, () => {})).toEqual({ held: false, failure: expect.stringContaining("timeout exceeded") });
     expect(await readModel.recordInvestment(row)).toBe(false);
     expect(await readModel.leaderboardDays()).toBeNull();
     expect(await readModel.globalStatsRows()).toBeNull();
@@ -129,12 +136,44 @@ describe("the observer", () => {
     expect(await readModel.recordInvestment(row)).toBe(false);
     expect(await readModel.leaderboardDays()).toBeNull();
     fake.state.failConnect = true;
-    expect(await readModel.claimSingleton(1n, () => {})).toEqual({ held: false });
+    expect(await readModel.claimSingleton(1n, () => {})).toMatchObject({ held: false });
     expect(fake.state.inspected).toBe(0);
     // With one, the same failures are classified.
     const { readModel: watched, seen } = observed();
-    expect(await watched.claimSingleton(1n, () => {})).toEqual({ held: false });
+    expect(await watched.claimSingleton(1n, () => {})).toMatchObject({ held: false });
     expect(fake.state.inspected).toBeGreaterThan(0);
     expect(seen).toEqual([false]);
+  });
+});
+
+describe("the claim's connection", () => {
+  it("is destroyed, never returned to the pool, when the attempt fails: a lock the server granted after this side gave up must go with it", async () => {
+    const readModel = SolanaReadModel.create(new Secret(URL_FOR_A_FAKE_POOL, "DATABASE_URL"), () => {});
+    fake.state.failWith = new Error("Query read timeout");
+    expect(await readModel.claimSingleton(1n, () => {})).toEqual({ held: false, failure: expect.stringContaining("Query read timeout") });
+    expect(fake.state.releases).toEqual([true]);
+    // A lock somebody else holds is an answer: no failure, and the connection goes back to the pool.
+    fake.state.failWith = null;
+    fake.state.locked = false;
+    expect(await readModel.claimSingleton(1n, () => {})).toEqual({ held: false });
+    expect(fake.state.releases).toEqual([true, undefined]);
+  });
+
+  it("is checked once a sweep: an answer keeps the claim, no answer destroys the connection and tells the keeper once", async () => {
+    const readModel = SolanaReadModel.create(new Secret(URL_FOR_A_FAKE_POOL, "DATABASE_URL"), () => {});
+    let lost = 0;
+    const claim = await readModel.claimSingleton(1n, () => void (lost += 1));
+    expect(claim.held).toBe(true);
+    expect(await claim.check!()).toBe(true);
+    expect(fake.state.releases).toEqual([]);
+    fake.state.failCheck = true;
+    expect(await claim.check!()).toBe(false);
+    expect(fake.state.releases).toEqual([true]);
+    expect(lost).toBe(1);
+    // GONE IS GONE: a later check or release neither asks again nor tells the keeper twice.
+    expect(await claim.check!()).toBe(false);
+    claim.release!();
+    expect(fake.state.releases).toEqual([true]);
+    expect(lost).toBe(1);
   });
 });

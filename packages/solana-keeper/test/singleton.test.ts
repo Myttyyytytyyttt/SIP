@@ -101,6 +101,52 @@ describe("the claim", () => {
     expect(announced, "an announcement per sweep is an announcement that gets muted").toBe(1);
   });
 
+  it("THE SILENT LOSS: a holder whose session stops answering gives the claim up at its next sweep, and the other instance takes over", async () => {
+    const lock = makeLock();
+    let sessionAnswers = true;
+    let lost = 0;
+    const attempt = lock.attemptFor("old");
+    const holder: KeeperClaim = new KeeperClaim({
+      armed: true,
+      attempt: async () => {
+        const result = await attempt();
+        if (!result.held) return result;
+        return {
+          ...result,
+          // What claimSingleton's check does: a SELECT 1 on the held session; on no answer it destroys
+          // the connection (the server lets the lock go with it) and calls onLost, which releases the claim.
+          check: async () => {
+            if (sessionAnswers) return true;
+            result.release?.();
+            lost += 1;
+            holder.release();
+            return false;
+          },
+        };
+      },
+    });
+    const other = new KeeperClaim({ armed: true, attempt: lock.attemptFor("new") });
+    expect(await holder.ensure()).toBe(true);
+    expect(await holder.ensure(), "a session that answers keeps the claim").toBe(true);
+    expect(await other.ensure()).toBe(false);
+    sessionAnswers = false;
+    expect(await holder.ensure(), "the check fails: the claim is given up in this sweep").toBe(false);
+    expect(holder.live).toBe(false);
+    expect(lost).toBe(1);
+    expect(await other.ensure(), "and the other instance takes it at its next").toBe(true);
+    expect(lock.holder).toBe("new");
+  });
+
+  it("says why a claim was not granted when the database did not answer, and forgets it once an answer comes", async () => {
+    let answer: { held: boolean; failure?: string } = { held: false, failure: "timeout exceeded when trying to connect" };
+    const claim = new KeeperClaim({ armed: true, attempt: async () => answer });
+    expect(await claim.ensure()).toBe(false);
+    expect(claim.failure).toBe("timeout exceeded when trying to connect");
+    answer = { held: false };
+    expect(await claim.ensure()).toBe(false);
+    expect(claim.failure, "another keeper holding it is an answer").toBeNull();
+  });
+
   it("a failed claim never counts as a held one", async () => {
     // The other half of the same review finding: claimSingleton returned
     // held:true when the attempt ERRORED, sending an armed keeper live without

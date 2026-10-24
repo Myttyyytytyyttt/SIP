@@ -280,6 +280,12 @@ export class SolanaReadModel {
       // like a failure, which this file already knows how to survive.
       statement_timeout: 5_000,
       query_timeout: 5_000,
+      // THE CLAIM'S CONNECTION IS HELD FOR AS LONG AS THE PROCESS LIVES: TCP
+      // keepalive lets a socket whose far end vanished fail as an 'error' instead
+      // of looking idle forever. The per-sweep check (claimSingleton) is the
+      // bound; this only makes the error path fire sooner.
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
     });
     // REQUIRED. An idle client erroring (a Supabase restart) emits 'error' on
     // the pool; unhandled, that crashes the process — taking settlement down
@@ -300,10 +306,11 @@ export class SolanaReadModel {
    * independent purchases, each up to max_per_call, plus crank fees burned on
    * the transactions that lose the race and revert.
    *
-   * `onLost` fires when the held session errors: the server has dropped it, the
-   * lock went with it, and the caller must stop acting until it claims again.
+   * `onLost` fires when the held session errors, or does not answer the
+   * per-sweep check: the server has dropped it, the lock went with it, and the
+   * caller must stop acting until it claims again.
    */
-  async claimSingleton(key: bigint, onLost: () => void): Promise<{ held: boolean; release?: () => void }> {
+  async claimSingleton(key: bigint, onLost: () => void): Promise<{ held: boolean; release?: () => void; check?: () => Promise<boolean>; failure?: string }> {
     // NO DATABASE, NO LOCK — and that is a fact to report, not to paper over.
     // The caller decides what to do with an unenforced singleton.
     if (this.#pool === null) return { held: true };
@@ -316,6 +323,12 @@ export class SolanaReadModel {
       if (result.rows[0]?.locked === true) {
         const held = client;
         let released = false;
+        const lose = (): void => {
+          if (released) return;
+          released = true;
+          held.release(true);
+          onLost();
+        };
         // THE HELD CLIENT NEEDS ITS OWN ERROR LISTENER. pg-pool removes its
         // idle listener the moment a client is checked out and attaches no
         // replacement, so a server-side disconnect on this deliberately
@@ -326,11 +339,7 @@ export class SolanaReadModel {
           this.#warn("the keeper claim's connection errored; the lock is no longer held", {
             detail: summarizeUpstreamError(err),
           });
-          if (!released) {
-            released = true;
-            held.release(true);
-            onLost();
-          }
+          lose();
         });
         return {
           held: true,
@@ -342,21 +351,42 @@ export class SolanaReadModel {
             released = true;
             held.release(true);
           },
+          // ONE ROUND TRIP ON THE HELD SESSION, bounded by query_timeout. No
+          // answer is a lock this keeper can no longer vouch for: it is let go,
+          // and the caller is told exactly as for a socket error.
+          check: async () => {
+            if (released) return false;
+            try {
+              await held.query("SELECT 1");
+              this.#saw(true);
+              return true;
+            } catch (error) {
+              this.#sawFailure(error);
+              this.#warn("the keeper claim's session did not answer its check; the lock is treated as lost", {
+                detail: summarizeUpstreamError(error),
+              });
+              lose();
+              return false;
+            }
+          },
         };
       }
       client.release();
       return { held: false };
     } catch (error) {
-      client?.release();
+      // DESTROYED, NOT RETURNED: a lock request whose answer this side stopped
+      // waiting for (query_timeout) can still be granted on the server, and a
+      // pooled connection would then hold the claim unseen — every instance dry,
+      // this one included, for as long as the pool kept that connection.
+      client?.release(true);
       this.#sawFailure(error);
-      this.#warn("singleton claim failed — staying in dry run rather than acting unclaimed", {
-        detail: summarizeUpstreamError(error),
-      });
+      const detail = summarizeUpstreamError(error);
+      this.#warn("singleton claim failed — staying in dry run rather than acting unclaimed", { detail });
       // NOT `held: true`. A claim that could not be ATTEMPTED is not a claim
       // granted, and a database unreachable for us is just as likely reachable
       // for the other instance. The caller retries every sweep, so a transient
       // failure costs one cycle of dry run rather than a double-acting keeper.
-      return { held: false };
+      return { held: false, failure: detail };
     }
   }
 

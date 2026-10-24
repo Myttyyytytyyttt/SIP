@@ -58,8 +58,13 @@ export function advisoryKeyFor(name: string): bigint {
  * Attempts the claim. Returns whether it was granted, and — when it was — the
  * handle whose release gives it up. Postgres advisory locks are SESSION scoped,
  * so holding the claim means holding that handle open.
+ *
+ * `check`, with a granted claim: asks the held session whether it is still
+ * there, false when it is not (and then the attempt's own loss path has already
+ * run). `failure`, with a refused one: the attempt could not be asked at all —
+ * the database did not answer — which is not "another keeper holds it".
  */
-export type ClaimAttempt = () => Promise<{ held: boolean; release?: () => void }>;
+export type ClaimAttempt = () => Promise<{ held: boolean; release?: () => void; check?: () => Promise<boolean>; failure?: string }>;
 
 export interface KeeperClaimOptions {
   /** False when the keeper is not armed; nothing is claimed and nothing acts. */
@@ -77,6 +82,8 @@ export interface KeeperClaimOptions {
 export class KeeperClaim {
   #held: boolean;
   #release: (() => void) | undefined;
+  #check: (() => Promise<boolean>) | undefined;
+  #failure: string | null = null;
   readonly #armed: boolean;
   readonly #attempt: ClaimAttempt;
   readonly #onTakeover: (() => void) | undefined;
@@ -101,6 +108,11 @@ export class KeeperClaim {
     return this.#held;
   }
 
+  /** Why the last attempt could not even be asked (the database did not answer); null when it was asked, or is held. */
+  get failure(): string | null {
+    return this.#failure;
+  }
+
   /**
    * Tries to take the claim, and keeps being callable.
    *
@@ -109,13 +121,29 @@ export class KeeperClaim {
    * releases on SIGTERM and the incoming one takes over on its next sweep,
    * rather than waiting for a human to notice a keeper that was never going to
    * act.
+   *
+   * THE HOLDER ASKS ITS SESSION EVERY SWEEP (the attempt's `check`: one SELECT 1
+   * on the held connection). A session the server dropped without the socket
+   * saying so — a partition, a pooler that let it go — is a lock this keeper no
+   * longer holds and another may already have; before this, a holder never
+   * looked again and kept acting on it. A failed check gives the claim up, and
+   * the next sweep asks for it afresh.
    */
   async ensure(): Promise<boolean> {
-    if (!this.#armed || this.#held) return this.#held;
+    if (!this.#armed) return this.#held;
+    if (this.#held) {
+      if (this.#check !== undefined && !(await this.#check())) {
+        this.release();
+        return false;
+      }
+      return this.#held;
+    }
     const result = await this.#attempt();
+    this.#failure = result.held ? null : (result.failure ?? null);
     if (!result.held) return false;
     this.#held = true;
     this.#release = result.release;
+    this.#check = result.check;
     this.#onTakeover?.();
     return true;
   }
@@ -132,6 +160,7 @@ export class KeeperClaim {
   release(): void {
     this.#release?.();
     this.#release = undefined;
+    this.#check = undefined;
     this.#held = false;
   }
 }

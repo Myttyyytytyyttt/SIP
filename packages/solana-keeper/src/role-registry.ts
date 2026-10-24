@@ -259,6 +259,14 @@ interface RoleProfileBase {
    * job.
    */
   readonly dryRunPreview: boolean;
+  /**
+   * Whether this role computes the public rankings and the dashboard's stats
+   * (/leaderboard). One per deployment, the profit keeper's: the web reads that
+   * one (SIP_SOLANA_KEEPER_URL). A second role ran the same full-scan
+   * aggregates every 120 s for a page nobody fetched from it — the database's
+   * load doubled, the answer did not change.
+   */
+  readonly ranks: boolean;
   /** The `role` field of the "keeper starting" line. */
   readonly banner: string;
 }
@@ -308,6 +316,7 @@ export const ROLE_PROFILES = {
     crankAlert: true,
     signerScope: "every-vault",
     dryRunPreview: false,
+    ranks: true,
     banner: "profit keeper — settles PROFIT vaults, invests every vault",
   },
   volume: {
@@ -320,6 +329,7 @@ export const ROLE_PROFILES = {
     crankAlert: false,
     signerScope: "settled-modes",
     dryRunPreview: true,
+    ranks: false,
     banner: "volume keeper — settles VOLUME vaults only, never invests",
   },
 } as const satisfies Record<KeeperRole, RoleProfile>;

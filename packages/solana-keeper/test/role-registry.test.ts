@@ -128,6 +128,7 @@ describe("registry: the pins (each value the two-way branch produced at 7779289)
       crankAlert: true,
       signerScope: "every-vault",
       dryRunPreview: false,
+      ranks: true,
       banner: "profit keeper — settles PROFIT vaults, invests every vault",
     });
   });
@@ -143,6 +144,7 @@ describe("registry: the pins (each value the two-way branch produced at 7779289)
       crankAlert: false,
       signerScope: "settled-modes",
       dryRunPreview: true,
+      ranks: false,
       banner: "volume keeper — settles VOLUME vaults only, never invests",
     });
   });

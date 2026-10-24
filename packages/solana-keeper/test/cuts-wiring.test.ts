@@ -183,7 +183,7 @@ describe("explicit-send", () => {
 
   it("makes a draining process not live, so no turn is handed a key after SIGTERM — and is today's liveBlocker without the token", () => {
     expect(keeper).toMatch(
-      /const liveBlocker = \(\): string \| null =>\n[\s\S]{0,400}\(crankSender\?\.draining === true \? "draining after SIGTERM[^"]*" : null\) \?\?\n\s+missingLiveCondition\(\{ armed: config\.armed, verification, claimLive: claim\.live, lockName: profile\.lockName \}\)( \?\?\n|;)/,
+      /const liveBlocker = \(\): string \| null =>\n[\s\S]{0,400}\(crankSender\?\.draining === true \? "draining after SIGTERM[^"]*" : null\) \?\?\n\s+missingLiveCondition\(\{ armed: config\.armed, verification, claimLive: claim\.live, lockName: profile\.lockName, claimFailure: claim\.failure \}\)( \?\?\n|;)/,
     );
   });
 
