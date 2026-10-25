@@ -56,7 +56,7 @@ import { ConfigError, SIGNING_SECRET_VARS, loadConfig, shape, type KeeperConfig 
 import { CUT_TOKENS, DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_CREDITS_MONTH } from "./credit-governor.js";
 import { JUPITER_MAX_CALLS_PER_MINUTE } from "./jupiter-pacer.js";
-import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
+import { HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS, SCHEDULER_RPS } from "./rpc-quota.js";
 import { JUPITER_KEYLESS_CALLS_PER_MINUTE } from "./sweep-cost.js";
 
 /**
@@ -202,6 +202,10 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
   if (elsewhere.length > 0) warnings.push(`SIP_SOLANA_CUTS names ${elsewhere.join(", ")}: a worker acts on ${elsewhere.length === 1 ? "it" : "them"}, the scheduler does not.`);
 
   const planRps = readCount(env, "SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, PLAN_RPS_LIMIT, problems, "the provider plan's requests a second");
+  // THE SAME FLOOR THE WORKERS HOLD (rpc-quota.ts): below it the scheduler's own share leaves them nothing.
+  if (planRps < MIN_PLAN_RPS) {
+    problems.push(`SIP_SOLANA_PLAN_RPS must be at least ${MIN_PLAN_RPS}: below it the scheduler's ${SCHEDULER_RPS} a second leaves the workers no share of the plan.`);
+  }
   const workersMax = readCount(env, "SIP_SOLANA_WORKERS_MAX", 2, WORKERS_MAX_LIMIT, problems, "the most worker replicas the fleet runs");
   const planCreditsPerMonth = readCount(env, "SIP_SOLANA_PLAN_CREDITS_MONTH", HELIUS_DEVELOPER_CREDITS_MONTH, 10_000_000_000, problems, "the plan's credits a month");
   const tapeRead = readPriceTape(env["SIP_SOLANA_PRICE_TAPE"]);

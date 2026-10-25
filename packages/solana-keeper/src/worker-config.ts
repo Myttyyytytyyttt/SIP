@@ -46,7 +46,7 @@
 import { PublicKey } from "@solana/web3.js";
 import type { KeeperConfig } from "./config.js";
 import { DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
-import { HELIUS_DEVELOPER_RPS } from "./rpc-quota.js";
+import { HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS } from "./rpc-quota.js";
 
 /**
  * SIP_SOLANA_DISPATCH has ONE READER, src/cuts.ts's, for the legacy keepers, the
@@ -181,7 +181,8 @@ export function readWorkerSettings(env: NodeJS.ProcessEnv): { readonly settings:
   };
   const slots = read("SIP_SOLANA_WORKER_SLOTS", DEFAULT_WORKER_SLOTS, 1, MAX_WORKER_SLOTS);
   const workersMax = read("SIP_SOLANA_WORKERS_MAX", DEFAULT_WORKERS_MAX, 1, MAX_WORKERS);
-  const planRps = read("SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, 1, MAX_PLAN_RPS);
+  // FROM MIN_PLAN_RPS, NOT 1: a smaller plan leaves a worker no share at all (rpc-quota.ts).
+  const planRps = read("SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS, MAX_PLAN_RPS);
   const extra = readExtraModes(env);
   if ("problems" in extra) problems.push(...extra.problems);
   if (problems.length > 0 || "problem" in mode || "problems" in extra) return { problems };

@@ -42,6 +42,16 @@ export const FLEET_RPS_SHARE = 0.8;
 /** What the scheduler process keeps for its own tick, in requests a second (ADR §3.9). */
 export const SCHEDULER_RPS = 8;
 
+/**
+ * THE SMALLEST PLAN A FLEET CAN RUN ON: the fewest requests a second whose
+ * fleet share still leaves the workers something after the scheduler's
+ * SCHEDULER_RPS (11: 11 × 0.8 = 8.8 > 8). Below it every worker's floor is zero,
+ * and a worker on SIP_SOLANA_PLAN_RPS=5 died at boot building its RPC budget
+ * ("an RPC budget needs a positive, finite number of requests a second",
+ * 2026-10-25 rehearsal). Both configs refuse it instead, naming this number.
+ */
+export const MIN_PLAN_RPS = Math.floor(SCHEDULER_RPS / FLEET_RPS_SHARE) + 1;
+
 /** How long a worker runs on a quota it has stopped hearing before it drops to the floor: 2 min ([QUEUE] §2.8). */
 export const QUOTA_STALE_MS = 120_000;
 

@@ -102,6 +102,8 @@ describe("what a scheduler holds", () => {
     expect(config.warnings.join(" ")).toContain("SIP_SOLANA_POOLS");
     for (const [name, value] of [
       ["SIP_SOLANA_PLAN_RPS", "0"],
+      // THE SAME FLOOR AS THE WORKERS': below 11 the scheduler's share leaves them nothing.
+      ["SIP_SOLANA_PLAN_RPS", "10"],
       ["SIP_SOLANA_WORKERS_MAX", "65"],
       ["SIP_SOLANA_PLAN_CREDITS_MONTH", "1e7"],
       ["SIP_SOLANA_JUPITER_CALLS_PER_MINUTE", "-3"],

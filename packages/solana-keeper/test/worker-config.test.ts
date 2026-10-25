@@ -14,6 +14,7 @@ import {
   readWorkerSettings,
   workerRefusals,
 } from "../src/worker-config.js";
+import { MIN_PLAN_RPS, fleetQuotas } from "../src/rpc-quota.js";
 
 describe("SIP_SOLANA_DISPATCH", () => {
   it("is off when unset or empty, and takes exactly off, shadow or on", () => {
@@ -42,6 +43,16 @@ describe("the worker's numbers", () => {
     });
     const read = readWorkerSettings({ SIP_SOLANA_DISPATCH: "maybe", SIP_SOLANA_WORKER_SLOTS: "0", SIP_SOLANA_WORKERS_MAX: "2.5", SIP_SOLANA_PLAN_RPS: "-1" });
     expect("problems" in read && read.problems).toHaveLength(4);
+  });
+
+  it("refuses a plan too small to leave the workers a share — a worker on 5 a second died at boot building its budget", () => {
+    expect(MIN_PLAN_RPS).toBe(11);
+    const small = readWorkerSettings({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_PLAN_RPS: "5" });
+    expect("problems" in small && small.problems.join(" ")).toContain("from 11 to");
+    // AT THE FLOOR every worker's share is positive, however many the fleet may run.
+    expect(fleetQuotas({ planRps: MIN_PLAN_RPS, liveWorkers: 1, maxWorkers: 64 }).floorRps).toBeGreaterThan(0);
+    expect(fleetQuotas({ planRps: MIN_PLAN_RPS - 1, liveWorkers: 1, maxWorkers: 1 }).floorRps).toBe(0);
+    expect("settings" in readWorkerSettings({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_PLAN_RPS: "11" })).toBe(true);
   });
 });
 
