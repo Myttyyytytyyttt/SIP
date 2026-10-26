@@ -95,7 +95,7 @@ async function main(): Promise<number> {
   if (fleet?.new_vault_system !== "queue" && (await run("bin/dispatch-handover.mts", ["new-vaults", "queue"])) !== 0) return 1;
 
   say("3/4  Esperando a que el repartidor encuentre los vaults.");
-  say("     Si todavía no lo has creado en Railway, hazlo ahora (paso 4 de la guía). Espero hasta 30 minutos.");
+  say("     Si todavía no lo has creado en Railway, hazlo ahora (paso 3 de la guía). Espero hasta 30 minutos.");
   const waitStarted = Date.now();
   for (let minute = 0; ; ) {
     const [{ n }] = await query<{ n: string }>("SELECT count(*)::text AS n FROM sip_solana.vault_work");
