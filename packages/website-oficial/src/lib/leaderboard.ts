@@ -83,7 +83,14 @@ export type LeaderboardResult =
   | { readonly ok: true; readonly data: LeaderboardData }
   | { readonly ok: false; readonly detail: string };
 
-/** The one variable this feature reads. Public: a keeper's own hostname, not a key. */
+/**
+ * The one variable this feature reads. Public: a service's own hostname, not a key.
+ *
+ * THE NAME OUTLIVES THE SERVICE. It was the profit keeper's URL; the dispatcher's
+ * scheduler serves the same /leaderboard, and the legacy keepers are meant to stop.
+ * The variable keeps its name (Vercel carries it, and so do the tests), so the
+ * sentences below say "the rankings service": true whichever one answers.
+ */
 export const KEEPER_URL_VARIABLE = "SIP_SOLANA_KEEPER_URL";
 
 /** How long a fetched payload may be reused. The keeper recomputes every two minutes. */
@@ -105,7 +112,7 @@ export type Env = Readonly<Record<string, string | undefined>>;
 export function leaderboardEndpoint(env: Env): { readonly ok: true; readonly url: string } | { readonly ok: false; readonly detail: string } {
   const raw = env[KEEPER_URL_VARIABLE]?.trim();
   if (raw === undefined || raw === "") {
-    return { ok: false, detail: `no keeper is configured: set ${KEEPER_URL_VARIABLE} to the keeper's public URL` };
+    return { ok: false, detail: `no rankings service is configured: set ${KEEPER_URL_VARIABLE} to its public URL` };
   }
   let base: URL;
   try {
@@ -225,8 +232,8 @@ export function parseLeaderboard(value: unknown): LeaderboardData | null {
 
 /**
  * WHY A READ FAILED, as a code a page can word for its own readers. The
- * `detail` beside it is the operator's sentence — it names the keeper and the
- * variable — and a public page that is not this one's twin may not print it.
+ * `detail` beside it is the operator's sentence — it names the rankings service
+ * and the variable — and a public page that is not this one's twin may not print it.
  */
 export type LeaderboardFailure = "unconfigured" | "misconfigured" | "timeout" | "unreachable" | "not-ready" | "refused";
 
@@ -262,7 +269,7 @@ export async function fetchLeaderboardBody(env: Env = process.env, fetchImpl: ty
     if (!response.ok) {
       // The keeper's own reason when it gave one: "no database", "not computed
       // yet". Far better than "503" for whoever has to fix it.
-      const detail = isRecord(body) && typeof body["detail"] === "string" ? body["detail"] : `the keeper answered ${response.status}`;
+      const detail = isRecord(body) && typeof body["detail"] === "string" ? body["detail"] : `the rankings service answered ${response.status}`;
       return { ok: false, failure: response.status === 503 ? "not-ready" : "refused", detail };
     }
     return { ok: true, body };
@@ -271,8 +278,8 @@ export async function fetchLeaderboardBody(env: Env = process.env, fetchImpl: ty
     // put an upstream message on the page.
     const timedOut = error instanceof Error && error.name === "TimeoutError";
     return timedOut
-      ? { ok: false, failure: "timeout", detail: "the keeper did not answer in time" }
-      : { ok: false, failure: "unreachable", detail: "the keeper could not be reached" };
+      ? { ok: false, failure: "timeout", detail: "the rankings service did not answer in time" }
+      : { ok: false, failure: "unreachable", detail: "the rankings service could not be reached" };
   }
 }
 
@@ -288,7 +295,7 @@ export async function fetchLeaderboard(
   const read = await fetchLeaderboardBody(env, fetchImpl);
   if (!read.ok) return { ok: false, detail: read.detail };
   const data = parseLeaderboard(read.body);
-  if (data === null) return { ok: false, detail: "the keeper's answer was not a leaderboard this build understands" };
+  if (data === null) return { ok: false, detail: "the rankings service's answer was not a leaderboard this build understands" };
   return { ok: true, data };
 }
 

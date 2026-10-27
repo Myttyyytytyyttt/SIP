@@ -72,11 +72,10 @@ Not a testnet, not a simulation. Real trades, measured, settled and invested by 
 | **12. And it is still there** | On 2026-09-26 the vault holds **0.0443 SPYx** and **0.0172 ANTHROPIC** (PreStocks) — positions paid for by trading profit, trading volume and the owner's own test deposits — plus **2.69 USDC** waiting for the next buy | [vault `EFXK995P…`](https://solscan.io/account/EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU) |
 | **13. And it comes back out** | On 2026-10-06 the owner's pension key took **0.004312315 ANTHROPIC** out of the vault with `withdraw_token` — the first time money has left a SaverFi vault, signed by the only key that can make it leave | [`5GMPTgTg…`](https://solscan.io/tx/5GMPTgTgipXbt6T3RKHMFwvkhRhGR8npodrSJNSFSXtAcoBdeQS4T5SUqKizRVd1zGFsxcDP7up5Ke2VPrzNp2wc) |
 
-The keepers that did it — one settles profit vaults and invests every vault, the other settles volume vaults — are running right now and say so in public:
+The keepers that do it are running right now and say so in public. A scheduler marks which vaults are due and workers settle and invest them; a vault still served by the keepers from before the scheduler counts as `legacy`. The scheduler's `/status` shows the whole fleet, read from the database they all share:
 
 ```bash
-curl -s https://sip-solana-keeper-production.up.railway.app/status | jq '{role, mode, armed, sweeps, alerts}'
-curl -s https://sip-solana-volume-keeper-production.up.railway.app/status | jq '{role, mode, armed, sweeps, alerts}'
+curl -s https://sip-solana-scheduler-production.up.railway.app/status | jq '{role, dispatch, vaults: .fleet.queue.bySystem, due: .fleet.queue.due, workers: [.fleet.workers[]? | select(.stoppedAt == null) | {kind, heartbeatAgeMs}], alerts: .alerts.firing}'
 ```
 
 ---
@@ -401,7 +400,7 @@ Never `git grep -n -I -E '\bSIP\b'`: git's regex engine has no `\b`, so that pat
 
 <div align="center">
 
-**[Open the app](https://sip-website-oficial.vercel.app)** · **[Leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-keeper-production.up.railway.app/status)**
+**[Open the app](https://sip-website-oficial.vercel.app)** · **[Leaderboard](https://sip-website-oficial.vercel.app/leaderboard)** · **[@SaverFi](https://x.com/SaverFi)** · **[The program on Solscan](https://solscan.io/account/6kA9H9zQT6PW5xWkXoAFCS3NotxarzaYqj66mjMf9w4J)** · **[Keeper status](https://sip-solana-scheduler-production.up.railway.app/status)**
 
 <sub>Built on Solana. Beta — the program is upgradeable and the vault holds real value.</sub>
 

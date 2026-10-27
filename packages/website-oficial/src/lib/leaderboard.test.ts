@@ -165,10 +165,10 @@ describe("fetching it", () => {
   it("never throws, whatever the network does", async () => {
     const thrown = Object.assign(new Error("timed out"), { name: "TimeoutError" });
     const timeout = await fetchLeaderboard(env, vi.fn().mockRejectedValue(thrown) as unknown as typeof fetch);
-    expect(timeout).toEqual({ ok: false, detail: "the keeper did not answer in time" });
+    expect(timeout).toEqual({ ok: false, detail: "the rankings service did not answer in time" });
 
     const refused = await fetchLeaderboard(env, vi.fn().mockRejectedValue(new Error("ECONNREFUSED 10.0.0.1:8080")) as unknown as typeof fetch);
-    expect(refused).toEqual({ ok: false, detail: "the keeper could not be reached" });
+    expect(refused).toEqual({ ok: false, detail: "the rankings service could not be reached" });
     // No upstream text, and no address, reaches a visitor.
     expect(refused.ok === false && refused.detail).not.toContain("10.0.0.1");
   });
@@ -204,7 +204,7 @@ describe("fetching the raw answer", () => {
       failure: "not-ready",
       detail: "this keeper has no database",
     });
-    expect(await fetchLeaderboardBody(env, answering(new Response("nope", { status: 500 })))).toEqual({ ok: false, failure: "refused", detail: "the keeper answered 500" });
+    expect(await fetchLeaderboardBody(env, answering(new Response("nope", { status: 500 })))).toEqual({ ok: false, failure: "refused", detail: "the rankings service answered 500" });
     const thrown = Object.assign(new Error("timed out"), { name: "TimeoutError" });
     expect(await fetchLeaderboardBody(env, vi.fn().mockRejectedValue(thrown) as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "timeout" });
     expect(await fetchLeaderboardBody(env, vi.fn().mockRejectedValue(new Error("ECONNREFUSED")) as unknown as typeof fetch)).toMatchObject({ ok: false, failure: "unreachable" });
@@ -214,6 +214,38 @@ describe("fetching the raw answer", () => {
     const fetchImpl = vi.fn();
     await fetchLeaderboardBody({}, fetchImpl as unknown as typeof fetch);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE VARIABLE KEEPS ITS NAME; THE SENTENCES NAME NO KEEPER. Vercel carries
+ * SIP_SOLANA_KEEPER_URL, which now points at the dispatcher's scheduler (the same
+ * /leaderboard). A failure that said "the keeper" would send whoever reads it,
+ * on the page or in /api/leaderboard, to a service that may be stopped.
+ */
+describe("naming the source", () => {
+  it("reads SIP_SOLANA_KEEPER_URL, and no failure of its own says 'keeper' outside that name", async () => {
+    expect(KEEPER_URL_VARIABLE).toBe("SIP_SOLANA_KEEPER_URL");
+    const env = { [KEEPER_URL_VARIABLE]: "https://rankings.example.test" };
+    const answering = (response: Response) => vi.fn().mockResolvedValue(response) as unknown as typeof fetch;
+    const failing = (error: Error) => vi.fn().mockRejectedValue(error) as unknown as typeof fetch;
+    const endpoints = [{}, { [KEEPER_URL_VARIABLE]: "not a url" }, { [KEEPER_URL_VARIABLE]: "https://u:p@rankings.example.test" }, { [KEEPER_URL_VARIABLE]: "http://rankings.example.test" }].map(
+      (variables) => leaderboardEndpoint(variables),
+    );
+    const reads = [
+      await fetchLeaderboard(env, answering(new Response("nope", { status: 500 }))),
+      await fetchLeaderboard(env, answering(Response.json({ boards: {} }))),
+      await fetchLeaderboard(env, failing(Object.assign(new Error("timed out"), { name: "TimeoutError" }))),
+      await fetchLeaderboard(env, failing(new Error("ECONNREFUSED"))),
+    ];
+    const details = [...endpoints, ...reads].map((answer) => (answer.ok ? null : answer.detail));
+    expect(details).toHaveLength(8);
+    for (const detail of details) {
+      expect(detail).not.toBeNull();
+      expect(detail?.replaceAll(KEEPER_URL_VARIABLE, "")).not.toMatch(/keeper/i);
+    }
+    expect(details[0]).toBe("no rankings service is configured: set SIP_SOLANA_KEEPER_URL to its public URL");
+    expect(details[5]).toBe("the rankings service's answer was not a leaderboard this build understands");
   });
 });
 

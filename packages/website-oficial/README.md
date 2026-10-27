@@ -41,8 +41,11 @@ variable, and how to obtain it, is described in [`.env.example`](.env.example).
 
 - **Required:** `PRIVY_APP_ID`, `SIP_SOLANA_RPC_URLS` (server-side only: it
   carries an API key), `SIP_SOLANA_PROGRAM_ID`, `SIP_TRUSTED_CLIENT_IP_HEADER`.
-- **Optional:** `SIP_SOLANA_KEEPER_URL` (the keeper's public URL; without it
-  `/leaderboard` says the rankings are unavailable and names the variable);
+- **Optional:** `SIP_SOLANA_KEEPER_URL` (the public URL of the service that
+  serves `/leaderboard`: the scheduler, `sip-solana-scheduler`, which serves the
+  same board as the legacy keeper and outlives it; the variable keeps its old
+  name. Without it `/leaderboard` says the rankings are unavailable and names
+  the variable);
   `SIP_SOLANA_PUBLIC_WS_URL`; `SIP_SOLANA_PRIVY_SIGNER_ID` and
   `SIP_SOLANA_PRIVY_POLICY_ID`, both or neither; `PRIVY_CLIENT_ID`; and the
   budgets `SIP_SOLANA_RELAY_PER_MIN`, `SIP_SOLANA_RELAY_SIGNING_GLOBAL_PER_MIN`,
