@@ -839,7 +839,7 @@ contenedor nuevo es un proceso más que el traspaso tiene que ver); para un vaul
 beneficio tiene que llevar antes `SIP_SOLANA_CARRY_STORE=dual` u `on` (sección 9): una pérdida que solo está en su
 memoria no la vería la cola y cobraría de más el siguiente trade ganador, y el comando se niega a armar ese vault (con
 `dual`, también mientras una escritura de esa pérdida en Postgres haya fallado: el aviso `carry-store`). Para volver
-atrás un vault de beneficio hará falta `on` (10.5).
+atrás un vault de beneficio hará falta `on` (10.5), y por eso `flota-prod` pide directamente `on` antes de traspasar uno.
 
 **Desde qué carpeta.** Las dos herramientas de abajo corren desde un checkout en `origin/main` con `node_modules`: hoy
 `~/ProyectosCT/SIP-dispatch`. **No las corras desde `~/ProyectosCT/SIP`**: puede estar en un commit viejo (el 27-oct
@@ -925,17 +925,18 @@ recibos y 150 bloques; lo que hace está en `scheduler.autoArm` de su `/status`,
 que haber leído el vault, así que márcalas cuando hayas comprobado en Railway que sus contenedores ya no existen
 (`H gone --stale`, pasados 15 min sin leer). `H new-vaults legacy` lo deshace para los vaults que aún no tengan fila.
 Si queda un vault `legacy` con un enlace vivo, o `fleet.new_vault_system` sigue en `legacy`, mientras los vigilantes de
-siempre están retirados (`SIP_SOLANA_LEGACY_ROLES=none`) o ninguno ha leído en 15 min, el scheduler avisa al momento y a
-los 30 min despierta (`legacy-orphaned`; lo que ve está en `fleet.legacy` de su `/status`): sin los vigilantes de
-siempre, nadie liquida ni compra para esos usuarios. Termina el traspaso con `flota-prod traspasar-todos` y
+siempre están retirados (`SIP_SOLANA_LEGACY_ROLES=none`) o uno de los que espera (los dos, sin la variable) lleva 15 min
+sin leer actuando, el scheduler avisa al momento y a los 30 min despierta (`legacy-orphaned`; lo que ve está en
+`fleet.legacy` de su `/status`, también por rol): sin el de beneficio nadie compra ni liquida los vaults de beneficio, y
+sin el de volumen nadie liquida los de volumen. Termina el traspaso con `flota-prod traspasar-todos` y
 `flota-prod nuevos-a-la-cola`, o vuelve a arrancar los vigilantes (y quita `none`). Con `flota-prod`, `new-vaults` es
 `nuevos-a-la-cola` (se niega si el scheduler no se arma solo) y `nuevos-a-los-de-siempre` (se niega si los dos
 vigilantes de siempre no están leyendo).
 
 **Ver y desaparcar.** `H status --all` lista todas las filas de `vault_work`, también las `legacy`, con su último
 resultado, `parked_reason` y `webhookOwner`. Un vault que el scheduler aparcó (`vault-parked`: 5 reclamaciones seguidas
-sin terminar) no lo toma ningún worker hasta `H unpark <vault>`: borra `parked_reason`, pone `attempts` a 0 y lo deja
-vencido ya. Solo actúa si está aparcado; úsalo después de arreglar la causa. Con `flota-prod`: `flota` y
+sin terminar) no lo toma ningún worker hasta `H unpark <vault>`, y el aviso se repite cada 30 min mientras siga aparcado:
+`unpark` borra `parked_reason`, pone `attempts` a 0 y lo deja vencido ya. Solo actúa si está aparcado; úsalo después de arreglar la causa. Con `flota-prod`: `flota` y
 `desaparcar <vault>`.
 
 ### 10.6 Si salta `credit-burn` con el despachador
@@ -986,8 +987,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
    - `"$F" flota`. En «Keepers de siempre» cada recibo dice `vivo` o `viejo` y su id; en «Sus páginas», los dos
      vigilantes contestan y están «actuando».
    - Pasados 15 min desde el despliegue, mira en Railway (cada vigilante → *Deployments*) que solo quede activo el
-     nuevo, y `"$F" marcar-idos-viejos`: marca todos los recibos que llevan más de 15 min sin leer, y antes te pregunta
-     si lo has comprobado. Uno solo: `"$F" marcar-ido <id>` (no marca uno que haya leído hace menos de 2 min y medio).
+     nuevo, y `"$F" marcar-idos-viejos`: te enseña los recibos que llevan más de 15 min sin leer, te pregunta si lo has
+     comprobado y marca esos (no uno que haya dejado de leer mientras contestabas, ni uno que haya vuelto a leer). Uno solo: `"$F" marcar-ido <id>` (no marca uno que haya leído hace menos de 2 min y medio).
    - **Comprobar**: `flota` ya no enseña ningún recibo `viejo`, y su lista «Siguiente:» no pide `marcar-idos-viejos`.
    - **Deshacer**: no hace falta: un recibo marcado como ido que vuelve a leer se desmarca solo.
 
@@ -1020,14 +1021,16 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
 
 4. **Los vaults que quedan, a la cola: `"$F" traspasar-todos`.** El 27-oct eran dos, de beneficio: `D5J5o2gS…` y
    `4J3En7ug…`. Antes de tocar cada vault, la herramienta comprueba que los dos vigilantes han leído hace menos de 2 min
-   y medio, encendidos y actuando, que ningún recibo sin marcar ha dejado de leer sin soltar ese vault y que ningún
-   otro vault está «pasando»; si no, se niega y dice qué hacer. Luego los pasa uno detrás de otro, cada uno entero antes del siguiente (2–4 min cada uno: los recibos de
+   y medio, encendidos y actuando, que ningún recibo sin marcar ha dejado de leer sin soltar ese vault, que ninguno guarda
+   solo en su memoria una pérdida de ese vault, que el de beneficio lleva `on` (paso 3) y que ningún otro vault está
+   «pasando»; si no, se niega y dice qué hacer. Luego los pasa uno detrás de otro, cada uno entero antes del siguiente (2–4 min cada uno: los recibos de
    los dos vigilantes y 150 bloques), y para en el primero que no pueda. Mientras un vault está «pasando», nadie lo
    cobra ni compra; los que aún no ha tocado siguen servidos por los vigilantes de siempre.
    - **Comprobar**: termina con «LISTO: todos los vaults están en el sistema nuevo.»; en `flota` todos dicen «sistema
      nuevo» y, al rato, su último trabajo; en el `/status` del scheduler, `fleet.queue.bySystem` ya no tiene `legacy`.
-   - **Si para a medias**: el vault que se quedó «pasando» no lo sirve nadie. Termínalo con `"$F" traspasar <vault>` o
-     devuélvelo con `"$F" volver <vault>`.
+   - **Si para a medias** (también si lo cortas con Ctrl-C: lo dice antes de salir): el vault que se quedó «pasando» no
+     lo sirve nadie. Termínalo con `"$F" traspasar <vault>` o devuélvelo con `"$F" volver <vault>`; `traspasar-todos` lo
+     nombra en vez de saltárselo. Si mientras espera te pide `marcar-ido`, hazlo en otra ventana: esa sigue esperando.
    - **Deshacer**: `"$F" volver <vault>`, de uno en uno (10.5).
 
 5. **Los vaults nuevos, también a la cola.**
@@ -1053,8 +1056,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
    - **Comprobar**: en `flota`, el vault nuevo sale primero «pasando», con «el scheduler lo pasa solo», y después
      «sistema nuevo» con su primer trabajo. En el `/status` de la réplica `acting`, `scheduler.autoArm.lastResults` lo
      lista con `moved: true`. Lo normal son unos minutos: una barrida de cada vigilante de siempre (≈ 1 min), 150
-     bloques (≈ 1 min) y uno o dos ticks. A los 15 min sin pasar avisan `auto-arm-stalled` y `vault-unserved:<vault>`
-     (10.9).
+     bloques (≈ 1 min) y uno o dos ticks. A los 15 min sin pasar avisa `auto-arm-stalled`, y a los 60 despierta; el
+     `vault-unserved:<vault>` de ese vault se queda en aviso, para que un solo atasco no despierte una vez por vault (10.9).
    - **Deshacer**: no hace falta: es un vault como cualquier otro, ya en la cola. Si no pasa: 10.9, y
      `nuevos-a-los-de-siempre` hasta entender por qué.
 
@@ -1091,14 +1094,16 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
 9. **Volver atrás, desde cualquier paso.**
    - **Lo que tiene que estar antes**: `volver` y `nuevos-a-los-de-siempre` se niegan si los dos vigilantes de siempre
      no han leído la base, encendidos y actuando, en los últimos 15 min; y sin `SIP_SOLANA_DISPATCH` no la leen (10.3).
-     Y un vault de beneficio en el que un worker guardó una pérdida solo vuelve con `sip-solana-keeper` en
-     `SIP_SOLANA_CARRY_STORE=on` (10.5). Del paso 3 al 8, los dos están así.
+     Y un vault de beneficio solo vuelve con `sip-solana-keeper` en `SIP_SOLANA_CARRY_STORE=on` (10.5): `volver` se
+     niega antes de sacarlo de la cola mientras algún recibo de beneficio sin marcar no lleve `on` (el de un contenedor
+     que ya no existe: `marcar-ido`). Del paso 3 al 8, los dos están así.
+   - **Si hiciste el paso 8.1, primero quita `SIP_SOLANA_LEGACY_ROLES` del scheduler**, con los vigilantes encendidos o
+     parados: con `none`, en cuanto los vaults nuevos o uno de los de ahora vuelvan a ellos salta `legacy-orphaned`, y a
+     los 30 min despierta aunque los vigilantes estén leyendo.
    - **Si ya los paraste (paso 8)**: vuelve a encenderlos. En cada uno, comprueba en Variables que siguen
      `SIP_SOLANA_DISPATCH=on` y, en el de beneficio, `SIP_SOLANA_CARRY_STORE=on`; vuelve a conectar su fuente (el mismo
-     repositorio) y despliega. En `flota`, los dos contestan «actuando» y sus recibos nuevos están `vivo`. Quita
-     `SIP_SOLANA_LEGACY_ROLES` del scheduler: con `none`, un vault que vuelva a ellos hace saltar `legacy-orphaned`. Si
-     ya borraste el webhook de Helius, el de beneficio lo vuelve a crear él solo si lleva `SIP_SOLANA_DOORBELL_SECRET`
-     (sección 5).
+     repositorio) y despliega. En `flota`, los dos contestan «actuando» y sus recibos nuevos están `vivo`. Si ya borraste
+     el webhook de Helius, el de beneficio lo vuelve a crear él solo si lleva `SIP_SOLANA_DOORBELL_SECRET` (sección 5).
    - **Luego, en este orden**: `"$F" nuevos-a-los-de-siempre`; `"$F" volver <vault>` de cada vault, uno a uno; y, si
      quieres, quita `SIP_SOLANA_AUTO_ARM`.
    - **La web**: `SIP_SOLANA_KEEPER_URL` otra vez a `https://sip-solana-keeper-production.up.railway.app` y Redeploy,
@@ -1127,14 +1132,15 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   quieto. Una réplica colgada sale sola y la otra coge el candado; si el aviso sigue, no lo hizo. Si solo llega la de
   «[worker]», ninguna réplica lo está diciendo: lo normal es que el servicio entero esté caído. **Primero**: Railway →
   `sip-solana-scheduler` → *Deployments* y *Deploy Logs*; si no corre, redespliégalo.
-- **`vault-parked:<vault>`** («[scheduler]», crítica): el scheduler aparcó el vault porque su trabajo se cortó 5 veces
-  seguidas sin terminar. Ningún worker lo toma hasta que lo desaparques. **Primero**: `flota` (su línea dice por qué);
+- **`vault-parked:<vault>`** («[scheduler]», crítica, cada 30 min mientras siga aparcado): el scheduler aparcó el vault
+  porque su trabajo se cortó 5 veces seguidas sin terminar. Ningún worker lo toma hasta que lo desaparques. **Primero**: `flota` (su línea dice por qué);
   pásame el aviso y el detalle, y cuando la causa esté arreglada, `"$F" desaparcar <vault>`. Si se vuelve a aparcar,
   dímelo.
 - **`vault-unserved:<vault>`** («[scheduler]», aviso a los 15 min, crítica a los 60): el vault lleva ese tiempo
   «pasando»; los vigilantes de siempre lo dejan en paz y ningún worker lo toma, así que nadie lo cobra ni compra.
-  **Primero**: `flota`. Si es un vault nuevo que el scheduler pasa solo, mira `auto-arm-stalled` aquí debajo. Si no,
-  termínalo con `"$F" traspasar <vault>` o devuélvelo con `"$F" volver <vault>`.
+  **Primero**: `flota`. Si es un vault nuevo que el scheduler pasa solo (con `SIP_SOLANA_AUTO_ARM=on`), este se queda en
+  aviso y la crítica es `auto-arm-stalled`, aquí debajo. Si no, termínalo con `"$F" traspasar <vault>` o devuélvelo con
+  `"$F" volver <vault>` (que se niega si los vigilantes de siempre no están leyendo: devuelto, no lo serviría nadie).
 - **`auto-arm-stalled`** («[scheduler]», aviso a los 15 min, crítica a los 60): un vault nuevo que el scheduler apuntó
   sigue sin llegar a la cola, o el paso que los arma lleva ese tiempo fallando. **Primero**: `flota`, y en el `/status`
   de la réplica `acting`, `scheduler.autoArm.lastError` y el primer obstáculo de cada vault en
@@ -1143,11 +1149,15 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   cadena sin contestar (lo dice `lastError`).
 - **`legacy-orphaned`** («[scheduler]», aviso al momento, crítica a los 30 min): queda algún vault de los vigilantes de
   siempre con un enlace vivo, o los vaults nuevos siguen yendo a ellos, y esos vigilantes están retirados
-  (`SIP_SOLANA_LEGACY_ROLES=none`) o ninguno ha leído la base en 15 min: nadie cobra ni compra para esos usuarios. Lo
-  que ve está en `fleet.legacy`. **Primero**: `flota`. Si los paraste a propósito, termina el traspaso:
-  `"$F" nuevos-a-la-cola` y `"$F" traspasar-todos`; `traspasar` necesita a los dos vigilantes encendidos, así que
-  enciéndelos para eso (paso 9) y vuelve a pararlos después (paso 8). Si no querías pararlos, vuelve a arrancar
-  `sip-solana-keeper` y `sip-solana-volume-keeper` (y quita `none`).
+  (`SIP_SOLANA_LEGACY_ROLES=none`) o uno de ellos lleva 15 min sin leer la base actuando. El aviso dice cuál, y qué deja
+  de hacerse: sin el de beneficio (`sip-solana-keeper`) nadie compra para esos usuarios ni liquida sus vaults de
+  beneficio, aunque el de volumen siga leyendo; sin el de volumen, nadie liquida sus vaults de volumen. Si los dos están
+  parados, nadie cobra ni compra para ellos. Con `none` y los dos todavía leyendo, aún los sirven: el aviso es de lo que
+  pasará cuando paren. Lo que ve está en `fleet.legacy`. **Primero**: `flota`. Si los paraste a propósito, termina el
+  traspaso: `"$F" nuevos-a-la-cola` y `"$F" traspasar-todos`; `traspasar` necesita a los dos vigilantes encendidos, así
+  que enciéndelos para eso (paso 9) y vuelve a pararlos después (paso 8). Si no querías pararlos, o estás volviendo
+  atrás, quita `SIP_SOLANA_LEGACY_ROLES` del scheduler y, si alguno está parado o falla, vuelve a arrancar
+  `sip-solana-keeper` o `sip-solana-volume-keeper` (sus *Deploy Logs* dicen por qué no lee).
 - **`job-failing:<vault>`** («[worker]», aviso el primero, crítica al tercero seguido): los trabajos del worker en ese
   vault revientan antes de terminar o pasan su techo de 6 min; mientras dure, nadie cobra ni compra para ese vault. Se
   apaga con el primer trabajo que termine. **Primero**: la línea del vault en `flota` y los *Deploy Logs* de
@@ -1156,12 +1166,20 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   seguida): la cesta de ese vault no se puede comprar y no se compra nada. Puede ser un mercado sin liquidez, una
   cesta que no cabe en la cuota de Jupiter del worker, o Jupiter rechazando las llamadas. Sin timbre en el scheduler,
   la tercera llega unos 2 min después de la primera; mientras siga, se repite cada 30 min. Se apaga con un turno que
-  compre o que falle. **Primero**: lee el detalle (en el aviso y en `flota`). Si lleva `Jupiter answered HTTP …`, mira
-  la entrada siguiente; si no, pásamelo con la hora.
+  compre o que falle. Si el detalle empieza por «the venues this basket would trade against could not be measured»
+  (Jupiter o el RPC no contestaron), se queda en aviso: es la causa de todos los vaults a la vez, y despierta una sola
+  vez como `invest-refused-upstream`. **Primero**: lee el detalle (en el aviso y en `flota`). Si lleva
+  `Jupiter answered HTTP …`, mira la entrada de Jupiter; si no, pásamelo con la hora.
+- **`invest-refused-upstream`** («[worker]», crítica): las cestas de uno o más vaults llevan tres turnos o más
+  rechazadas porque no se pudieron medir sus mercados (Jupiter o el RPC sin contestar, o contestando un error). Un solo
+  aviso para todos, con cuántos vaults y el último detalle; se repite cada 30 min y se apaga cuando esos vaults vuelven a
+  comprar (o se olvidan tras 2 h sin noticias suyas). **Primero**: el detalle; si lleva `Jupiter answered HTTP …`, la
+  entrada de Jupiter.
 - **Jupiter, con su código HTTP**: el detalle de una compra que Jupiter rechazó lleva `Jupiter answered HTTP <código>`
   (en el aviso, en `flota` y en `fleet.vaults` del `/status` del scheduler). **429**: demasiadas llamadas; **401**:
   Jupiter no acepta la clave; **400**: rechaza ese par; **5xx**: Jupiter está caído. Con `jupiter-key`, tras un 429 el
-  worker no llama a Jupiter durante 1 min, y si se repite, 2, 4… hasta 10. **Primero**, con 429 o 401: Railway →
+  worker no llama a Jupiter durante 1 min, y si se repite, 2, 4… hasta 10; vuelve a 1 min cuando una llamada hecha
+  después del último 429 recibe respuesta. **Primero**, con 429 o 401: Railway →
   `sip-solana-worker` → Variables: `SIP_SOLANA_CUTS` incluye `jupiter-key`, `SIP_SOLANA_JUPITER_API_KEY` es la clave y
   `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`; en `sip-solana-scheduler`, también `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`
   (el scheduler reparte el minuto: lo que le da al worker sale en `fleet.workers[].jupQuota`). La clave gratuita da 60
