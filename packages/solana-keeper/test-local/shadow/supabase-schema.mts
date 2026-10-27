@@ -27,7 +27,12 @@ try {
 // A LOCAL REHEARSAL ONLY: SIP_SCHEMA_TOOL_REHEARSAL=1 lets a loopback database through, nothing else.
 const rehearsal = process.env["SIP_SCHEMA_TOOL_REHEARSAL"] === "1" && parsed.hostname === "127.0.0.1";
 if (!/^postgres(?:ql)?:$/.test(parsed.protocol) || (!rehearsal && !/supabase\.(co|com)$/i.test(parsed.hostname))) {
-  say("Esa no es la base de Supabase de producción (la DATABASE_URL de sip-solana-keeper en Railway). No he tocado nada.");
+  // THE HOST IS NOT A SECRET (the password is): saying which server the url named is what tells a wrong copy apart.
+  const host = parsed.hostname || "(ninguno)";
+  const railway = /\.railway\.internal$|\.rlwy\.net$|\.proxy\.rlwy\.net$/i.test(host);
+  say(`Esa dirección apunta a «${host}», que no es Supabase. No he tocado nada.`);
+  if (railway) say("Es una base de Railway: seguramente la copiaste de «Postgres», del repartidor o de los trabajadores. La buena está en el servicio sip-solana-keeper.");
+  say("La de producción es la DATABASE_URL del servicio sip-solana-keeper (Railway → sip-solana-keeper → Variables), y su servidor termina en supabase.com.");
   process.exit(2);
 }
 if (!rehearsal && (parsed.port || "5432") !== "5432") {
