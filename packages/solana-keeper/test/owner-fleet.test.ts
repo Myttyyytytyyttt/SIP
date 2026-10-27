@@ -6,6 +6,9 @@
 // The rehearsal against a real Postgres, with the tool itself as a child
 // process, is test/owner-fleet-pg.test.ts.
 
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { TurnInvest, TurnSettle } from "../src/doorbell.js";
 import { Handover, LEGACY_READ_FRESH_MS, type HandoverPool } from "../src/handover.js";
@@ -18,6 +21,7 @@ import {
   SERVER_WORDS,
   agoWords,
   armProgress,
+  autoArmable,
   checkDatabaseUrl,
   cleanLine,
   flotaLines,
@@ -532,8 +536,14 @@ describe("traspasar: what it refuses before touching anything", () => {
     expect(problems).toEqual([`el vault DrainVau… está a medio pasar: termínalo primero («traspasar DrainVau») o devuélvelo («volver DrainVau»)`]);
     // THE DRAINING ONE ITSELF may be finished.
     expect(moveProblems(busy, DRAINING, false)).toEqual([]);
-    // A SCHEDULER THAT ARMS BY ITSELF is most likely moving a new vault: wait.
-    expect(moveProblems(busy, LEGACY_A, false, true)).toEqual(["el vault DrainVau… está a medio pasar, seguramente uno nuevo que el scheduler pasa solo: espera unos minutos y vuelve a probar"]);
+    // A SCHEDULER THAT ARMS BY ITSELF moves its own untouched enrolment: wait.
+    const enrolled = fleet({ vaults: [...fleet().vaults, vault(DRAINING, "draining", { fence: "0" })] });
+    expect(moveProblems(enrolled, LEGACY_A, false, true)).toEqual(["el vault DrainVau… está a medio pasar, seguramente uno nuevo que el scheduler pasa solo: espera unos minutos y vuelve a probar"]);
+    // ... BUT NEVER ONE AN OPERATOR DRAINED (system_at stamped): that one is the owner's to finish, auto-arm or not.
+    const drainedByHand = fleet({ vaults: [...fleet().vaults, vault(DRAINING, "draining", { fence: "0", systemAt: "2026-10-27T07:00:00.000Z" })] });
+    expect(moveProblems(drainedByHand, LEGACY_A, false, true)).toEqual([`el vault DrainVau… está a medio pasar: termínalo primero («traspasar DrainVau») o devuélvelo («volver DrainVau»)`]);
+    // ... NOR ONE WHOSE FENCE THE CLI DID NOT REPORT (an older CLI): unknown is not the scheduler's.
+    expect(moveProblems(busy, LEGACY_A, false, true)[0]).toContain("termínalo primero");
   });
 
   it("refuses a role that is not reading now, or reading dry outside a rehearsal", () => {
@@ -597,7 +607,7 @@ describe("waiting on arm and release", () => {
     expect(releaseProgress({ vault: "V", system: null, moved: false, blockers: ["vault_work has no row for this vault: it is already the legacy keepers'"] })).toEqual({ kind: "done" });
     const back = releaseProgress({ vault: "V", system: "queue", moved: false, blockers: [] });
     expect(back).toMatchObject({ kind: "stop" });
-    expect((back as { readonly lines: readonly string[] }).lines.join(" ")).toContain("el scheduler lo ha armado otra vez");
+    expect((back as { readonly lines: readonly string[] }).lines.join(" ")).toContain("lo ha pasado otro (el scheduler, si era un vault nuevo, u otro «traspasar» a la vez)");
     expect(releaseProgress({ vault: "V", system: "draining", moved: false, blockers: ["worker w still holds it (lease until x): wait"] })).toEqual({
       kind: "wait",
       note: "un trabajador lo tiene entre manos; espera a que termine (como mucho 6 min desde que lo tomó)",
@@ -712,6 +722,30 @@ describe("the scheduler's page, read", () => {
     expect(readSchedulerPage(withAutoArm({ enabled: false, pending: 3 })).autoArm).toMatchObject({ enabled: false, pending: 3, legacyRoles: null, lastResults: [] });
     // PRESENT BUT NOT AN OBJECT is not "enabled".
     expect(readSchedulerPage(withAutoArm("yes")).autoArm).toBeNull();
+  });
+
+  it("reads the scheduler's own summary of each arm (src/auto-arm.ts AutoArmResult: moved, and the first blocker)", () => {
+    const page = readSchedulerPage(
+      withAutoArm({
+        enabled: true,
+        legacyRoles: ["profit", "volume"],
+        pending: 1,
+        oldestWaitingMs: 90_000,
+        lastArmedAt: null,
+        armed: 1,
+        lastResults: [
+          { vault: DRAINING, moved: false, blocker: "waiting for the finalized height to pass 1150 (now 1100)", at: "2026-10-27T07:59:00.000Z" },
+          { vault: PARKED, moved: true, at: "2026-10-27T07:58:00.000Z" },
+        ],
+        lastError: null,
+        failingSince: null,
+      }),
+    );
+    expect(page.autoArm?.lastResults).toEqual([
+      { vault: DRAINING, system: null, blockers: ["waiting for the finalized height to pass 1150 (now 1100)"] },
+      { vault: PARKED, system: "queue", blockers: [] },
+    ]);
+    expect(page.autoArm?.pending).toBe(1);
   });
 
   it("reads a page that has not read the fleet yet, and a page that is not a page", () => {
@@ -875,16 +909,33 @@ describe("flota: the screen", () => {
     expect(nextSteps(view(db))).toEqual(["Para ver todos los vaults hace falta la versión nueva de dispatch-handover (status --all)."]);
   });
 
-  it("a vault in transit: nobody serves it unless the scheduler arms by itself, and then its last word", () => {
-    const db = fleet({ vaults: [vault(OWNER_VAULT, "queue"), vault(DRAINING, "draining")] });
+  it("a vault in transit: nobody serves it unless the scheduler arms by itself AND it is the scheduler's own enrolment, and then its last word", () => {
+    const db = fleet({ vaults: [vault(OWNER_VAULT, "queue"), vault(DRAINING, "draining", { fence: "0" })] });
     expect(flotaLines(view(db))).toContain("             nadie lo cobra ni compra hasta que termine: «traspasar DrainVau» para acabar, o «volver DrainVau»");
     expect(nextSteps(view(db))[0]).toBe("DrainVau… está a medio pasar y nadie lo sirve: «traspasar DrainVau» o «volver DrainVau».");
     const auto = answered(
-      readSchedulerPage(withAutoArm({ enabled: true, legacyRoles: [], lastResults: [{ vault: DRAINING, system: "draining", blockers: ["waiting for the finalized height to pass 1150 (now 1100)"] }] })),
+      readSchedulerPage(withAutoArm({ enabled: true, legacyRoles: [], lastResults: [{ vault: DRAINING, moved: false, blocker: "waiting for the finalized height to pass 1150 (now 1100)" }] })),
     );
     const queued = { ...db, newVaultSystem: "queue" };
     expect(flotaLines(view(queued, auto))).toContain("             el scheduler lo pasa solo: esperando a que pasen los bloques (faltan 51 bloques)");
     expect(nextSteps(view(queued, auto))).toEqual([]);
+    // A VAULT AN OPERATOR DRAINED — a «traspasar» that stopped half way — is never the scheduler's: it says nobody serves it, auto-arm or not.
+    const stuck = { ...queued, vaults: [vault(OWNER_VAULT, "queue"), vault(DRAINING, "draining", { fence: "0", systemAt: "2026-10-27T07:00:00.000Z" })] };
+    expect(flotaLines(view(stuck, auto))).toContain("             nadie lo cobra ni compra hasta que termine: «traspasar DrainVau» para acabar, o «volver DrainVau»");
+    expect(nextSteps(view(stuck, auto))).toEqual(["DrainVau… está a medio pasar y nadie lo sirve: «traspasar DrainVau» o «volver DrainVau»."]);
+    // ... and one a worker once claimed (fence above 0), or one held now, neither.
+    const claimed = { ...queued, vaults: [vault(DRAINING, "draining", { fence: "3" })] };
+    expect(nextSteps(view(claimed, auto))[0]).toContain("nadie lo sirve");
+  });
+
+  it("autoArmable mirrors the scheduler's AUTO_ARMABLE_SQL: draining, never stamped, never claimed, held by nobody", () => {
+    expect(autoArmable(vault(DRAINING, "draining", { fence: "0" }))).toBe(true);
+    expect(autoArmable(vault(DRAINING, "draining", { fence: "0", systemAt: "2026-10-27T07:00:00.000Z" }))).toBe(false);
+    expect(autoArmable(vault(DRAINING, "draining", { fence: "1" }))).toBe(false);
+    expect(autoArmable(vault(DRAINING, "draining", { fence: "0", holder: "worker:1" }))).toBe(false);
+    expect(autoArmable(vault(DRAINING, "queue", { fence: "0" }))).toBe(false);
+    // AN OLDER CLI does not report the fence: unknown is not the scheduler's.
+    expect(autoArmable(vault(DRAINING, "draining"))).toBe(false);
   });
 
   it("new vaults to the queue without a scheduler that arms says so loudly, and what to type", () => {
@@ -920,5 +971,21 @@ describe("flota: the screen", () => {
     const lines = flotaLines(view(fleet(), undefined, { keepers: { profit: { answered: false, why: "contestó 502" }, volume: keeperPage({ dispatch: null, mode: "dry", armed: false }) } }));
     expect(lines).toContain("  el keeper de beneficios: no contesta (contestó 502) — ¿parado en Railway?");
     expect(lines).toContain("  el keeper de volumen: contesta · en seco · última vuelta hace 30 s · SIN SIP_SOLANA_DISPATCH");
+  });
+});
+
+describe("dark: nothing production runs loads the owner's tool", () => {
+  // test/dispatch-dark.test.ts keeps it from the LEGACY entry points; the
+  // dispatcher's own (scheduler, worker, dispatch-handover) may reach its
+  // modules, so this says the narrower thing: NO file under bin/ or src/
+  // names owner-fleet at all — only test-local/shadow/flota-prod.mts and tests do.
+  it("no file under bin/ or src/ but owner-fleet.ts itself names it", () => {
+    const keeper = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    const files = (dir: string): string[] =>
+      readdirSync(join(keeper, dir), { withFileTypes: true }).flatMap((entry) =>
+        entry.isDirectory() ? files(join(dir, entry.name)) : /\.m?[jt]s$/.test(entry.name) ? [join(dir, entry.name)] : [],
+      );
+    const naming = [...files("bin"), ...files("src")].filter((file) => file !== join("src", "owner-fleet.ts") && readFileSync(join(keeper, file), "utf8").includes("owner-fleet"));
+    expect(naming).toEqual([]);
   });
 });

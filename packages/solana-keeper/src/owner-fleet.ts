@@ -461,6 +461,21 @@ export function whoServes(vault: VaultEntry): Server | null {
   }
 }
 
+/**
+ * WHETHER THE SCHEDULER'S AUTO-ARM WILL EVER MOVE THIS VAULT: only a row it
+ * enrolled itself and nobody has touched since — draining, system_at never
+ * stamped (every handover step stamps it, the enrolment does not), never
+ * claimed (fence 0), held by nobody (AUTO_ARMABLE_SQL, the scheduler's
+ * auto-arm). A vault an operator drained, rolled back or released — a
+ * `traspasar` that stopped half way, a `volver` that did — is NOT one: the
+ * scheduler leaves it draining for ever, served by nobody, and the screen must
+ * say so rather than "the scheduler moves it". False when the CLI did not
+ * report the fence (an older one): unknown is not "the scheduler's".
+ */
+export function autoArmable(vault: VaultEntry): boolean {
+  return vault.system === "draining" && vault.systemAt === null && vault.fence === "0" && vault.holder === null;
+}
+
 const systemWords = (system: string | null): string =>
   system === "queue" ? SERVER_WORDS.queue : system === "legacy" ? SERVER_WORDS.legacy : system === "draining" ? SERVER_WORDS.draining : (system ?? "sin fila");
 
@@ -666,9 +681,10 @@ function rolesReadingProblems(db: FleetDb, roles: readonly string[], withinMs: n
  * second vault in transit:
  *   * the vault has a vault_work row (an address nobody discovered is a typo);
  *   * NO OTHER VAULT IS DRAINING: one in transit at a time, so a stuck one is
- *     never hidden behind the next (`schedulerArms`: new vaults go to the queue
- *     and the scheduler arms by itself, so a draining one is most likely a new
- *     vault it is moving, and the advice is to wait);
+ *     never hidden behind the next (`autoArmOn`: the scheduler arms by itself,
+ *     and a draining vault it enrolled and nobody touched — autoArmable — is
+ *     one it is moving, so the advice is to wait; any other draining vault
+ *     nobody but the owner will finish);
  *   * each legacy role has a receipt read in the last FRESH_READ_MS, acting
  *     (a rehearsal's dry keepers count): it is that keeper's own receipt that
  *     lets the vault go;
@@ -676,14 +692,14 @@ function rolesReadingProblems(db: FleetDb, roles: readonly string[], withinMs: n
  *     FRESH_READ_MS) without having read THIS vault as foreign — an old
  *     container arm would wait on, which the owner marks gone after Railway.
  */
-export function moveProblems(db: FleetDb, vault: string, rehearsal: boolean, schedulerArms = false): string[] {
+export function moveProblems(db: FleetDb, vault: string, rehearsal: boolean, autoArmOn = false): string[] {
   const problems: string[] = [];
   const row = rowProblem(db, vault);
   if (row !== null) problems.push(row);
   for (const other of db.vaults) {
     if (other.vault !== vault && other.system === "draining") {
       problems.push(
-        schedulerArms
+        autoArmOn && autoArmable(other)
           ? `el vault ${short(other.vault)} está a medio pasar, seguramente uno nuevo que el scheduler pasa solo: espera unos minutos y vuelve a probar`
           : `el vault ${short(other.vault)} está a medio pasar: termínalo primero («traspasar ${other.vault.slice(0, 8)}») o devuélvelo («volver ${other.vault.slice(0, 8)}»)`,
       );
@@ -744,7 +760,12 @@ export function armProgress(result: unknown): Progress | null {
   return { kind: "wait", note: step.blockers.length === 0 ? "esperando bloques" : step.blockers.map(plainBlocker).join(" · ") };
 }
 
-/** One `release <vault>` answered: legacy (or no row, which IS legacy) is done; back in the queue is someone else arming it. */
+/**
+ * One `release <vault>` answered: legacy (or no row, which IS legacy) is done;
+ * back in the queue is someone else arming it — the scheduler, only for a new
+ * vault it enrolled and nobody had touched (a rollback stamps the row, so it
+ * never re-arms one this tool rolled back), or another `traspasar` at once.
+ */
 export function releaseProgress(result: unknown): Progress | null {
   const step = readStep(result);
   if (step === null) return null;
@@ -753,8 +774,8 @@ export function releaseProgress(result: unknown): Progress | null {
     return {
       kind: "stop",
       lines: [
-        "El vault ha vuelto a la cola mientras esperaba: el scheduler lo ha armado otra vez (se arma solo con los vaults que están «pasando»).",
-        "Para devolverlo, primero «nuevos-a-los-de-siempre» o que el scheduler deje de armarse solo, y luego «volver» otra vez.",
+        "El vault ha vuelto al sistema nuevo mientras esperaba: lo ha pasado otro (el scheduler, si era un vault nuevo, u otro «traspasar» a la vez). No sigo.",
+        "Está servido por el sistema nuevo. Si aun así quieres devolverlo, «volver» otra vez.",
       ],
     };
   }
@@ -834,11 +855,15 @@ function readAutoArm(raw: unknown): AutoArmView | null {
   const pendingVaults = Array.isArray(pendingRaw)
     ? (pendingRaw as unknown[]).flatMap((entry) => (typeof entry === "string" ? [entry] : isObject(entry) && typeof entry["vault"] === "string" ? [entry["vault"]] : []))
     : [];
+  // EITHER SHAPE OF A RESULT: a Step's own (`system`, `blockers`), or the scheduler's summary of one
+  // (src/auto-arm.ts AutoArmResult: `moved`, and `blocker`, the first thing in the way).
   const lastResults = Array.isArray(raw["lastResults"])
     ? (raw["lastResults"] as unknown[]).flatMap((entry) => {
         if (!isObject(entry) || typeof entry["vault"] !== "string") return [];
         const step = readStep(entry);
-        return [{ vault: entry["vault"], system: step?.system ?? null, blockers: step?.blockers ?? [] }];
+        const blockers = step !== null && step.blockers.length > 0 ? step.blockers : typeof entry["blocker"] === "string" ? [entry["blocker"]] : [];
+        const system = step?.system ?? (entry["moved"] === true ? "queue" : null);
+        return [{ vault: entry["vault"], system, blockers }];
       })
     : [];
   return {
@@ -957,12 +982,21 @@ export interface FlotaView {
   readonly rehearsal: boolean;
 }
 
-/** A draining vault's line: what the scheduler's last arm said about it, when it reports one. */
+/** Whether the scheduler that answered says it arms by itself. */
+const autoArmOnPage = (scheduler: PageRead<SchedulerPageView>): boolean => scheduler.answered && scheduler.page.autoArm?.enabled === true;
+
+/**
+ * A draining vault's line: the scheduler moves it only when it arms by itself
+ * AND the vault is one of its own untouched enrolments (autoArmable) — then its
+ * last word on it, when it reports one; any other draining vault is the owner's
+ * to finish, and nobody serves it until he does.
+ */
 function drainingNote(vault: VaultEntry, scheduler: PageRead<SchedulerPageView>): string {
-  const autoArm = scheduler.answered ? scheduler.page.autoArm : null;
-  const said = autoArm?.lastResults.find((entry) => entry.vault === vault.vault);
-  if (autoArm?.enabled === true && said !== undefined && said.blockers.length > 0) return `el scheduler lo pasa solo: ${plainBlocker(said.blockers[0]!)}`;
-  if (autoArm?.enabled === true) return "el scheduler lo pasa solo (unos minutos)";
+  if (autoArmOnPage(scheduler) && autoArmable(vault)) {
+    const said = scheduler.answered ? scheduler.page.autoArm?.lastResults.find((entry) => entry.vault === vault.vault) : undefined;
+    if (said !== undefined && said.blockers.length > 0) return `el scheduler lo pasa solo: ${plainBlocker(said.blockers[0]!)}`;
+    return "el scheduler lo pasa solo (unos minutos)";
+  }
   return `nadie lo cobra ni compra hasta que termine: «traspasar ${vault.vault.slice(0, 8)}» para acabar, o «volver ${vault.vault.slice(0, 8)}»`;
 }
 
@@ -1108,8 +1142,9 @@ export function nextSteps(view: FlotaView): string[] {
   const stale = staleReceipts(db);
   const legacyReading = KEEPER_ROLES.every((role) => reading(db, role, LEGACY_READ_FRESH_MS, view.rehearsal).length > 0);
   for (const vault of parked) steps.push(`${short(vault.vault)} está aparcado: «desaparcar ${vault.vault.slice(0, 8)}». Si se vuelve a aparcar, dímelo.`);
-  if (draining.length > 0 && !(autoArmOn && db.newVaultSystem === "queue")) {
-    for (const vault of draining) steps.push(`${short(vault.vault)} está a medio pasar y nadie lo sirve: «traspasar ${vault.vault.slice(0, 8)}» o «volver ${vault.vault.slice(0, 8)}».`);
+  // A DRAINING VAULT THE SCHEDULER WILL NOT MOVE (it does not arm by itself, or the vault is not its own untouched enrolment) is served by nobody.
+  for (const vault of draining) {
+    if (!(autoArmOn && autoArmable(vault))) steps.push(`${short(vault.vault)} está a medio pasar y nadie lo sirve: «traspasar ${vault.vault.slice(0, 8)}» o «volver ${vault.vault.slice(0, 8)}».`);
   }
   if (stale.length > 0) steps.push("Hay keepers que llevan más de 15 min sin leer: comprueba en Railway que esos despliegues ya no existen y haz «marcar-idos-viejos».");
   if (db.newVaultSystem === "queue" && !autoArmOn) steps.push("Los vaults nuevos van a la cola pero el scheduler no se arma solo: «nuevos-a-los-de-siempre».");

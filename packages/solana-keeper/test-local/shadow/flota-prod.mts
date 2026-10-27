@@ -35,6 +35,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import {
   CLI_FAILURES_TOLERATED,
+  autoArmable,
   FLOTA_USAGE,
   MOVE_TIMEOUT_MS,
   checkDatabaseUrl,
@@ -207,8 +208,11 @@ async function findVault(typed: string): Promise<{ readonly db: FleetDb; readonl
  * A wait: the same command again every pollMs until `decide` says done or stop,
  * MOVE_TIMEOUT_MS at most. A call that gives no result at all is tolerated
  * CLI_FAILURES_TOLERATED times in a row (a database blip, the public RPC's 429).
+ * `stranded` is where the wait leaves the vault — said when it gives up, by the
+ * clock OR by the CLI not answering: either way the vault is still «pasando»,
+ * and the owner must hear that nobody serves it and what to type.
  */
-async function waitFor(args: readonly string[], decide: (result: unknown) => Progress | null, onTimeout: readonly string[]): Promise<boolean> {
+async function waitFor(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
   const started = Date.now();
   let lastNote = "";
   let failures = 0;
@@ -220,6 +224,7 @@ async function waitFor(args: readonly string[], decide: (result: unknown) => Pro
       if (failures >= CLI_FAILURES_TOLERATED) {
         say(`     «${args[0]}» no contestó ${failures} veces seguidas:`);
         say(run.tail);
+        for (const line of stranded) say(`     ${line}`);
         return false;
       }
     } else {
@@ -235,7 +240,8 @@ async function waitFor(args: readonly string[], decide: (result: unknown) => Pro
       }
     }
     if (Date.now() - started > MOVE_TIMEOUT_MS) {
-      for (const line of onTimeout) say(`     ${line}`);
+      say("     15 minutos esperando, y no ha terminado.");
+      for (const line of stranded) say(`     ${line}`);
       return false;
     }
     await sleep(pollMs);
@@ -254,8 +260,7 @@ async function moveOne(typed: string): Promise<boolean> {
     return true;
   }
   const scheduler = await schedulerPage();
-  const schedulerArms = db.newVaultSystem === "queue" && scheduler.answered && scheduler.page.autoArm?.enabled === true;
-  const problems = moveProblems(db, vault, rehearsal, schedulerArms);
+  const problems = moveProblems(db, vault, rehearsal, scheduler.answered && scheduler.page.autoArm?.enabled === true);
   if (problems.length > 0) {
     for (const problem of problems) say(`     NO: ${problem}.`);
     say("     No he tocado nada.");
@@ -277,12 +282,19 @@ async function moveOne(typed: string): Promise<boolean> {
   }
   say("3/3  Esperando a que los keepers de siempre lo lean como ajeno y a que pasen 150 bloques (2–4 min)…");
   const moved = await waitFor(["arm", vault, ...(rehearsal ? ["--allow-dry"] : [])], armProgress, [
-    "15 minutos sin poder pasarlo. Sigue «pasando»: nadie lo cobra ni compra.",
+    "No he podido pasarlo. Sigue «pasando»: nadie lo cobra ni compra.",
     "Si un keeper no lo ha leído, mira en Railway si su despliegue aún existe; si no, «marcar-ido <id>».",
     `Para devolverlo a los keepers de siempre: «volver ${vault.slice(0, 8)}».`,
   ]);
-  if (moved) say(`LISTO: ${short(vault)} está en el sistema nuevo. Un trabajador lo toma en segundos.`);
-  return moved;
+  if (!moved) return false;
+  // A VAULT PARKED BEFORE IT LEFT THE QUEUE IS STILL PARKED: no handover step clears parked_reason, and no worker claims a parked vault.
+  if (row.parkedReason !== null) {
+    say(`OJO: ${short(vault)} está en el sistema nuevo pero sigue aparcado (${parkedWords(row.parkedReason)}): ningún trabajador lo toma.`);
+    say(`     «desaparcar ${vault.slice(0, 8)}» para que lo intenten.`);
+    return true;
+  }
+  say(`LISTO: ${short(vault)} está en el sistema nuevo. Un trabajador lo toma en segundos.`);
+  return true;
 }
 
 async function traspasarTodos(): Promise<number> {
@@ -331,9 +343,10 @@ async function volver(typed: string): Promise<number> {
     say("     No he tocado nada.");
     return 1;
   }
+  // ONLY A NEW VAULT THE SCHEDULER ENROLLED AND NOBODY TOUCHED can be armed by it while this waits (a rollback stamps the row).
   const scheduler = await schedulerPage();
-  if (db.newVaultSystem === "queue" && scheduler.answered && scheduler.page.autoArm?.enabled === true) {
-    say("     OJO: el scheduler se arma solo y podría volver a pasarlo al sistema nuevo mientras espero; si pasa, te lo digo.");
+  if (autoArmable(row) && scheduler.answered && scheduler.page.autoArm?.enabled === true) {
+    say("     OJO: es un vault nuevo que el scheduler está pasando solo; podría terminar de pasarlo mientras espero. Si pasa, te lo digo.");
   }
   if (row.system === "queue") {
     say(`     Sacando ${short(vault)} de la cola: ningún trabajador lo vuelve a tomar.`);
@@ -345,7 +358,10 @@ async function volver(typed: string): Promise<number> {
     }
   }
   say(`2/2  Esperando a que el trabajador lo suelte y a que caduque su último envío (hasta ~6 min)…`);
-  const released = await waitFor(["release", vault], releaseProgress, ["15 minutos sin poder devolverlo. Sigue «pasando»: nadie lo cobra ni compra. Dímelo."]);
+  const released = await waitFor(["release", vault], releaseProgress, [
+    "No he podido devolverlo. Sigue «pasando»: nadie lo cobra ni compra.",
+    `Vuelve a probar «volver ${vault.slice(0, 8)}» en unos minutos; si sigue igual, dímelo.`,
+  ]);
   if (!released) return 1;
   say(`LISTO: ${short(vault)} vuelve a ser de los keepers de siempre (lo atienden desde su próxima vuelta, ~1 min).`);
   return 0;
@@ -476,15 +492,16 @@ async function desaparcar(typed: string): Promise<number> {
     say("NO: esta versión de dispatch-handover todavía no sabe desaparcar (falta «unpark»). No he tocado nada.");
     return 1;
   }
+  // `ok` IS `wasParked` (dispatch-handover unpark): a vault that was not parked answers ok false with wasParked false, which is no failure.
   const result = run.result as { wasParked?: unknown } | null;
-  if (run.ok !== true || result === null) {
+  if (result !== null && result.wasParked === false) {
+    say(`${short(vault)} ya no estaba aparcado. Nada que hacer.`);
+    return 0;
+  }
+  if (run.ok !== true || result === null || result.wasParked !== true) {
     say("No se pudo:");
     say(run.tail);
     return 1;
-  }
-  if (result.wasParked === false) {
-    say(`${short(vault)} ya no estaba aparcado. Nada que hacer.`);
-    return 0;
   }
   say(`LISTO: ${short(vault)} desaparcado. Un trabajador lo vuelve a intentar en su siguiente vuelta.`);
   say("Si se vuelve a aparcar, dímelo: es un trabajo que no termina.");
