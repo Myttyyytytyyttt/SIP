@@ -3,8 +3,9 @@
 // an empty one; nothing credential-bearing is served; and /health answers per
 // role, never because an upstream answered badly.
 
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { Redactor, Secret } from "@sip/solana-log";
+import { Redactor, Secret, hex64Fingerprint } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { FleetAlerts } from "../src/fleet-alerts.js";
 import { parseFleetSnapshot, vaultDetailOf, vaultStreaksOf } from "../src/fleet-pg.js";
@@ -13,6 +14,7 @@ import {
   FleetStatusReader,
   VAULTS_LISTED,
   VAULT_DETAIL_CHARS,
+  VAULT_DETAIL_READ_CHARS,
   VAULT_DETAIL_WITHHELD,
   VAULT_STREAKS_KEYS,
   WORKER_HEARTBEAT_MS,
@@ -191,6 +193,18 @@ describe("the per-vault table (fleet.vaults) and the unserved view (fleet.unserv
     expect(SNAPSHOT.vaults[2]!.lastDetail).toBe(VAULT_DETAIL_WITHHELD);
     expect(vaultDetailOf(null)).toBeNull();
     expect(vaultDetailOf("landed; receipt read")).toBe("landed; receipt read");
+  });
+
+  it("scrubs a detail BEFORE it cuts it: a key that straddles the 200th character is masked whole, not served as its first characters", () => {
+    // NOT A REPEATING PATTERN, so its first twenty characters cannot turn up by chance in the mask's fingerprint.
+    const key = createHash("sha256").update("a key that straddles the cut").digest("hex");
+    const detail = vaultDetailOf(`${"x".repeat(VAULT_DETAIL_CHARS - 20)}${key} and then the rest of the line`)!;
+    expect(detail).toHaveLength(VAULT_DETAIL_CHARS);
+    expect(detail).not.toContain(key.slice(0, 20));
+    expect(detail.slice(VAULT_DETAIL_CHARS - 20)).toBe("<redacted:hex64:".concat(hex64Fingerprint(key)).slice(0, 20));
+    // A RUN OF BYTE VALUES PAST THE CUT still withholds the row: the nets see the text as read.
+    expect(vaultDetailOf(`${"x".repeat(VAULT_DETAIL_CHARS)} ${BYTE_RUN_TEXT}`)).toBe(VAULT_DETAIL_WITHHELD);
+    expect(VAULT_DETAIL_READ_CHARS).toBeGreaterThan(VAULT_DETAIL_CHARS);
   });
 
   it("reads the unserved view whole: draining and parked counted, each draining row's time and the column it is measured from", () => {

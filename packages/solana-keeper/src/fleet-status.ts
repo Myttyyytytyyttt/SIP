@@ -114,18 +114,33 @@ export const PARKED_LISTED = 50;
 export const VAULTS_LISTED = 500;
 
 /**
- * How much of a vault's last_detail the page carries: its first 200 characters,
- * cut in SQL so the rest never leaves the database. The text is a worker's: most
- * of its error paths pass summarizeUpstreamError with the worker's own redactor
- * before COMPLETE writes them, but some write an exception's message as it came
- * (src/settle-tick.ts's FAILED), and the scheduler serving it does not hold the
- * worker's secrets (no Privy key, no Jupiter key, no signing key: src/scheduler-config.ts
- * refuses them). So each detail is ALSO passed through scrubbedForExport here —
- * this process's redactor plus the byte-run net that catches a key nobody
- * registered — and one that does not pass is replaced by a fixed marker, rather
- * than withholding the whole page at renderFleetStatus's tripwire.
+ * How much of a vault's last_detail the page carries: its first 200 characters.
+ * The text is a worker's: most of its error paths pass summarizeUpstreamError
+ * with the worker's own redactor before COMPLETE writes them, but some write an
+ * exception's message as it came (src/settle-tick.ts's FAILED), and the
+ * scheduler serving it does not hold the worker's secrets (no Privy key, no
+ * Jupiter key, no signing key: src/scheduler-config.ts refuses them). So each
+ * detail is ALSO passed through scrubbedForExport here — this process's
+ * redactor plus the byte-run net that catches a key nobody registered — and one
+ * that does not pass is replaced by a fixed marker, rather than withholding the
+ * whole page at renderFleetStatus's tripwire.
+ *
+ * SCRUBBED FIRST, CUT AFTER. Both nets match a secret only WHOLE: a 64-hex key
+ * that starts at character 180 and is cut at 200 is twenty hex characters the
+ * mask no longer recognises, and a registered URL cut mid-key is no longer the
+ * needle. So the statement reads VAULT_DETAIL_READ_CHARS, the text is scrubbed
+ * at that length, and only the scrubbed text is cut to 200 — never the reverse.
  */
 export const VAULT_DETAIL_CHARS = 200;
+
+/**
+ * How much of a last_detail the statement reads before the scrub: more than any
+ * writer stores (a worker's job keeps 500 characters plus its soft-deadline
+ * note, src/worker-job.ts completionFor; the scheduler's own completion a fixed
+ * line), so a secret is never cut in two before the redactor sees it, and still
+ * a bound on what one row can cost the read.
+ */
+export const VAULT_DETAIL_READ_CHARS = 1_000;
 
 /** What a detail that did not pass the redactor is served as. */
 export const VAULT_DETAIL_WITHHELD = "<detail withheld: it did not pass the redactor>";

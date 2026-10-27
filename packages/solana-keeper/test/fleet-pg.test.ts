@@ -15,6 +15,7 @@
 // with the ADR's DDL stood in for Q1's tables; it is gone, so a statement here
 // that Q1's tables refuse fails this file.)
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -31,7 +32,7 @@ import {
 } from "../src/fleet-alerts.js";
 import { FLEET_COLUMNS, FLEET_SNAPSHOT_SQL, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns, parseFleetSnapshot } from "../src/fleet-pg.js";
 import { BELL_DELAY_MS, FleetReceiver, readDelivery, type FleetBellStore } from "../src/fleet-receiver.js";
-import { FleetStatusReader, VAULTS_LISTED, VAULT_DETAIL_CHARS, samplePool } from "../src/fleet-status.js";
+import { FleetStatusReader, VAULTS_LISTED, VAULT_DETAIL_CHARS, VAULT_DETAIL_READ_CHARS, samplePool } from "../src/fleet-status.js";
 import { DRAIN_SQL } from "../src/handover.js";
 import { PgSchedulerStore } from "../src/scheduler-pg.js";
 
@@ -444,7 +445,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         await client.query("BEGIN");
         // Scans are only ever a choice on ten rows; forbidden, the plan shows whether an index path exists at all.
         await client.query("SET LOCAL enable_seqscan = off");
-        const plan = (await client.query<{ "QUERY PLAN": string }>(`EXPLAIN ${FLEET_SNAPSHOT_SQL}`, [360, 50, 300, VAULTS_LISTED, VAULT_DETAIL_CHARS])).rows.map((row) => row["QUERY PLAN"]).join("\n");
+        const plan = (await client.query<{ "QUERY PLAN": string }>(`EXPLAIN ${FLEET_SNAPSHOT_SQL}`, [360, 50, 300, VAULTS_LISTED, VAULT_DETAIL_READ_CHARS])).rows.map((row) => row["QUERY PLAN"]).join("\n");
         expect(plan).toMatch(/Index (Only )?Scan using send_intent_(open|created)|Bitmap Index Scan on send_intent_(open|created)/);
         expect(plan).not.toMatch(/Seq Scan on send_intent/);
         await client.query("ROLLBACK");
@@ -453,13 +454,20 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       }
     });
 
-    it("lists every vault_work row — the unserved first, then by address — with its detail cut in the statement and its streaks", async () => {
+    it("lists every vault_work row — the unserved first, then by address — with its detail scrubbed before it is cut, and its streaks", async () => {
       await db.query(
         `UPDATE sip_solana.vault_work SET skim_mode = 0, last_detail = repeat('d', 300), last_done_at = clock_timestamp() - interval '1 minute',
                 streaks = '{"settleRetries": {"9QX53J3Kbs8ogQirZq5iN11rucZAvgF4EKWw98QAkUSe": 2}, "investRefused": 1, "secret": "never served"}'
           WHERE vault_addr = 'Q1-bell'`,
       );
+      // A KEY THAT STRADDLES THE 200TH CHARACTER, as a raw exception message could store it: read whole, masked, then cut.
+      const straddling = createHash("sha256").update("a key across the cut").digest("hex");
+      await db.query("UPDATE sip_solana.vault_work SET last_detail = repeat('y', 190) || $1 || ' and the rest' WHERE vault_addr = 'Q2-safety'", [straddling]);
       const snapshot = await new PgFleetStore(db).read();
+      const safety = snapshot.vaults.find((row) => row.vault === "Q2-safety")!.lastDetail!;
+      expect(safety).toHaveLength(VAULT_DETAIL_CHARS);
+      expect(safety).not.toContain(straddling.slice(0, 10));
+      expect(safety.slice(190)).toBe("<redacted:".slice(0, 10));
       expect(snapshot.vaults.map((row) => [row.vault, row.system])).toEqual([
         ["D1-draining", "draining"],
         ["Q6-parked", "queue"],
@@ -557,7 +565,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(full.vaults).toHaveLength(VAULTS_LISTED);
       expect(full.vaultsTruncated).toBe(608 - VAULTS_LISTED);
       expect(full.vaults.slice(0, 2).map((row) => row.vault)).toEqual(["D1-draining", "Q6-parked"]);
-      const raw = (await db.query<{ snapshot: unknown }>(FLEET_SNAPSHOT_SQL, [360, 50, 300, 1, VAULT_DETAIL_CHARS])).rows[0]!.snapshot;
+      const raw = (await db.query<{ snapshot: unknown }>(FLEET_SNAPSHOT_SQL, [360, 50, 300, 1, VAULT_DETAIL_READ_CHARS])).rows[0]!.snapshot;
       const one = parseFleetSnapshot(raw);
       expect(one.vaults.map((row) => row.vault)).toEqual(["D1-draining"]);
       expect(one.vaultsTruncated).toBe(607);

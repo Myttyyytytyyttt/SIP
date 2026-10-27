@@ -32,6 +32,7 @@ import {
   PARKED_LISTED,
   VAULTS_LISTED,
   VAULT_DETAIL_CHARS,
+  VAULT_DETAIL_READ_CHARS,
   VAULT_DETAIL_WITHHELD,
   WORKER_DEAD_AFTER_MS,
   type FleetQueue,
@@ -174,11 +175,14 @@ RETURNING old.full_pass_reason AS reason`;
  * thousand rows every FLEET_STATUS_REFRESH_MS. $1 the job ceiling and $3
  * the echo deadline, in seconds; $2 how many parked vaults are listed; $4 how
  * many vault rows (and unserved rows) are listed one by one, $5 how many
- * characters of each last_detail.
+ * characters of each last_detail are read (VAULT_DETAIL_READ_CHARS).
  *
  * `vaults` is every vault_work row, the unserved ones first, then by address,
- * capped at $4 and counted whole (`total`), with last_detail cut to $5
- * characters in the statement: the page's per-user table (VAULTS_LISTED).
+ * capped at $4 and counted whole (`total`): the page's per-user table
+ * (VAULTS_LISTED). last_detail is read up to $5 characters — more than any
+ * writer stores — and cut to VAULT_DETAIL_CHARS only AFTER the scrub
+ * (vaultDetailOf): cut first, a secret straddling the cut would reach the
+ * redactor in pieces it cannot recognise.
  *
  * `unserved` is what `vault-unserved` reads: the rows nobody acts on — draining
  * (the legacy keepers leave it, CLAIM takes only 'queue'), or parked on the
@@ -406,14 +410,17 @@ export function vaultStreaksOf(value: unknown): VaultStreaks {
 }
 
 /**
- * A last_detail as served: at most VAULT_DETAIL_CHARS (the statement already
- * cut it), through this process's redactor and the byte-run net
- * (scrubbedForExport), or the fixed marker when it does not pass.
+ * A last_detail as served: the text as read (up to VAULT_DETAIL_READ_CHARS),
+ * through this process's redactor and the byte-run net (scrubbedForExport),
+ * THEN cut to VAULT_DETAIL_CHARS — or the fixed marker when it does not pass.
+ * The order is the point: both nets recognise a secret only whole, so a cut made
+ * before them could leave the first characters of a key in what is served.
  */
 export function vaultDetailOf(value: unknown): string | null {
   const text = str(value);
   if (text === null) return null;
-  return scrubbedForExport(text.slice(0, VAULT_DETAIL_CHARS)) ?? VAULT_DETAIL_WITHHELD;
+  const scrubbed = scrubbedForExport(text);
+  return scrubbed === null ? VAULT_DETAIL_WITHHELD : scrubbed.slice(0, VAULT_DETAIL_CHARS);
 }
 
 function vaultRow(value: unknown): FleetVaultRow | null {
@@ -591,7 +598,7 @@ export class PgFleetStore implements FleetBellStore, FleetStatusSource {
       PARKED_LISTED,
       ECHO_DEADLINE_MS / 1000,
       VAULTS_LISTED,
-      VAULT_DETAIL_CHARS,
+      VAULT_DETAIL_READ_CHARS,
     ]);
     return parseFleetSnapshot(result.rows[0]?.snapshot);
   }
