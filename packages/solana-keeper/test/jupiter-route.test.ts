@@ -56,7 +56,15 @@ import {
   v0TransactionBytes,
   venueThresholdFrom,
   verifySharedAccountsRoute,
+  JUPITER_ERROR_BODY_CHARS,
+  KEYED_API,
+  LITE_API,
+  fetchJupiterQuote,
+  fetchJupiterSwapInstructions,
+  jupiterRefusal,
 } from "@sip/solana-program/jupiter-route";
+import { Secret, summarizeUpstreamError } from "@sip/solana-log";
+import { JupiterPacer, jupiterApiForTurn } from "../src/jupiter-pacer.js";
 import { venueFlags } from "@sip/solana-program/jupiter-fork-setup";
 // TYPE-ONLY, AND ON PURPOSE. It is erased at runtime — phase 3 must not run
 // because a unit test imported it — but tsc still pulls the module into this
@@ -1187,6 +1195,91 @@ describe("the builder does not spend the freshness budget on its own round trips
     expect(error).toBeInstanceOf(JupiterRouteRefusal);
     expect((error as JupiterRouteRefusal).condition).toBe("request-drift");
     expect((error as JupiterRouteRefusal).message).not.toContain("post-quote round trips");
+  });
+});
+
+describe("a call Jupiter refuses says its HTTP status first, where a 200-character summary keeps it", () => {
+  // WHY THE ORDER IS THE TEST. A refused quote reached a turn's detail and its
+  // alert through summarizeUpstreamError, whose 200 characters ended inside
+  // the 228-character quote URL the old message led with, so the status fell
+  // past the cut (the keeper's replay of the measured 429, test/accounts.test.ts).
+
+  const refused = (status: number, body: string) => {
+    const seen: { url: string; key: string | null }[] = [];
+    vi.stubGlobal("fetch", async (input: unknown, init?: RequestInit) => {
+      seen.push({ url: String(input), key: new Headers(init?.headers).get("x-api-key") });
+      return new Response(body, { status });
+    });
+    return seen;
+  };
+  const request = {
+    inputMint: new PublicKey(WSOL),
+    outputMint: new PublicKey(USDC),
+    amountIn: 50_000_000n,
+    slippageBps: 200,
+  };
+
+  /** What the call threw: it must throw. */
+  const thrown = async (call: Promise<unknown>): Promise<Error> => {
+    try {
+      await call;
+    } catch (error) {
+      if (error instanceof Error) return error;
+      throw new Error(`expected an Error, got ${String(error)}`);
+    }
+    throw new Error("expected the call to throw");
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("leads with the status, the host and the path, then Jupiter's own words, and puts the query last", async () => {
+    refused(429, JSON.stringify({ code: 429, message: "[API Gateway] Too many requests" }));
+    const error = await thrown(fetchJupiterQuote(request));
+    expect(error.message).toBe(
+      'Jupiter answered HTTP 429 at lite-api.jup.ag/swap/v1/quote: {"code":429,"message":"[API Gateway] Too many requests"} ' +
+        `(query: inputMint=${WSOL}&outputMint=${USDC}&amount=50000000&slippageBps=200&swapMode=ExactIn&restrictIntermediateTokens=true)`,
+    );
+    // THE CUT A DETAIL MAKES: the status survives it.
+    const summary = summarizeUpstreamError(error);
+    expect(summary.length).toBeLessThanOrEqual(200);
+    expect(summary).toContain("Jupiter answered HTTP 429 at lite-api.jup.ag/swap/v1/quote");
+    expect(summary).toContain("Too many requests");
+  });
+
+  it("says the status of a POST with no query, of an empty body, and of a body too long to quote", async () => {
+    refused(400, "");
+    const empty = await thrown(fetchJupiterQuote(request));
+    expect(empty.message).toMatch(/^Jupiter answered HTTP 400 at lite-api\.jup\.ag\/swap\/v1\/quote: \(no body\) \(query: /);
+    // A MULTI-LINE PAGE (a gateway's HTML 502) is folded onto one line and capped.
+    refused(502, `<html>\n  <body>\n${"x".repeat(1_000)}\n</body>\n</html>`);
+    const page = await thrown(fetchJupiterSwapInstructions({ quote: quote(), vault: new PublicKey(VAULT), vaultTarget: new PublicKey(VAULT_SPYX) }));
+    expect(page.message.startsWith("Jupiter answered HTTP 502 at lite-api.jup.ag/swap/v1/swap-instructions: <html> <body> xxx")).toBe(true);
+    expect(page.message).not.toContain("\n");
+    expect(page.message).not.toContain("(query:");
+    expect(page.message.length).toBe("Jupiter answered HTTP 502 at lite-api.jup.ag/swap/v1/swap-instructions: ".length + JUPITER_ERROR_BODY_CHARS);
+  });
+
+  it("never carries the key: the keeper's own keyed API puts it in the header, and the message is built from the URL", async () => {
+    const seen = refused(401, JSON.stringify({ error: "Unauthorized" }));
+    const key = "jupiter-test-key-0000000001";
+    // THE PRODUCTION WRAPPER (src/jupiter-pacer.ts), over a pacer that never waits.
+    const pacer = new JupiterPacer({ perMinute: 60, now: () => 0, sleep: async () => undefined });
+    const answer = pacer.reserve(1);
+    if (!answer.granted) throw new Error(answer.detail);
+    const api = jupiterApiForTurn({ baseUrl: KEYED_API, apiKey: new Secret(key, "jupiterApiKey"), pacer }, answer.reservation);
+    const error = await thrown(fetchJupiterQuote(request, api));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.key).toBe(key);
+    expect(seen[0]!.url).not.toContain(key);
+    expect(error.message.startsWith("Jupiter answered HTTP 401 at api.jup.ag/swap/v1/quote: ")).toBe(true);
+    expect(error.message).not.toContain(key);
+    expect(LITE_API).toBe("https://lite-api.jup.ag/swap/v1");
+  });
+
+  it("quotes a URL it cannot parse whole, still after the status", () => {
+    expect(jupiterRefusal("not a url", 503, "down").message).toBe("Jupiter answered HTTP 503 at not a url: down");
   });
 });
 

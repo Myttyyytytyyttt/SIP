@@ -2392,10 +2392,12 @@ describe("the ticks' first steps, over the same bytes", () => {
         "/swap/v1/quote",
       ]);
       expect(result.outcome).toBe("REFUSED");
-      // THE DETAIL CANNOT SAY 429 — summarizeUpstreamError cuts the quoted URL
-      // before the status, today as in the measurement — so the wire above is
-      // the witness, and the detail says what was refused.
-      expect(result.detail).toContain("could not be measured");
+      // THE DETAIL SAYS 429. In the measurement it could not: the error quoted
+      // the 228-character URL first and summarizeUpstreamError's 200 characters
+      // ended inside it. jupiterRefusal (jupiter-route.ts) leads with the status
+      // and the path and puts the query last, so the status survives the cut
+      // and the wire above and the detail now agree.
+      expect(result.detail).toContain("could not be measured: Error: Jupiter answered HTTP 429 at lite-api.jup.ag/swap/v1/quote: ");
       expect(result.detail).toContain("refusing the whole basket");
       // BEFORE THE WRAP, as the doctrine says — but having spent seven calls of
       // an organisation's budget on a basket it then refused.

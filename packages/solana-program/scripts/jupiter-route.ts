@@ -721,11 +721,48 @@ export interface JupiterSwapInstructions {
   readonly addressLookupTableAddresses?: readonly string[] | null;
 }
 
+/** How much of a refused call's body its error quotes. */
+export const JUPITER_ERROR_BODY_CHARS = 300;
+
+/**
+ * The error a call Jupiter refused throws: the STATUS FIRST, then the host and
+ * path, then the body (whitespace folded, at most JUPITER_ERROR_BODY_CHARS), and
+ * the query string LAST.
+ *
+ * IN THAT ORDER BECAUSE THE FRONT IS ALL THAT SURVIVES. A turn's detail and its
+ * alerts carry this through summarizeUpstreamError (@sip/solana-log), which
+ * keeps 200 characters by default; the old "<url> answered <status>: <body>"
+ * led with the URL, and a quote's URL — two mints, an amount and four flags —
+ * is 228 characters in the keeper's jupiter-turn-run2 fixture, so a refused
+ * quote's status fell past the cut. A REFUSED basket then said it "could not
+ * be measured" and quoted most of a URL, with nothing to tell whether Jupiter
+ * had throttled it (429), refused the pair (400) or was down (5xx): three
+ * different mornings. The keeper's replay of that turn (test/accounts.test.ts)
+ * now asserts the 429 in the detail.
+ *
+ * NOTHING SECRET IS IN IT. The key travels only in the `x-api-key` header
+ * (JupiterApi), never in the URL, so neither the path nor the query quoted
+ * here can carry it; the body is Jupiter's own words.
+ */
+export function jupiterRefusal(url: string, status: number, body: string): Error {
+  let where = url;
+  let query = "";
+  try {
+    const parsed = new URL(url);
+    where = `${parsed.host}${parsed.pathname}`;
+    query = parsed.search.slice(1);
+  } catch {
+    // Not a URL this file built: quoted whole, after the status all the same.
+  }
+  const said = body.replace(/\s+/g, " ").trim().slice(0, JUPITER_ERROR_BODY_CHARS);
+  return new Error(`Jupiter answered HTTP ${status} at ${where}: ${said === "" ? "(no body)" : said}${query === "" ? "" : ` (query: ${query})`}`);
+}
+
 async function getJson(url: string, init?: RequestInit, api?: JupiterApi): Promise<unknown> {
   const options = { ...init, signal: AbortSignal.timeout(25_000) };
   const response = api?.fetch === undefined ? await fetch(url, options) : await api.fetch(url, options);
   const text = await response.text();
-  if (!response.ok) throw new Error(`${url} answered ${response.status}: ${text.slice(0, 400)}`);
+  if (!response.ok) throw jupiterRefusal(url, response.status, text);
   return JSON.parse(text) as unknown;
 }
 

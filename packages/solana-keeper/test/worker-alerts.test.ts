@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { INVEST_FAILED_CRITICAL_STREAK, WRAP_SHORT_ALERT_STREAK } from "../src/invest-decision.js";
 import { SETTLE_RETRY_CRITICAL_AFTER } from "../src/settle-decision.js";
-import { SETTLE_KEY_ALERT_KEY, investRefusedAlert, jobAlerts } from "../src/worker-alerts.js";
+import { Secret } from "@sip/solana-log";
+import { createAlerter, type AlertSeverity } from "../src/alerts.js";
+import { INVEST_REFUSED_CRITICAL_STREAK, SETTLE_KEY_ALERT_KEY, investRefusedAlert, jobAlerts } from "../src/worker-alerts.js";
 import { completionFor, readStreaks, type JobEnd, type JobReport, type JobStreaks, type LinkTurn } from "../src/worker-job.js";
 
 const VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
@@ -101,10 +103,71 @@ describe("the vault's invest, once a job", () => {
     expect(keys(jobAlerts(done({ settles: [], invest: { outcome: "INVESTED", detail: "" } }))).clear).toContain(`invest-refused:${VAULT}`);
   });
 
-  it("raises a refused basket in the legacy keeper's exact shape", () => {
+  it("raises a refused basket in the legacy keeper's exact shape while the refusal is new", () => {
     const refused = jobAlerts(done({ settles: [], invest: { outcome: "REFUSED", detail: "a leg is too thin" } }));
     expect(refused.fire).toContainEqual(investRefusedAlert(VAULT, "a leg is too thin"));
     expect(investRefusedAlert(VAULT, "x")).toEqual({ key: `invest-refused:${VAULT}`, severity: "warn", title: "A basket cannot be bought", detail: "x", context: { vault: VAULT } });
+    expect(investRefusedAlert(VAULT, "x", INVEST_REFUSED_CRITICAL_STREAK - 1)).toEqual(investRefusedAlert(VAULT, "x"));
+  });
+
+  it("pages a refusal that persists: critical on the third REFUSED job in a row, counted in the row across jobs, with no clear before it", () => {
+    expect(INVEST_REFUSED_CRITICAL_STREAK).toBe(3);
+    const severities: string[] = [];
+    let previous = NONE;
+    for (let job = 1; job <= 4; job++) {
+      const end = done({ settles: [], invest: { outcome: "REFUSED", detail: "a leg is too thin" }, previous });
+      const rules = keys(jobAlerts(end));
+      expect(rules.clear, `job ${job}`).not.toContain(`invest-refused:${VAULT}`);
+      severities.push(...rules.fire.filter(([key]) => key === `invest-refused:${VAULT}`).map(([, severity]) => severity as string));
+      previous = readStreaks(end.kind === "complete" ? end.completion.streaks : {});
+    }
+    expect(severities).toEqual(["warn", "warn", "critical", "critical"]);
+    expect(previous.investRefused).toBe(4);
+    const third = investRefusedAlert(VAULT, "a leg is too thin", 3);
+    expect(third).toEqual({
+      key: `invest-refused:${VAULT}`,
+      severity: "critical",
+      title: "A vault's basket keeps being refused",
+      detail: "3 refused turns in a row, nothing bought: a leg is too thin",
+      context: { vault: VAULT },
+    });
+  });
+
+  it("does not let a deferral end the run, and starts again from a warn after a turn that bought", () => {
+    // A DEFERRED turn attempted nothing: the streak holds, so the next refusal is the third.
+    const deferred = done({ settles: [], invest: { outcome: "DEFERRED", detail: "the Jupiter budget is short" }, previous: readStreaks({ investRefused: 2 }) });
+    const held = readStreaks(deferred.kind === "complete" ? deferred.completion.streaks : {});
+    expect(held.investRefused).toBe(2);
+    expect(keys(jobAlerts(done({ settles: [], invest: { outcome: "REFUSED", detail: "x" }, previous: held }))).fire).toContainEqual([`invest-refused:${VAULT}`, "critical"]);
+    // A BUY clears the alert and the streak: the next refusal is a first one.
+    const bought = done({ settles: [], invest: { outcome: "INVESTED", detail: "" }, previous: readStreaks({ investRefused: 5 }) });
+    expect(keys(jobAlerts(bought)).clear).toContain(`invest-refused:${VAULT}`);
+    const after = readStreaks(bought.kind === "complete" ? bought.completion.streaks : {});
+    expect(keys(jobAlerts(done({ settles: [], invest: { outcome: "REFUSED", detail: "x" }, previous: after }))).fire).toContainEqual([`invest-refused:${VAULT}`, "warn"]);
+  });
+
+  it("reaches a critical-only destination on the third refusal, through the alerter's escalation, and not before", () => {
+    // THE ALERTER AS bin/worker.mts BUILDS IT, on a destination that takes critical only, with REFUSED's own spacing (5 min, then 10).
+    let now = 0;
+    const posted: { severity: AlertSeverity; key: string }[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      minSeverity: "critical",
+      now: () => now,
+      post: async (_url, body) => void posted.push(JSON.parse(body) as { severity: AlertSeverity; key: string }),
+      log: () => undefined,
+    });
+    let previous = NONE;
+    for (const at of [0, 5 * 60_000, 15 * 60_000, 35 * 60_000]) {
+      now = at;
+      const end = done({ settles: [], invest: { outcome: "REFUSED", detail: "a leg is too thin" }, previous });
+      const rules = jobAlerts(end);
+      for (const key of rules.clear) alerter.clear(key);
+      for (const alert of rules.fire) alerter.fire(alert);
+      previous = readStreaks(end.kind === "complete" ? end.completion.streaks : {});
+    }
+    // ONE PAGE: the third job's critical; the fourth, 20 minutes on, is a repeat inside the window.
+    expect(posted.map((body) => [body.key, body.severity])).toEqual([[`invest-refused:${VAULT}`, "critical"]]);
   });
 
   it("tells a crank that stays short of the vault on the third short turn, from the turn's own wrap report", () => {

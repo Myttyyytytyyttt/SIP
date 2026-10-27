@@ -232,8 +232,10 @@ export class JupiterBackoffError extends Error {
  * ONE PER PROCESS, AND THE SWEEP IS ITS ONLY USER. Turns run one at a time
  * (bin/keeper.mts's `cycleRunning`), so a reservation is normally the only one
  * outstanding; the bookkeeping still counts outstanding reservations, so two
- * concurrent turns — the dispatcher's workers reuse this — cannot both be
- * granted the same calls.
+ * concurrent turns — the dispatcher's workers reuse this, two slots to a
+ * process — cannot both be granted the same calls, and the spacing hands each
+ * call its own slot before it sleeps (_beforeCall), so neither can their calls
+ * leave together.
  *
  * THE DISPATCHER'S WORKERS SHARE ONE ORGANISATION'S MINUTE, so each is handed a
  * share of it (worker.jup_quota, src/rpc-quota.ts) and RETUNES its pacer to that
@@ -259,7 +261,10 @@ export class JupiterPacer {
   /** When each call of the last minute left, oldest first. */
   #spent: number[] = [];
   #outstanding = 0;
+  /** The next slot a call may claim (_beforeCall): moved a gap on by every call before it sleeps. */
   #nextCallAt = 0;
+  /** When the last call really left: the gap is measured from it as well as from the slot. */
+  #lastCallAt = Number.NEGATIVE_INFINITY;
   #blockedUntil = 0;
   #backoffMs = JUPITER_BACKOFF_BASE_MS;
   #reservations = 0;
@@ -378,20 +383,63 @@ export class JupiterPacer {
     return { granted: false, reason, retryInMs, detail };
   }
 
-  /** @internal — JupiterReservation's: wait for the spacing, then count the call. Throws, sending nothing, while backed off. */
+  /**
+   * @internal — JupiterReservation's: wait for the spacing, then count the call.
+   * Throws, sending nothing, while backed off.
+   *
+   * THE SLOT IS CLAIMED BEFORE THE SLEEP. A worker runs two buying turns in one
+   * process (SIP_SOLANA_WORKER_SLOTS=2) on this one pacer. Reading the next-call
+   * time, sleeping, and only then moving it on let both turns read the same
+   * time, sleep to it side by side and leave TOGETHER — two calls 0 ms apart,
+   * the very burst the spacing exists to prevent (test/jupiter-pacer.test.ts,
+   * "two buying turns in one process"). Now each call takes the next free slot
+   * and moves it a gap on before it awaits anything, so the second turn's call
+   * is handed the slot after the first's: one queue, in the order they asked.
+   * For one turn it is exactly the old spacing: the first call at once, each
+   * next one a gap after the last.
+   *
+   * A SLOT IS WHEN A CALL MAY LEAVE, NOT A PROMISE THAT NOTHING ELSE DID. A timer
+   * that fires late — the other slot's turn building and signing a transaction
+   * holds the event loop — wakes a call after a LATER slot's call has already
+   * left, and leaving then would put two calls inside one gap. So a woken call
+   * leaves only if the last call that really left is a whole gap behind, checked
+   * with nothing awaited between that check and counting the call; overtaken,
+   * it takes the next free slot like any new call — behind the calls already
+   * queued, not tied with each of them in turn, so one late wake cannot hold a
+   * turn back until the other has spent its whole basket. A wake that comes
+   * EARLY sleeps out the rest of its own slot.
+   *
+   * A CLAIMED SLOT THAT MEETS A BACKOFF IS NOT HANDED BACK: the call throws and
+   * the slot stays spent. The next call waits one gap more than it needed —
+   * nothing, beside the minute a 429 blocks new turns for.
+   */
   async _beforeCall(reservation: JupiterReservation): Promise<void> {
-    const before = this.#now();
-    if (before < this.#blockedUntil) throw new JupiterBackoffError(this.#blockedUntil, before);
-    const wait = this.#nextCallAt - before;
-    if (wait > 0) await this.#sleep(wait);
-    const now = this.#now();
+    let now = this.#now();
     if (now < this.#blockedUntil) throw new JupiterBackoffError(this.#blockedUntil, now);
+    let slot = this.#claimSlot(now);
+    for (;;) {
+      if (now < slot) {
+        await this.#sleep(slot - now);
+        now = this.#now();
+        if (now < this.#blockedUntil) throw new JupiterBackoffError(this.#blockedUntil, now);
+        continue;
+      }
+      if (now >= this.#lastCallAt + this.#minGapMs) break;
+      slot = this.#claimSlot(now);
+    }
     this.#prune(now);
     this.#spent.push(now);
-    this.#nextCallAt = now + this.minGapMs;
+    this.#lastCallAt = now;
     this.#calls += 1;
     if (reservation._take()) this.#outstanding -= 1;
     else this.#overdrawn += 1;
+  }
+
+  /** The next free slot from `now`: never before a queued slot, nor within a gap of the last call that left. Moves the queue a gap on. */
+  #claimSlot(now: number): number {
+    const slot = Math.max(now, this.#nextCallAt, this.#lastCallAt + this.#minGapMs);
+    this.#nextCallAt = slot + this.#minGapMs;
+    return slot;
   }
 
   /** @internal — a 429 seen on a paced call: block new turns for the backoff step, never less than Jupiter's own reset. */
