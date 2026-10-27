@@ -1,5 +1,5 @@
 // The dispatcher's alerts (src/fleet-alerts.ts): every threshold the ADR sets
-// (§6.3) and the two the cut-over added, pinned on the pure rules, and who
+// (§6.3) and the three the cut-over added, pinned on the pure rules, and who
 // raises what on the evaluator.
 
 import { Secret } from "@sip/solana-log";
@@ -19,6 +19,7 @@ import {
   SCHEDULER_STALE_AFTER_MS,
   SCHEDULER_STALE_ALERT_KEY,
   SchedulerStaleWatch,
+  VAULT_PARKED_ALERT_PREFIX,
   VAULT_UNSERVED_CRITICAL_MS,
   VAULT_UNSERVED_WARN_MS,
   fenceRejectAlert,
@@ -29,10 +30,13 @@ import {
   pgSaturatedAlert,
   queueLagAlert,
   schedulerStaleAlert,
+  silentLegacyRoles,
+  vaultParkedKey,
   vaultUnservedAlert,
   vaultUnservedKey,
 } from "../src/fleet-alerts.js";
-import type { FleetLegacy, FleetSnapshot, FleetUnserved, FleetWorkerRow, UnservedVault } from "../src/fleet-status.js";
+import { AUTO_ARM_ALERT_KEY, AutoArm } from "../src/auto-arm.js";
+import type { FleetLegacy, FleetQueue, FleetSnapshot, FleetUnserved, FleetWorkerRow, UnservedVault } from "../src/fleet-status.js";
 import { LEGACY_READ_FRESH_MS } from "../src/handover.js";
 
 const WINDOW = 60_000;
@@ -65,6 +69,7 @@ function snapshot(
     due: number;
     tickAgeMs: number | null;
     unserved: FleetUnserved;
+    parked: FleetQueue["parked"];
     legacy: FleetLegacy | null;
   }> = {},
 ): FleetSnapshot {
@@ -86,7 +91,7 @@ function snapshot(
       due: over.due ?? 0,
       oldestDueMs: over.oldestDueMs ?? null,
       leases: { held: 0, expired: 0, overCeiling: 0, takeovers: 0, claimLagP50Ms: null, claimLagP90Ms: null },
-      parked: { count: 0, vaults: [] },
+      parked: over.parked ?? { count: 0, vaults: [] },
       outcomes: {},
     },
     sends: { open: 0, oldestOpenAgeMs: null, unechoed: 0, lastHour: [] },
@@ -110,7 +115,7 @@ const unserved = (rows: UnservedVault[], counts: Partial<{ draining: number; par
   vaults: rows,
 });
 
-function evaluator(legacy: { readonly retired: boolean } | null = null) {
+function evaluator(legacy: { readonly retired: boolean; readonly roles?: readonly string[] } | null = null, autoArm = false) {
   let now = T0;
   const fired: Alert[] = [];
   const clearedKeys: string[] = [];
@@ -118,6 +123,7 @@ function evaluator(legacy: { readonly retired: boolean } | null = null) {
     alerter: { fire: (alert) => fired.push(alert), clear: (key) => clearedKeys.push(key) },
     windowMs: WINDOW,
     legacy,
+    autoArm,
     now: () => now,
   });
   return {
@@ -175,7 +181,10 @@ describe("the rules, at the ADR's thresholds (§6.3)", () => {
     expect(warn.detail).toContain("since the scheduler enrolled it");
     expect(warn.detail).toContain("dispatch-handover arm");
     expect(warn.detail).toContain("dispatch-handover release");
-    expect(warn.context).toEqual({ vault: VAULT_A, forMs: VAULT_UNSERVED_WARN_MS + 1, from: "due_at" });
+    // RELEASE IS A WAY BACK ONLY WHILE THE LEGACY KEEPERS READ: the page says so, and names the owner's tool that checks.
+    expect(warn.detail).toContain("only while they read");
+    expect(warn.detail).toContain("flota-prod volver");
+    expect(warn.context).toEqual({ vault: VAULT_A, forMs: VAULT_UNSERVED_WARN_MS + 1, from: "due_at", autoArmPages: false });
     expect(vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_CRITICAL_MS, from: "system_at" }).fire?.severity).toBe("warn");
     const page = vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_CRITICAL_MS + 1, from: "system_at" }).fire!;
     expect(page.severity).toBe("critical");
@@ -301,11 +310,71 @@ describe("vault-unserved on the evaluator", () => {
     expect(alerts.status().firing).toEqual([]);
   });
 
-  it("never pages a parked queue row from here: vault-parked already did, when the reap parked it", () => {
+  it("never pages a parked queue row as vault-unserved: it pages as vault-parked, from the parked list", () => {
     const { alerts, keys } = evaluator();
     alerts.observeSnapshot(snapshot({ unserved: unserved([parkedRow(VAULT_A), parkedRow(VAULT_B)]) }), { acting: true });
     expect(keys()).toEqual([]);
     expect(alerts.status().unservedOldestMs).toBeNull();
+  });
+
+  it("keeps a vault the scheduler enrolled at a warn while the auto-arm runs: auto-arm-stalled is that stall's page", () => {
+    // THE RULE: enrolled (due_at) and the scheduler arming by itself — a warn however long; drained by a handover — the page.
+    const enrolled = vaultUnservedAlert({ vault: VAULT_A, forMs: 2 * VAULT_UNSERVED_CRITICAL_MS, from: "due_at", autoArmPages: true }).fire!;
+    expect(enrolled.severity).toBe("warn");
+    expect(enrolled.detail).toContain("auto-arm-stalled");
+    expect(vaultUnservedAlert({ vault: VAULT_A, forMs: 2 * VAULT_UNSERVED_CRITICAL_MS, from: "system_at", autoArmPages: true }).fire?.severity).toBe("critical");
+    expect(vaultUnservedAlert({ vault: VAULT_A, forMs: 2 * VAULT_UNSERVED_CRITICAL_MS, from: "due_at" }).fire?.severity).toBe("critical");
+    // ON THE EVALUATOR: the same split, by the row's clock.
+    const { alerts, keys } = evaluator(null, true);
+    alerts.observeSnapshot(
+      snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_CRITICAL_MS + 1, "due_at"), draining(VAULT_B, VAULT_UNSERVED_CRITICAL_MS + 1, "system_at")]) }),
+      { acting: true },
+    );
+    expect(keys().sort()).toEqual([`vault-unserved:${VAULT_A}:warn`, `vault-unserved:${VAULT_B}:critical`].sort());
+  });
+
+  it("pages ONE stall once per repeat window however many new vaults wait on it: auto-arm-stalled alone, through one alerter", async () => {
+    const stuck = async (n: number) => {
+      let t = 0;
+      const posted: { at: number; key: string }[] = [];
+      const alerter = createAlerter({
+        webhookUrl: new Secret("https://alerts.example.test/hook", "alertWebhook"),
+        minSeverity: "critical",
+        log: () => undefined,
+        post: async (_url, body) => {
+          posted.push({ at: t / MIN, key: (JSON.parse(body) as { key: string }).key });
+        },
+        now: () => t,
+      });
+      const vaults = Array.from({ length: n }, (_, i) => `NewVau1t${i}`.padEnd(44, "1"));
+      const fleet = new FleetAlerts({ alerter, windowMs: WINDOW, legacy: { retired: false }, autoArm: true, now: () => t });
+      const autoArm = new AutoArm({
+        enabled: true,
+        legacyRoles: ["profit", "volume"],
+        store: { pending: async () => ({ total: n, rows: vaults.map((vault) => ({ vault, waitingMs: t })) }) },
+        handover: {
+          arm: async (vault: string) => ({ vault, system: "draining" as const, moved: false, blockers: ["legacy process old-p (profit) has not yet read this vault as not its own"] }),
+        },
+        heights: async () => ({ processed: 1_000n, finalized: 990n }),
+        log: () => undefined,
+        now: () => t,
+      });
+      for (let minute = 0; minute <= 125; minute++) {
+        t = minute * MIN;
+        // THE SCHEDULER'S TICK, applied as Scheduler.#autoArm applies it, then the reader's snapshot.
+        const tick = await autoArm.step();
+        if (tick.alert.fire !== null) alerter.fire(tick.alert.fire);
+        else if (tick.alert.clear) alerter.clear(AUTO_ARM_ALERT_KEY);
+        fleet.observeSnapshot(snapshot({ unserved: unserved(vaults.map((vault) => draining(vault, t, "due_at"))) }), { acting: true });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return posted;
+    };
+    for (const n of [1, 3]) {
+      const posted = await stuck(n);
+      expect(posted.map((page) => page.key)).toEqual([AUTO_ARM_ALERT_KEY, AUTO_ARM_ALERT_KEY, AUTO_ARM_ALERT_KEY]);
+      expect(posted.map((page) => page.at)).toEqual([60, 90, 120]);
+    }
   });
 
   it("keeps a page standing for a vault the list left out when the list was cut at the cap, and clears it once a whole list omits it", () => {
@@ -413,7 +482,15 @@ describe("scheduler-stale from a worker (SchedulerStaleWatch)", () => {
 });
 
 /** fleet.legacy as FLEET_SNAPSHOT_SQL counts it; by default the cut-over's end state: nothing legacy, keepers stopped and marked gone. */
-const legacyBlock = (over: Partial<FleetLegacy> = {}): FleetLegacy => ({ vaults: 0, newVaultSystem: "queue", receipts: 0, fresh: 0, lastReadAgeMs: 2 * 24 * 60 * 60_000, ...over });
+const legacyBlock = (over: Partial<FleetLegacy> = {}): FleetLegacy => ({
+  vaults: 0,
+  newVaultSystem: "queue",
+  receipts: 0,
+  fresh: 0,
+  lastReadAgeMs: 2 * 24 * 60 * 60_000,
+  roles: null,
+  ...over,
+});
 const MIN = 60_000;
 
 describe("legacy-orphaned: vaults the legacy keepers alone serve, while they are retired or silent", () => {
@@ -475,7 +552,8 @@ describe("legacy-orphaned: vaults the legacy keepers alone serve, while they are
 
     const down = legacyOrphanedAlert({ legacy: legacyBlock({ newVaultSystem: "legacy", receipts: 2, fresh: 0, lastReadAgeMs: 17 * MIN }), retired: false, observedForMs: 0 }).fire!;
     expect(down.detail).toContain("fleet.new_vault_system is 'legacy'");
-    expect(down.detail).toContain("no legacy keeper has read in 15 min");
+    expect(down.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min");
+    expect(down.detail).toContain("the volume keeper (sip-solana-volume-keeper) has not read while acting in 15 min");
     expect(down.detail).toContain("nobody settles or buys for new users");
     expect(down.detail).not.toContain("unset SIP_SOLANA_LEGACY_ROLES");
     expect(down.detail).not.toContain("still 'legacy' (vault_work.system)");
@@ -546,5 +624,140 @@ describe("legacy-orphaned on the evaluator", () => {
     expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:warn`]);
     expect(clearedKeys).not.toContain(LEGACY_ORPHANED_ALERT_KEY);
     expect(alerts.status().firing).toEqual([LEGACY_ORPHANED_ALERT_KEY]);
+  });
+});
+
+describe("legacy-orphaned by role: each watched role's keeper must be acting", () => {
+  /** Two legacy vaults, the profit keeper's receipt 20 min old and the volume keeper's fresh: today's `fresh` is 1. */
+  const profitDown = (profitAgeMs = 20 * MIN) =>
+    legacyBlock({
+      vaults: 2,
+      receipts: 2,
+      fresh: 1,
+      lastReadAgeMs: 30_000,
+      roles: { profit: { acting: 0, lastReadAgeMs: profitAgeMs }, volume: { acting: 1, lastReadAgeMs: 30_000 } },
+    });
+
+  it("holds when the profit keeper is silent though the volume keeper still reads — the one that buys is down", () => {
+    expect(silentLegacyRoles(profitDown())).toEqual(["profit"]);
+    expect(legacyOrphaned(profitDown(), false)).toBe(true);
+    // BEFORE THE ROLES, one fresh receipt of either kept it quiet: the same counts without the block.
+    expect(legacyOrphaned({ ...profitDown(), roles: null }, false)).toBe(false);
+    // A SCHEDULER THAT WAITS ONLY ON THE PROFIT KEEPER watches only it.
+    const volumeDown = legacyBlock({ vaults: 2, fresh: 1, roles: { profit: { acting: 1, lastReadAgeMs: 30_000 }, volume: { acting: 0, lastReadAgeMs: 40 * MIN } } });
+    expect(legacyOrphaned(volumeDown, false, ["profit"])).toBe(false);
+    expect(legacyOrphaned(volumeDown, false)).toBe(true);
+    // A KEEPER READING WITHOUT ACTING (not holding its claim, its carry store not ready) is not serving.
+    const dry = legacyBlock({ vaults: 1, fresh: 2, roles: { profit: { acting: 0, lastReadAgeMs: 20_000 }, volume: { acting: 1, lastReadAgeMs: 20_000 } } });
+    expect(legacyOrphaned(dry, false)).toBe(true);
+    // A ROLE THAT NEVER WROTE A RECEIPT is silent.
+    expect(silentLegacyRoles(legacyBlock({ roles: { volume: { acting: 1, lastReadAgeMs: 1_000 } } }))).toEqual(["profit"]);
+  });
+
+  it("is timed from the silent role's own last read, not the other role's, and names the silent one and what nobody does", () => {
+    expect(legacyOrphanedForMs({ legacy: profitDown(20 * MIN), retired: false, observedForMs: 0 })).toBe(20 * MIN);
+    expect(legacyOrphanedAlert({ legacy: profitDown(20 * MIN), retired: false, observedForMs: 0 }).fire?.severity).toBe("warn");
+    const page = legacyOrphanedAlert({ legacy: profitDown(LEGACY_ORPHANED_CRITICAL_MS + MIN), retired: false, observedForMs: 0 }).fire!;
+    expect(page.severity).toBe("critical");
+    expect(page.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min (its last read was 31 min ago)");
+    expect(page.detail).toContain("the volume keeper (sip-solana-volume-keeper) still acts, but for those users nobody buys, and nobody settles a PROFIT vault");
+    expect(page.detail).not.toContain("the volume keeper (sip-solana-volume-keeper) has not read");
+    expect(page.context).toMatchObject({ silentRoles: ["profit"], fresh: 1 });
+
+    const volumeDown = legacyOrphanedAlert({
+      legacy: legacyBlock({ vaults: 1, fresh: 1, roles: { profit: { acting: 1, lastReadAgeMs: 30_000 }, volume: { acting: 0, lastReadAgeMs: 16 * MIN } } }),
+      retired: false,
+      observedForMs: 0,
+    }).fire!;
+    expect(volumeDown.detail).toContain("the profit keeper (sip-solana-keeper) still acts, but for that user nobody settles a VOLUME vault");
+  });
+
+  it("pages on the evaluator with the scheduler's roles, and clears once the profit keeper acts again", () => {
+    const { alerts, keys, clearedKeys } = evaluator({ retired: false, roles: ["profit", "volume"] });
+    alerts.observeSnapshot(snapshot({ legacy: profitDown(LEGACY_ORPHANED_CRITICAL_MS) }), { acting: true });
+    expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:critical`]);
+    const back = legacyBlock({ vaults: 2, fresh: 2, roles: { profit: { acting: 1, lastReadAgeMs: 5_000 }, volume: { acting: 1, lastReadAgeMs: 30_000 } } });
+    alerts.observeSnapshot(snapshot({ legacy: back }), { acting: true });
+    expect(clearedKeys).toContain(LEGACY_ORPHANED_ALERT_KEY);
+    // SIP_SOLANA_LEGACY_ROLES=profit: a silent volume keeper is not this scheduler's to page.
+    const onlyProfit = evaluator({ retired: false, roles: ["profit"] });
+    onlyProfit.alerts.observeSnapshot(
+      snapshot({ legacy: legacyBlock({ vaults: 2, fresh: 1, roles: { profit: { acting: 1, lastReadAgeMs: 5_000 }, volume: { acting: 0, lastReadAgeMs: 99 * MIN } } }) }),
+      { acting: true },
+    );
+    expect(onlyProfit.keys()).toEqual([]);
+  });
+
+  it("says which clock is which when a vault is handed to keepers that stopped days ago: it pages at once, and claims no duration it did not see", () => {
+    // RETIRED THREE DAYS AGO, receipts marked gone; then a raw `release` makes one vault 'legacy' again.
+    const handed = legacyOrphanedAlert({ legacy: legacyBlock({ vaults: 1, fresh: 0, lastReadAgeMs: 3 * 24 * 60 * MIN }), retired: true, observedForMs: 0 }).fire!;
+    expect(handed.severity).toBe("critical");
+    expect(handed.title).toBe("Users are left to legacy keepers that are retired or not acting");
+    expect(handed.detail).toContain("none has read in 15 min (the last read was 4320 min ago)");
+    expect(handed.detail).toContain("This scheduler has seen it for 0 min.");
+    expect(handed.detail).not.toContain("has held for");
+  });
+});
+
+describe("vault-parked: a parked queue row pages for as long as it stays parked", () => {
+  const PARKED_REASON = "its lease lapsed 5 claims in a row without a completion: a job that never ends";
+  const parked = (rows: { vault: string; system: string | null }[], count = rows.length): FleetQueue["parked"] => ({
+    count,
+    vaults: rows.map((row) => ({ ...row, reason: PARKED_REASON, attempts: 5 })),
+  });
+
+  it("raises the reap's own key for every parked QUEUE row each snapshot lists, and clears it once a whole list no longer has it", () => {
+    expect(vaultParkedKey(VAULT_A)).toBe(`${VAULT_PARKED_ALERT_PREFIX}:${VAULT_A}`);
+    const { alerts, keys, clearedKeys, fired } = evaluator();
+    // A PARKED ROW THAT WAS RELEASED is the legacy keepers' to serve; one rolled back pages as vault-unserved.
+    alerts.observeSnapshot(snapshot({ parked: parked([{ vault: VAULT_A, system: "queue" }, { vault: VAULT_B, system: "legacy" }]) }), { acting: true });
+    expect(keys()).toEqual([`vault-parked:${VAULT_A}:critical`]);
+    expect(fired[0]!.detail).toContain("flota-prod desaparcar");
+    // EVERY SNAPSHOT RAISES IT AGAIN: the alerter's dedup and 30-minute repeat decide what leaves.
+    alerts.observeSnapshot(snapshot({ parked: parked([{ vault: VAULT_A, system: "queue" }]) }), { acting: true });
+    expect(keys()).toEqual([`vault-parked:${VAULT_A}:critical`, `vault-parked:${VAULT_A}:critical`]);
+    // TWO PARKED, NONE LISTED (past the cap): A may be among them, so its page stands.
+    alerts.observeSnapshot(snapshot({ parked: parked([], 2) }), { acting: true });
+    expect(clearedKeys).not.toContain(vaultParkedKey(VAULT_A));
+    // desaparcar: the whole list no longer has it.
+    alerts.observeSnapshot(snapshot({ parked: parked([]) }), { acting: true });
+    expect(clearedKeys).toContain(vaultParkedKey(VAULT_A));
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("is the lock holder's only, and a holder that stops acting hands it back", () => {
+    const { alerts, keys, clearedKeys } = evaluator();
+    const one = snapshot({ parked: parked([{ vault: VAULT_A, system: "queue" }]) });
+    alerts.observeSnapshot(one, { acting: false });
+    expect(keys()).toEqual([]);
+    alerts.observeSnapshot(one, { acting: true });
+    alerts.observeSnapshot(one, { acting: false });
+    expect(clearedKeys).toContain(vaultParkedKey(VAULT_A));
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("pages every 30 minutes for a vault parked a whole day, where the reap alone paged once", async () => {
+    let t = 0;
+    const posted: { at: number; key: string }[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://alerts.example.test/hook", "alertWebhook"),
+      minSeverity: "critical",
+      log: () => undefined,
+      post: async (_url, body) => {
+        posted.push({ at: t / MIN, key: (JSON.parse(body) as { key: string }).key });
+      },
+      now: () => t,
+    });
+    // MINUTE 0: the reap parks it and pages, as src/scheduler.ts does.
+    alerter.fire({ key: vaultParkedKey(VAULT_A), severity: "critical", title: "The scheduler parked a vault: its jobs never complete", detail: "parked" });
+    const fleet = new FleetAlerts({ alerter, windowMs: WINDOW, now: () => t });
+    for (let minute = 1; minute <= 24 * 60; minute++) {
+      t = minute * MIN;
+      fleet.observeSnapshot(snapshot({ parked: parked([{ vault: VAULT_A, system: "queue" }]) }), { acting: true });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(posted.every((page) => page.key === vaultParkedKey(VAULT_A))).toBe(true);
+    expect(posted.map((page) => page.at).slice(0, 4)).toEqual([0, 30, 60, 90]);
+    expect(posted).toHaveLength(49);
   });
 });

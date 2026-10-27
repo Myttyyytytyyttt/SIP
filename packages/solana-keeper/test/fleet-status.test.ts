@@ -98,7 +98,14 @@ const RAW = {
       { vault: "VaultOddFrom", system: "draining", forMs: 5, from: "whatever", parkedReason: null },
     ],
   },
-  legacy: { vaults: 2, newVaultSystem: "legacy", receipts: 3, fresh: "1", lastReadAgeMs: 45_000 },
+  legacy: {
+    vaults: 2,
+    newVaultSystem: "legacy",
+    receipts: 3,
+    fresh: "1",
+    lastReadAgeMs: 45_000,
+    roles: { profit: { acting: "0", lastReadAgeMs: 1_200_000 }, volume: { acting: 1, lastReadAgeMs: 45_000 }, odd: "not an object" },
+  },
 };
 
 const SNAPSHOT: FleetSnapshot = parseFleetSnapshot(RAW);
@@ -155,13 +162,23 @@ describe("the snapshot as the statement returns it", () => {
   });
 
   it("serves the legacy keepers' side (fleet.legacy): the vaults still theirs, where new vaults go, and their receipts", () => {
-    expect(SNAPSHOT.legacy).toEqual({ vaults: 2, newVaultSystem: "legacy", receipts: 3, fresh: 1, lastReadAgeMs: 45_000 });
+    // PER ROLE, as legacy-orphaned decides: a count as numeric text is a count, and a row that is not an object counts nothing.
+    expect(SNAPSHOT.legacy).toEqual({
+      vaults: 2,
+      newVaultSystem: "legacy",
+      receipts: 3,
+      fresh: 1,
+      lastReadAgeMs: 45_000,
+      roles: { profit: { acting: 0, lastReadAgeMs: 1_200_000 }, volume: { acting: 1, lastReadAgeMs: 45_000 }, odd: { acting: 0, lastReadAgeMs: null } },
+    });
+    // AN UNREAD ROLES BLOCK IS NO EVIDENCE: null, so the rule reads `fresh` as it did before the block existed.
     expect(parseFleetSnapshot({ legacy: { vaults: 0, newVaultSystem: null, receipts: 0, fresh: 0, lastReadAgeMs: null } }).legacy).toEqual({
       vaults: 0,
       newVaultSystem: null,
       receipts: 0,
       fresh: 0,
       lastReadAgeMs: null,
+      roles: null,
     });
   });
 });

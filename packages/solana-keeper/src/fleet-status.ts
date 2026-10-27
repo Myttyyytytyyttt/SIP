@@ -209,8 +209,8 @@ export interface UnservedVault {
 /**
  * THE VAULTS NOBODY SERVES, counted whole and listed longest first: what
  * `vault-unserved` reads (src/fleet-alerts.ts). A parked queue row is counted and
- * listed here too, but pages only as `vault-parked`, which the scheduler raises
- * when its reap parks it (src/scheduler.ts) — never a second time from here.
+ * listed here too, but pages as `vault-parked`, from FleetQueue.parked, which
+ * lists it whatever the draining rows ahead of it here.
  */
 export interface FleetUnserved {
   /** Rows with system = 'draining': the legacy keepers leave them, and no worker claims them. */
@@ -240,6 +240,21 @@ export interface FleetLegacy {
   /** Of those, the ones read within LEGACY_READ_FRESH_MS (15 minutes, src/handover.ts): legacy keepers reading lately. */
   readonly fresh: number;
   /** How long ago any legacy keeper last read, gone or not, by the database's clock; null when none ever has. */
+  readonly lastReadAgeMs: number | null;
+  /**
+   * The same per legacy role (legacy_process.role), which is what legacy-orphaned
+   * decides by: one role's keeper down is its vaults unserved however fresh the
+   * other's receipt is. `acting`: receipts not marked gone that read within
+   * LEGACY_READ_FRESH_MS while acting (`live`); `lastReadAgeMs`: the role's newest
+   * read, gone or not. A role that never wrote a receipt is absent. Null when the
+   * statement returned no such block (no evidence, never a role of zeros).
+   */
+  readonly roles: Readonly<Record<string, LegacyRoleReads>> | null;
+}
+
+/** One legacy role's receipts, as FleetLegacy.roles counts them. */
+export interface LegacyRoleReads {
+  readonly acting: number;
   readonly lastReadAgeMs: number | null;
 }
 
@@ -341,7 +356,11 @@ export interface FleetQueue {
   /** The longest any claimable row has waited past its due time: what `queue-lag` reads. */
   readonly oldestDueMs: number | null;
   readonly leases: FleetLeases;
-  readonly parked: { readonly count: number; readonly vaults: readonly { readonly vault: string; readonly reason: string; readonly attempts: number }[] };
+  /** Rows with a parked_reason, counted whole, listed by address up to PARKED_LISTED; `system` null when the row did not say. */
+  readonly parked: {
+    readonly count: number;
+    readonly vaults: readonly { readonly vault: string; readonly reason: string; readonly attempts: number; readonly system: string | null }[];
+  };
   /** Queue vaults by their last job's outcome ("none" before the first). */
   readonly outcomes: Readonly<Record<string, number>>;
 }

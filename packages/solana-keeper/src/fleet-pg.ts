@@ -47,6 +47,7 @@ import {
   type FleetWorkerRow,
   type LaneLag,
   type LeaseExpiry,
+  type LegacyRoleReads,
   type UnservedVault,
   type VaultStreaks,
   type WorkerStats,
@@ -91,7 +92,7 @@ export const FLEET_COLUMNS = {
   worker: ["worker_id", "kind", "version", "started_at", "heartbeat_at", "slots", "busy", "rps_quota", "jup_quota", "quota_at", "stopped_at", "stats"],
   fleet: ["id", "scheduler_id", "tick_at", "full_pass_reason", "board_dirty_at", "discovery_ok_at", "new_vault_system"],
   loss_carry: ["link_addr"],
-  legacy_process: ["read_at", "gone_at"],
+  legacy_process: ["read_at", "gone_at", "role", "live"],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
@@ -197,9 +198,12 @@ RETURNING old.full_pass_reason AS reason`;
  * — where fleet.new_vault_system sends a new vault, and the legacy keepers'
  * receipts: those not marked gone, those of them read within
  * LEGACY_READ_FRESH_MS (the complement of `dispatch-handover gone --stale`), and
- * the newest read of any. One more count over vault_work, each 'legacy' row
- * checked against keeper_link (indexed by vault for its live links);
- * legacy_process holds one row per legacy container.
+ * the newest read of any; and the same per role, counting only the receipts that
+ * read while acting (`live`) — the rule decides by role, since the volume keeper
+ * reading says nothing of whether anybody buys (src/fleet-alerts.ts). One more
+ * count over vault_work, each 'legacy' row checked against keeper_link (indexed
+ * by vault for its live links); legacy_process holds one row per legacy
+ * container, so its two scans are a handful of rows.
  *
  * HOW LONG A VAULT HAS BEEN DRAINING, WITHOUT A NEW COLUMN. A handover writes
  * system_at whenever it changes `system` (DRAIN_SQL, ROLLBACK_SQL, arm's move,
@@ -285,8 +289,8 @@ SELECT json_build_object(
                'claimLagP90Ms', round(percentile_cont(0.9) WITHIN GROUP (ORDER BY extract(epoch FROM v.claimed_at - v.due_at) * 1000)))
                FROM ${S}.vault_work v WHERE v.holder IS NOT NULL),
   'parked', (SELECT json_build_object('count', count(*), 'vaults', coalesce(
-                (SELECT json_agg(json_build_object('vault', p.vault_addr, 'reason', p.parked_reason, 'attempts', p.attempts) ORDER BY p.vault_addr)
-                   FROM (SELECT vault_addr, parked_reason, attempts FROM ${S}.vault_work
+                (SELECT json_agg(json_build_object('vault', p.vault_addr, 'reason', p.parked_reason, 'attempts', p.attempts, 'system', p.system) ORDER BY p.vault_addr)
+                   FROM (SELECT vault_addr, parked_reason, attempts, system FROM ${S}.vault_work
                           WHERE parked_reason IS NOT NULL ORDER BY vault_addr LIMIT $2) p), '[]'::json))
                FROM ${S}.vault_work WHERE parked_reason IS NOT NULL),
   'outcomes', (SELECT coalesce(json_object_agg(o.outcome, o.n), '{}'::json)
@@ -340,7 +344,13 @@ SELECT json_build_object(
                'newVaultSystem', (SELECT f.new_vault_system FROM ${S}.fleet f WHERE f.id),
                'receipts', count(*) FILTER (WHERE p.gone_at IS NULL),
                'fresh', count(*) FILTER (WHERE p.gone_at IS NULL AND p.read_at >= t.now - interval '${LEGACY_READ_FRESH_MS / 1000} seconds'),
-               'lastReadAgeMs', round(extract(epoch FROM t.now - max(p.read_at)) * 1000))
+               'lastReadAgeMs', round(extract(epoch FROM t.now - max(p.read_at)) * 1000),
+               'roles', (SELECT coalesce(json_object_agg(r.role, json_build_object('acting', r.acting, 'lastReadAgeMs', r.age_ms)), '{}'::json)
+                           FROM (SELECT q.role,
+                                        count(*) FILTER (WHERE q.gone_at IS NULL AND q.live
+                                                           AND q.read_at >= t.now - interval '${LEGACY_READ_FRESH_MS / 1000} seconds') AS acting,
+                                        round(extract(epoch FROM t.now - max(q.read_at)) * 1000) AS age_ms
+                                   FROM ${S}.legacy_process q GROUP BY q.role) r))
                FROM ${S}.legacy_process p)
 ) AS snapshot
 FROM t`;
@@ -489,7 +499,19 @@ function legacyOf(value: unknown): FleetLegacy | null {
     receipts: count(row["receipts"]),
     fresh: count(row["fresh"]),
     lastReadAgeMs: num(row["lastReadAgeMs"]),
+    roles: legacyRolesOf(row["roles"]),
   };
+}
+
+/** The per-role block, or null when the statement returned none: an absent role is one that never wrote a receipt. */
+function legacyRolesOf(value: unknown): Record<string, LegacyRoleReads> | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const out: Record<string, LegacyRoleReads> = {};
+  for (const [role, reads] of Object.entries(obj(value))) {
+    const row = obj(reads);
+    out[role] = { acting: count(row["acting"]), lastReadAgeMs: num(row["lastReadAgeMs"]) };
+  }
+  return out;
 }
 
 function countsOf(value: unknown): Record<string, number> {
@@ -547,7 +569,7 @@ export function parseFleetSnapshot(raw: unknown): FleetSnapshot {
       vaults: arr(parked["vaults"]).flatMap((value) => {
         const row = obj(value);
         const vault = str(row["vault"]);
-        return vault === null ? [] : [{ vault, reason: str(row["reason"]) ?? "", attempts: count(row["attempts"]) }];
+        return vault === null ? [] : [{ vault, reason: str(row["reason"]) ?? "", attempts: count(row["attempts"]), system: str(row["system"]) }];
       }),
     },
     outcomes: countsOf(root["outcomes"]),

@@ -84,6 +84,7 @@ import { DISCOVERY_STALE_ALERT_KEY, DISCOVERY_STALE_CRITICAL_AGE_MS, discoverySt
 import type { DiscoveryMethod, DiscoveryReport, ManagedLink } from "./discovery.js";
 import type { IntentOutcome, Lane, QuotaHandOut } from "./dispatch-store.js";
 import { DOORBELL_DEAF_ALERT_KEY, ECHO_DEADLINE_MS, SAFETY_PASS_MS, doorbellDeafAlert } from "./doorbell.js";
+import { vaultParkedKey } from "./fleet-alerts.js";
 import { BELL_DELAY_MS } from "./fleet-receiver.js";
 import { LamportsFilter, type LamportsFilterStatus, type LinkFingerprint } from "./lamports-filter.js";
 import type { TapeSampler, TapeSamplerStatus } from "./price-tape.js";
@@ -582,15 +583,19 @@ export class Scheduler {
       else if (alert.clear) this.#clear("doorbell-sync");
     }
 
-    // 5. THE REAP.
+    // 5. THE REAP. Its page is the event; the lock holder's FleetAlerts keeps
+    // the same key standing while the row stays parked (src/fleet-alerts.ts).
     const parked = await o.store.park();
     this.#parked += parked.length;
     for (const vault of parked) {
       this.#fire({
-        key: `vault-parked:${vault.vault}`,
+        key: vaultParkedKey(vault.vault),
         severity: "critical",
         title: "The scheduler parked a vault: its jobs never complete",
-        detail: `Vault ${vault.vault}: ${vault.attempts} claims in a row lapsed without a completion. No worker takes it until an operator clears vault_work.parked_reason; its open intents wait for that claim.`,
+        detail:
+          `Vault ${vault.vault}: ${vault.attempts} claims in a row lapsed without a completion. No worker takes it until an operator ` +
+          "clears vault_work.parked_reason (`flota-prod desaparcar`, `dispatch-handover unpark`); its open intents wait for that claim. " +
+          "This repeats every 30 minutes while it stays parked.",
         context: { vault: vault.vault, attempts: vault.attempts },
       });
     }

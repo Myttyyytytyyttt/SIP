@@ -29,6 +29,7 @@ import {
   QUEUE_LAG_ALERT_KEY,
   SCHEDULER_STALE_ALERT_KEY,
   SchedulerStaleWatch,
+  vaultParkedKey,
   vaultUnservedKey,
 } from "../src/fleet-alerts.js";
 import { FLEET_COLUMNS, FLEET_SNAPSHOT_SQL, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns, parseFleetSnapshot } from "../src/fleet-pg.js";
@@ -392,7 +393,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(snapshot.queue.due).toBe(3);
       expect(Math.abs(snapshot.queue.oldestDueMs! - 150_000)).toBeLessThan(5_000);
       expect(snapshot.queue.leases).toMatchObject({ held: 2, expired: 1, overCeiling: 1, takeovers: 1 });
-      expect(snapshot.queue.parked).toEqual({ count: 1, vaults: [{ vault: "Q6-parked", reason: "5 lapsed leases in a row", attempts: 5 }] });
+      expect(snapshot.queue.parked).toEqual({ count: 1, vaults: [{ vault: "Q6-parked", reason: "5 lapsed leases in a row", attempts: 5, system: "queue" }] });
       expect(snapshot.queue.outcomes).toEqual({ none: 4, SETTLED: 1, RETRY: 1 });
       expect(snapshot.expiries).toEqual([
         { vault: "Q4-lapsed", fence: 7 },
@@ -412,7 +413,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(snapshot.carries.pending).toBe(1);
     });
 
-    it("pages what the snapshot shows, as the acting replica: three lapsed leases, a queue past two windows, a scheduler 11 minutes quiet, a vault draining an hour", async () => {
+    it("pages what the snapshot shows, as the acting replica: three lapsed leases, a queue past two windows, a scheduler 11 minutes quiet, a vault draining an hour, a vault parked", async () => {
       const fired: Alert[] = [];
       const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: () => undefined }, windowMs: 60_000 });
       const reader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => alerts.observeSnapshot(snapshot, { acting: true }) });
@@ -422,6 +423,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         `${LEASE_EXPIRED_ALERT_KEY}:critical`,
         `${QUEUE_LAG_ALERT_KEY}:critical`,
         `${SCHEDULER_STALE_ALERT_KEY}:critical`,
+        `${vaultParkedKey("Q6-parked")}:critical`,
         `${vaultUnservedKey("D1-draining")}:critical`,
       ]);
       expect(alerts.status().pg?.saturatedStreak).toBe(0);
@@ -440,7 +442,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       );
       const read = async () => (await new PgFleetStore(db).read()).legacy!;
       // NO RECEIPT EVER: none counted, and no age rather than an age of 0. The fleet row's default sends new vaults legacy.
-      expect(await read()).toEqual({ vaults: 2, newVaultSystem: "legacy", receipts: 0, fresh: 0, lastReadAgeMs: null });
+      expect(await read()).toEqual({ vaults: 2, newVaultSystem: "legacy", receipts: 0, fresh: 0, lastReadAgeMs: null, roles: {} });
 
       // ONE KEEPER UP, ONE 20 MINUTES QUIET, ONE MARKED GONE — the gone one read last, and still counts for the age.
       await db.query(
@@ -452,6 +454,33 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       const up = await read();
       expect(up).toMatchObject({ vaults: 2, newVaultSystem: "legacy", receipts: 2, fresh: 1 });
       expect(Math.abs(up.lastReadAgeMs! - 60_000)).toBeLessThan(5_000);
+      // PER ROLE: acting receipts not gone and read in 15 min; the role's newest read counts a gone row too.
+      expect(Object.keys(up.roles!).sort()).toEqual(["profit", "volume"]);
+      expect([up.roles!["profit"]!.acting, up.roles!["volume"]!.acting]).toEqual([1, 0]);
+      expect(Math.abs(up.roles!["profit"]!.lastReadAgeMs! - 60_000)).toBeLessThan(5_000);
+      expect(Math.abs(up.roles!["volume"]!.lastReadAgeMs! - 20 * 60_000)).toBeLessThan(5_000);
+
+      // THE PROFIT KEEPER CRASH-LOOPS WHILE THE VOLUME KEEPER STILL SWEEPS: one fresh receipt, and still nobody buys.
+      // A new profit container that reads without acting (its carry store not ready) does not count either.
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '20 minutes' WHERE process_id = 'p-up'");
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '25 minutes' WHERE process_id = 'p-gone'");
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '30 seconds' WHERE process_id = 'v-quiet'");
+      await db.query(
+        `INSERT INTO sip_solana.legacy_process (process_id, role, dispatch, live, read_at, absent_is) VALUES
+           ('p-dry', 'profit', 'on', false, clock_timestamp() - interval '10 seconds', 'legacy')`,
+      );
+      const profitDown = await read();
+      expect(profitDown).toMatchObject({ receipts: 3, fresh: 2 });
+      expect([profitDown.roles!["profit"]!.acting, profitDown.roles!["volume"]!.acting]).toEqual([0, 1]);
+      const roleFired: Alert[] = [];
+      const roleAlerts = new FleetAlerts({ alerter: { fire: (alert) => roleFired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false } });
+      const roleReader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => roleAlerts.observeSnapshot(snapshot, { acting: true }) });
+      expect(await roleReader.refresh()).toBe(true);
+      const profitPage = roleFired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY);
+      expect(profitPage.map((alert) => alert.severity)).toEqual(["warn"]);
+      expect(profitPage[0]!.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min");
+      expect(profitPage[0]!.detail).toContain("the volume keeper (sip-solana-volume-keeper) still acts");
+      await db.query("DELETE FROM sip_solana.legacy_process WHERE process_id = 'p-dry'");
 
       // THE KEEPERS STOP: every receipt goes quiet, the newest 40 minutes ago. Not declared retired, it pages on their silence.
       await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '40 minutes' WHERE process_id = 'p-gone'");
