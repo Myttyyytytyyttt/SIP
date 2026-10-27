@@ -8,6 +8,7 @@
 // deferred instead of failed — are in test/accounts.test.ts, under "the
 // jupiter-key cut", where a real invest turn runs over stubbed chain bytes.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Redactor } from "@sip/solana-log";
 import { describe, expect, it, vi } from "vitest";
 import { ConfigError, describeConfig, loadConfig } from "../src/config.js";
@@ -246,6 +247,44 @@ describe("two buying turns in one process — a worker's two slots", () => {
     expect(pacer.status()).toMatchObject({ calls: 8, overdrawn: 0 });
   });
 
+  it("keeps its place when a wake is a millisecond late behind its own predecessor: two turns alternate at the plan's rate", async () => {
+    // TURN A'S EVERY WAKE FIRES 1 MS LATE, as Node's timers routinely do, and each
+    // call's fetch comes back in less than one gap. B's call wakes on its own slot
+    // a millisecond before A's call (on the slot before it) has left a whole gap
+    // behind. Sent to the back of the queue for it, B lost its slot to A's next
+    // call every time: 18 + 18 calls took about 62 s against 42, and B got one
+    // slot in three until A's basket was spent. It sleeps out the millisecond.
+    const clock = manualClock();
+    const turnOf = new AsyncLocalStorage<string>();
+    const pacer = new JupiterPacer({
+      perMinute: 50,
+      now: clock.now,
+      sleep: (ms) => new Promise<void>((resolve) => clock.setTimer(resolve, ms + (turnOf.getStore() === "a" ? 1 : 0))),
+    });
+    const a = granted(pacer.reserve(18));
+    const b = granted(pacer.reserve(18));
+    const left: { turn: string; at: number }[] = [];
+    const spend = (name: string, turn: JupiterReservation) =>
+      turnOf.run(name, async () => {
+        for (let i = 0; i < 18; i++) {
+          await turn.beforeCall();
+          left.push({ turn: name, at: clock.now() });
+          // THE FETCH: a round trip the pacer does not see, shorter than the gap.
+          await new Promise<void>((resolve) => clock.setTimer(resolve, 300));
+        }
+      });
+    const all = Promise.all([spend("a", a), spend("b", b)]);
+    await clock.advance(120_000);
+    await all;
+    const gap = pacer.minGapMs;
+    expect(gap).toBe(1_200);
+    expect(left).toHaveLength(36);
+    expect(Math.min(...gapsOf(left))).toBeGreaterThanOrEqual(gap);
+    expect(left[35]!.at - left[0]!.at).toBeLessThanOrEqual(1.05 * 35 * gap);
+    expect(left.map((call) => call.turn).join("")).not.toMatch(/aaa|bbb/);
+    expect(pacer.status()).toMatchObject({ calls: 36, overdrawn: 0 });
+  });
+
   it("sleeps out the rest of its slot when a wake comes early, and never leaves inside a gap", async () => {
     const clock = manualClock();
     // EVERY SLEEP WAKES A MILLISECOND EARLY, as Node's timers can against Date.now
@@ -303,7 +342,7 @@ describe("after a 429", () => {
     expect(pacer.reserve(12).granted).toBe(true);
   });
 
-  it("doubles the step on each further 429 up to ten minutes, and resets it after a clean turn", async () => {
+  it("doubles the step on each further 429 up to ten minutes, and resets it once a call that left after the block is answered", async () => {
     const { pacer, advance } = clocked(60);
     const steps: number[] = [];
     for (let i = 0; i < 6; i++) {
@@ -317,11 +356,47 @@ describe("after a 429", () => {
       advance(deferred.retryInMs!);
     }
     expect(steps).toEqual([60_000, 120_000, 240_000, 480_000, 600_000, 600_000].map((ms) => Math.min(ms, JUPITER_BACKOFF_MAX_MS)));
-    // A turn that met no 429 resets the step.
+    // A TURN THAT MADE NO CALL proves nothing: the step stands.
+    granted(pacer.reserve(3)).release();
+    expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_MAX_MS);
+    // A CALL THAT LEFT AFTER THE BLOCK, ANSWERED: Jupiter answers again, and the step is back to a minute.
     const clean = granted(pacer.reserve(3));
     await clean.beforeCall();
+    clean.observe(200, headers());
     clean.release();
     expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_BASE_MS);
+  });
+
+  it("keeps doubling with two buying turns on one pacer: the turn the block stopped, or answered before the 429, resets nothing", async () => {
+    const { pacer, advance } = clocked(60);
+    const steps: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const a = granted(pacer.reserve(3));
+      const b = granted(pacer.reserve(3));
+      await a.beforeCall();
+      a.observe(429, headers());
+      // B'S NEXT CALL MEETS THE BLOCK: nothing sent, and its turn ends having seen no 429 of its own.
+      await expect(b.beforeCall()).rejects.toBeInstanceOf(JupiterBackoffError);
+      a.release();
+      b.release();
+      const deferred = pacer.reserve(3);
+      if (deferred.granted) throw new Error("expected a backoff");
+      steps.push(deferred.retryInMs!);
+      advance(deferred.retryInMs!);
+    }
+    // BEFORE, B's release put the step back to a minute every round: 60, 60, 60.
+    expect(steps).toEqual([60_000, 120_000, 240_000]);
+
+    // AN ANSWER TO A CALL ALREADY IN FLIGHT WHEN THE 429 CAME says nothing about Jupiter after it.
+    const c = granted(pacer.reserve(3));
+    const d = granted(pacer.reserve(3));
+    const early = await d.beforeCall();
+    await c.beforeCall();
+    c.observe(429, headers());
+    d.observe(200, headers(), early);
+    c.release();
+    d.release();
+    expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_MAX_MS);
   });
 
   it("does not believe a reset absurdly far ahead, and ignores every status but 429", async () => {

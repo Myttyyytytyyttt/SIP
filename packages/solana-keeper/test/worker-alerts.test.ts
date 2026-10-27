@@ -5,11 +5,19 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { INVEST_FAILED_CRITICAL_STREAK, WRAP_SHORT_ALERT_STREAK } from "../src/invest-decision.js";
+import { INVEST_FAILED_CRITICAL_STREAK, UNMEASURED_BASKET_REFUSAL, WRAP_SHORT_ALERT_STREAK } from "../src/invest-decision.js";
 import { SETTLE_RETRY_CRITICAL_AFTER } from "../src/settle-decision.js";
 import { Secret } from "@sip/solana-log";
 import { createAlerter, type AlertSeverity } from "../src/alerts.js";
-import { INVEST_REFUSED_CRITICAL_STREAK, SETTLE_KEY_ALERT_KEY, investRefusedAlert, jobAlerts } from "../src/worker-alerts.js";
+import {
+  INVEST_REFUSED_CRITICAL_STREAK,
+  INVEST_REFUSED_UPSTREAM_ALERT_KEY,
+  SETTLE_KEY_ALERT_KEY,
+  UPSTREAM_REFUSAL_FORGET_MS,
+  UpstreamRefusals,
+  investRefusedAlert,
+  jobAlerts,
+} from "../src/worker-alerts.js";
 import { completionFor, readStreaks, type JobEnd, type JobReport, type JobStreaks, type LinkTurn } from "../src/worker-job.js";
 
 const VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
@@ -27,9 +35,10 @@ function done(input: {
   wrapShort?: boolean;
   investFacts?: JobReport["investFacts"];
   settleKey?: JobReport["settleKey"];
+  vault?: string;
 }): JobEnd {
   const report: JobReport = {
-    vault: VAULT,
+    vault: input.vault ?? VAULT,
     fence: 7n,
     world: "live",
     live: true,
@@ -260,10 +269,98 @@ describe("bin/worker.mts fires them", () => {
     expect(worker).toContain("severity: streak >= JOB_FAILING_CRITICAL_STREAK ? \"critical\" : \"warn\",");
   });
 
+  it("pages a basket nobody could measure once for every vault, beside each job's rules", () => {
+    const after = worker.slice(worker.indexOf("const rules = jobAlerts(end, legFeeKeys === undefined ? {} : { legFeeKeys });"));
+    expect(worker).toContain("const upstreamRefusals = new UpstreamRefusals();");
+    expect(after.indexOf("const upstream = upstreamRefusals.observe(claimed.vault, rules.upstreamRefusal);")).toBeGreaterThan(-1);
+    expect(after.indexOf("alerter.clear(INVEST_REFUSED_UPSTREAM_ALERT_KEY);")).toBeLessThan(after.indexOf("} catch (error) {"));
+  });
+
   it("raises the seat alert where a wallet's signer is resolved, and checks the authorization key at boot and on a cadence", () => {
     expect(worker).toContain("key: `seat-unbounded:${address}`,");
     expect(worker).toContain("recheckAuthorizationKey();");
     expect(worker).toContain("setInterval(recheckAuthorizationKey, AUTHORIZATION_KEY_RECHECK_MS)");
     expect(worker.indexOf("recheckAuthorizationKey();")).toBeLessThan(worker.indexOf("await loop.start();"));
+  });
+});
+
+describe("a refusal the upstream caused: the basket's venues could not be measured", () => {
+  const OUTAGE = `${UNMEASURED_BASKET_REFUSAL}Error: Jupiter answered HTTP 503 at api.jup.ag/swap/v1/quote — refusing the whole basket`;
+  const FUNDED = ["Funded1", "Funded2", "Funded3", "Funded4"].map((name) => name.padEnd(44, "1"));
+
+  /** bin/worker.mts's order on a critical-only destination: each job's rules, then the upstream page. */
+  function worker() {
+    let now = 0;
+    const posted: { at: number; key: string; severity: AlertSeverity }[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      minSeverity: "critical",
+      now: () => now,
+      post: async (_url, body) => {
+        const parsed = JSON.parse(body) as { key: string; severity: AlertSeverity };
+        posted.push({ at: now / 60_000, key: parsed.key, severity: parsed.severity });
+      },
+      log: () => undefined,
+    });
+    const upstream = new UpstreamRefusals({ now: () => now });
+    const previous = new Map<string, JobStreaks>();
+    const job = (vault: string, invest: JobReport["invest"]) => {
+      const end = done({ vault, settles: [], invest, previous: previous.get(vault) ?? NONE });
+      const rules = jobAlerts(end);
+      for (const key of rules.clear) alerter.clear(key);
+      for (const alert of rules.fire) alerter.fire(alert);
+      const decision = upstream.observe(vault, rules.upstreamRefusal);
+      if (decision.fire !== null) alerter.fire(decision.fire);
+      else if (decision.clear) alerter.clear(INVEST_REFUSED_UPSTREAM_ALERT_KEY);
+      previous.set(vault, readStreaks(end.kind === "complete" ? end.completion.streaks : {}));
+      return rules;
+    };
+    return { posted, job, at: (minute: number) => (now = minute * 60_000) };
+  }
+
+  it("pages one Jupiter outage once for four refused vaults, not four times, and keeps each vault's own key a warn", () => {
+    const w = worker();
+    for (let minute = 0; minute <= 35; minute++) {
+      w.at(minute);
+      for (const vault of FUNDED) {
+        const rules = w.job(vault, { outcome: "REFUSED", detail: OUTAGE });
+        expect(rules.fire.find((alert) => alert.key === `invest-refused:${vault}`)?.severity).toBe("warn");
+      }
+    }
+    // BEFORE: four criticals at minute 2 and four more at minute 32, all for one cause.
+    expect(w.posted.map((page) => [page.at, page.key])).toEqual([
+      [2, INVEST_REFUSED_UPSTREAM_ALERT_KEY],
+      [32, INVEST_REFUSED_UPSTREAM_ALERT_KEY],
+    ]);
+  });
+
+  it("still pages a vault's own refusal — a drained pool — on that vault's key, beside the outage", () => {
+    const w = worker();
+    for (let minute = 0; minute <= 2; minute++) {
+      w.at(minute);
+      w.job(FUNDED[0]!, { outcome: "REFUSED", detail: OUTAGE });
+      w.job(FUNDED[1]!, { outcome: "REFUSED", detail: "the leg's pool holds $51 against a $149 buy: too thin" });
+    }
+    expect(w.posted.map((page) => page.key).sort()).toEqual([INVEST_REFUSED_UPSTREAM_ALERT_KEY, `invest-refused:${FUNDED[1]!}`].sort());
+  });
+
+  it("clears once no refused vault is left at the streak — one bought, the other forgotten unheard of — and starts again from a warn", () => {
+    let now = 0;
+    const upstream = new UpstreamRefusals({ now: () => now });
+    const three = { streak: INVEST_REFUSED_CRITICAL_STREAK, detail: OUTAGE };
+    expect(upstream.observe(FUNDED[0]!, { streak: 1, detail: OUTAGE })).toEqual({ fire: null, clear: false });
+    const page = upstream.observe(FUNDED[0]!, three).fire!;
+    expect([page.key, page.severity]).toEqual([INVEST_REFUSED_UPSTREAM_ALERT_KEY, "critical"]);
+    expect(page.detail).toContain("1 vault's basket is refused because the venues could not be measured");
+    expect(page.detail).toContain("Jupiter answered HTTP 503");
+    expect(upstream.observe(FUNDED[1]!, { streak: 1, detail: OUTAGE }).fire?.detail).toContain("2 vaults' baskets are refused because the venues could not be measured, 1 of them for 3 turns");
+    // A DEFERRAL OR A REST SAYS NOTHING: the page stands.
+    expect(upstream.observe(FUNDED[0]!, undefined).fire).not.toBeNull();
+    // FUNDED[0] BOUGHT: nobody is left at the streak.
+    expect(upstream.observe(FUNDED[0]!, null)).toEqual({ fire: null, clear: true });
+    // FUNDED[1] REACHES IT, THEN IS NEVER HEARD OF AGAIN (unlinked, handed back): forgotten, and the page clears.
+    expect(upstream.observe(FUNDED[1]!, three).fire).not.toBeNull();
+    now = UPSTREAM_REFUSAL_FORGET_MS + 1;
+    expect(upstream.observe(FUNDED[2]!, undefined)).toEqual({ fire: null, clear: true });
   });
 });

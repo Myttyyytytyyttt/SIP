@@ -63,6 +63,7 @@ import type { Alert } from "./alerts.js";
 import { BN } from "./anchor-interop.js";
 import {
   CRANK_WRAP_RESERVE_LAMPORTS,
+  UNMEASURED_BASKET_REFUSAL,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
   basketBudget,
@@ -972,7 +973,7 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     return {
       outcome: "REFUSED",
       detail:
-        `the venues this basket would trade against could not be measured: ${summarizeUpstreamError(error)} — refusing ` +
+        `${UNMEASURED_BASKET_REFUSAL}${summarizeUpstreamError(error)} — refusing ` +
         "the whole basket and refusing to convert SOL toward it, because an unmeasurable depth is not a depth",
     };
   }

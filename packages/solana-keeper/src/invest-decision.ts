@@ -38,6 +38,19 @@ import { NO_TRANSFER_FEE, SLIPPAGE_BPS, type TransferFeeTerms } from "./min-out.
 import { JUPITER_PROGRAM, feeRiseCanLand } from "./program-scripts.js";
 import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
+/**
+ * How a REFUSED invest turn's detail begins when the basket's venues could not
+ * be measured at all — Jupiter or the RPC did not answer, or answered an error
+ * (invest-tick.ts, the measurement's catch) — rather than measured and found
+ * wanting. That cause is upstream and shared: every vault buying at that moment
+ * meets it, so a worker pages it once for all of them (src/worker-alerts.ts,
+ * UpstreamRefusals) and not once per vault.
+ */
+export const UNMEASURED_BASKET_REFUSAL = "the venues this basket would trade against could not be measured: ";
+
+/** Whether a REFUSED turn's detail is UNMEASURED_BASKET_REFUSAL's: upstream, not the vault's own. */
+export const isUnmeasuredRefusal = (detail: string): boolean => detail.startsWith(UNMEASURED_BASKET_REFUSAL);
+
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
 export const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 

@@ -11,7 +11,14 @@
 //
 // ONE RULE IS THE WORKER'S OWN: invest-refused, the same key and the same warn,
 // turns critical on the third REFUSED job in a row (investRefusedAlert says
-// why). The legacy keeper's stays a warn.
+// why). The legacy keeper's stays a warn. AND ONE CAUSE PAGES ONCE: a refusal
+// because the basket's venues could not be measured at all — Jupiter or the
+// RPC not answering, or answering 5xx — is the upstream's, and every vault
+// buying at that moment meets it. Paged per vault, one Jupiter outage was one
+// critical per funded vault two minutes in and again every 30 minutes; so such
+// a refusal stays a warn on the vault's own key, and UpstreamRefusals pages it
+// once for all of them (invest-refused-upstream). A refusal for the vault's own
+// reason — a drained pool, a basket over the share — still pages per vault.
 //
 // WHAT IS COUNTED WHERE. The legacy keeper keeps its streaks in process memory,
 // sweep after sweep. A worker keeps them in vault_work.streaks (completionFor),
@@ -28,10 +35,11 @@
 // a cadence). Both are per process, not per job.
 
 import type { Alert } from "./alerts.js";
-import { investFailedAlert, wrapShortAlert } from "./invest-decision.js";
+import { investFailedAlert, isUnmeasuredRefusal, wrapShortAlert } from "./invest-decision.js";
 import { settleAlert, settleThrewAlert } from "./settle-decision.js";
 import { legFeeAlert } from "./sweep-decision.js";
-import { readStreaks, type JobEnd } from "./worker-job.js";
+import type { AlertDecision } from "./usage-alerts.js";
+import { REFUSED_DUE_MAX_SECONDS, readStreaks, type JobEnd } from "./worker-job.js";
 
 /** What one job's end raises and resolves: cleared first, then fired (the keeper's order). */
 export interface JobAlertRules {
@@ -41,6 +49,14 @@ export interface JobAlertRules {
   readonly legFeeKeys?: ReadonlySet<string>;
   /** A settle waited on the shared loss-carry store: the store's page is the caller's (it knows since when). */
   readonly carryWaited: boolean;
+  /**
+   * This job's word on the upstream refusal (UpstreamRefusals): the vault's
+   * refused streak and the detail when its basket was refused because the venues
+   * could not be measured; null when the invest bought, failed, or was refused
+   * for the vault's own reason; absent when it says nothing (no invest half, a
+   * deferral, a rest, a throw — as for the per-vault key).
+   */
+  readonly upstreamRefusal?: { readonly streak: number; readonly detail: string } | null;
 }
 
 /** The settle-key check's own alert, the legacy keeper's key (bin/keeper.mts: settle-key-mismatch). */
@@ -59,11 +75,13 @@ export const INVEST_REFUSED_CRITICAL_STREAK = 3;
  * A WARN THAT NEVER PAGES IS A REFUSAL NOBODY HEARS OF. The alert destination
  * takes critical and above unless SIP_SOLANA_ALERT_MIN_SEVERITY says warn
  * (critical is its default, src/config.ts), so a basket the worker cannot buy —
- * a venue drained under a leg, a basket over this worker's Jupiter share, a
- * Jupiter that keeps answering 4xx — was a log line every REFUSED job, for as
- * long as it lasted: money that should be buying and is not, and nobody woken.
- * One refusal is often the moment (a pool thin for a minute); the third in a
- * row is a vault that has stopped buying.
+ * a venue drained under a leg, a basket over this worker's Jupiter share — was
+ * a log line every REFUSED job, for as long as it lasted: money that should be
+ * buying and is not, and nobody woken. One refusal is often the moment (a pool
+ * thin for a minute); the third in a row is a vault that has stopped buying. A
+ * basket whose venues could not be measured at all (Jupiter or the RPC not
+ * answering) is the upstream's: jobAlerts keeps it a warn here and
+ * UpstreamRefusals pages it once for every vault it stops.
  *
  * HOW SOON THE THIRD COMES IS THE SCHEDULER'S, NOT THIS FILE'S. A REFUSED job
  * asks to come back after REFUSED_DUE_SECONDS, doubling (five minutes, then
@@ -103,6 +121,7 @@ export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: Readonl
   const streaks = readStreaks(end.completion.streaks);
   const clear: string[] = [];
   const fire: Alert[] = [];
+  let upstreamRefusal: { readonly streak: number; readonly detail: string } | null | undefined;
 
   // THE SETTLE KEY THE CHAIN NAMES. A key the chain no longer names makes every
   // job end RETRY with nothing settled and no wallet turn to page (worker-job.ts):
@@ -138,8 +157,20 @@ export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: Readonl
     // CRITICAL FROM THE THIRD REFUSED JOB IN A ROW (the streak the row is about to
     // hold, so whichever worker ran the first two), with no clear before it: the
     // escalation breaks the warn's dedup on its own, as invest-failed's below.
-    if (invest.outcome === "REFUSED") fire.push(investRefusedAlert(vault, invest.detail, Math.max(1, streaks.investRefused)));
-    else if (invest.outcome === "INVESTED" || invest.outcome === "FAILED") clear.push(`invest-refused:${vault}`);
+    // AN UNMEASURED BASKET IS THE UPSTREAM'S: a warn on the vault's key however long it lasts, and UpstreamRefusals' page.
+    if (invest.outcome === "REFUSED") {
+      const streak = Math.max(1, streaks.investRefused);
+      if (isUnmeasuredRefusal(invest.detail)) {
+        fire.push(investRefusedAlert(vault, invest.detail, Math.min(streak, INVEST_REFUSED_CRITICAL_STREAK - 1)));
+        upstreamRefusal = { streak, detail: invest.detail };
+      } else {
+        fire.push(investRefusedAlert(vault, invest.detail, streak));
+        upstreamRefusal = null;
+      }
+    } else if (invest.outcome === "INVESTED" || invest.outcome === "FAILED") {
+      clear.push(`invest-refused:${vault}`);
+      upstreamRefusal = null;
+    }
 
     // A THROW IN THE INVEST HALF IS A FAILED TURN, as the legacy keeper folds it.
     const failed = invest.outcome === "FAILED" || invest.outcome === "THREW";
@@ -171,8 +202,79 @@ export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: Readonl
         fire.push(alert);
       }
       for (const key of previous.legFeeKeys ?? []) if (!raised.has(key)) clear.push(key);
-      return { clear, fire, legFeeKeys: raised, carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store") };
+      return {
+        clear,
+        fire,
+        legFeeKeys: raised,
+        carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store"),
+        ...(upstreamRefusal === undefined ? {} : { upstreamRefusal }),
+      };
     }
   }
-  return { clear, fire, carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store") };
+  return { clear, fire, carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store"), ...(upstreamRefusal === undefined ? {} : { upstreamRefusal }) };
+}
+
+// --- invest-refused-upstream ---------------------------------------------------
+
+export const INVEST_REFUSED_UPSTREAM_ALERT_KEY = "invest-refused-upstream";
+
+/**
+ * A vault not heard of for this long leaves the page: unlinked, handed back, or
+ * served by another process since. Twice the longest a REFUSED vault waits for
+ * its next turn (REFUSED_DUE_MAX_SECONDS), so a vault still refused is heard of
+ * well inside it.
+ */
+export const UPSTREAM_REFUSAL_FORGET_MS = 2 * REFUSED_DUE_MAX_SECONDS * 1_000;
+
+/**
+ * THE UPSTREAM REFUSAL, PAGED ONCE (the header): which vaults' last word was a
+ * basket refused because its venues could not be measured, and the critical,
+ * one key, once any of them has been refused INVEST_REFUSED_CRITICAL_STREAK
+ * turns in a row — with how many vaults it stops and the latest detail.
+ *
+ * PER PROCESS, which at WORKERS_MAX=1 is the fleet: two workers would each page
+ * it once. A vault leaves the set on a turn that bought, failed, or was refused
+ * for its own reason (jobAlerts' null), or after UPSTREAM_REFUSAL_FORGET_MS
+ * unheard of; the page clears once no vault in the set has reached the streak.
+ */
+export class UpstreamRefusals {
+  readonly #vaults = new Map<string, { readonly streak: number; readonly detail: string; readonly at: number }>();
+  readonly #now: () => number;
+  #firing = false;
+
+  constructor(options: { readonly now?: () => number } = {}) {
+    this.#now = options.now ?? (() => Date.now());
+  }
+
+  /** One job's end, as jobAlerts' upstreamRefusal says it. Returns what to raise or clear. */
+  observe(vault: string, refusal: { readonly streak: number; readonly detail: string } | null | undefined): AlertDecision {
+    const now = this.#now();
+    if (refusal === null) this.#vaults.delete(vault);
+    else if (refusal !== undefined) this.#vaults.set(vault, { streak: refusal.streak, detail: refusal.detail, at: now });
+    for (const [key, entry] of this.#vaults) if (now - entry.at > UPSTREAM_REFUSAL_FORGET_MS) this.#vaults.delete(key);
+    const entries = [...this.#vaults.values()];
+    const persistent = entries.filter((entry) => entry.streak >= INVEST_REFUSED_CRITICAL_STREAK).length;
+    if (persistent === 0) {
+      if (!this.#firing) return { fire: null, clear: false };
+      this.#firing = false;
+      return { fire: null, clear: true };
+    }
+    this.#firing = true;
+    const latest = entries.reduce((newest, entry) => (entry.at >= newest.at ? entry : newest));
+    const n = entries.length;
+    return {
+      fire: {
+        key: INVEST_REFUSED_UPSTREAM_ALERT_KEY,
+        severity: "critical",
+        title: "Baskets keep being refused: their venues cannot be measured",
+        detail:
+          `${n} vault${n === 1 ? "'s basket is" : "s' baskets are"} refused because the venues could not be measured, ` +
+          `${persistent === n ? (n === 1 ? "for" : "each for") : `${persistent} of them for`} ${INVEST_REFUSED_CRITICAL_STREAK} turns or more in a row; nothing is bought. ` +
+          "One cause upstream (Jupiter or the RPC not answering), paged once here; each vault's invest-refused stays a warn. " +
+          `Latest: ${latest.detail}`,
+        context: { vaults: n, persistent },
+      },
+      clear: false,
+    };
+  }
 }

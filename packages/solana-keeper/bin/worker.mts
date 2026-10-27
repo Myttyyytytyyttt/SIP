@@ -90,7 +90,7 @@ import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
 import { loadLocalSigners } from "../src/signers.js";
 import { keeperEnvOf, readWorkerSettings, workerRefusals, type WorkerSettings } from "../src/worker-config.js";
 import { jobLogFields, runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
-import { jobAlerts } from "../src/worker-alerts.js";
+import { INVEST_REFUSED_UPSTREAM_ALERT_KEY, UpstreamRefusals, jobAlerts } from "../src/worker-alerts.js";
 import { SchedulerStaleWatch } from "../src/fleet-alerts.js";
 import { WorkerLoop } from "../src/worker-loop.js";
 
@@ -341,6 +341,8 @@ let crankHint: PublicKey | null = null;
 const legFeeRaised = new Map<string, ReadonlySet<string>>();
 /** Since when settles have waited on the loss-carry store; null while they do not. */
 let carryWaitingSince: number | null = null;
+/** The vaults whose basket could not be measured: one page for all of them (src/worker-alerts.ts). */
+const upstreamRefusals = new UpstreamRefusals();
 
 /**
  * A VAULT WHOSE JOBS NEVER FINISH: they throw before any wallet turn ends, or run
@@ -405,6 +407,10 @@ const loop = new WorkerLoop({
       for (const key of rules.clear) alerter.clear(key);
       for (const alert of rules.fire) alerter.fire(alert);
       if (rules.legFeeKeys !== undefined) legFeeRaised.set(claimed.vault, rules.legFeeKeys);
+      // A BASKET NOBODY COULD MEASURE is the upstream's, shared by every vault buying now: paged once, not per vault.
+      const upstream = upstreamRefusals.observe(claimed.vault, rules.upstreamRefusal);
+      if (upstream.fire !== null) alerter.fire(upstream.fire);
+      else if (upstream.clear) alerter.clear(INVEST_REFUSED_UPSTREAM_ALERT_KEY);
       // THE SHARED LOSS-CARRY STORE: a settle that waited on it pages nothing per
       // wallet (settleAlert), so the store pages once, critical once it has kept
       // failing (carryStoreAlert's rule); the first job that did not wait clears it.

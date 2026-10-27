@@ -30,7 +30,11 @@
 //   * THE BACKOFF. A 429 the pacer did not prevent — another consumer of the same
 //     organisation's budget, or a window shorter than modelled — blocks new
 //     buying turns for a minute, doubling on each further 429 up to ten minutes,
-//     and never less than Jupiter's own `x-ratelimit-reset`. Without it the
+//     and never less than Jupiter's own `x-ratelimit-reset`. The step goes back
+//     to a minute only when a call that left AFTER the latest 429 is answered
+//     with anything else: a turn that merely saw no 429 — stopped by the block,
+//     or answered before it — is no evidence Jupiter answers again, and with two
+//     buying turns on one pacer it would undo every doubling. Without it the
 //     REFUSED basket is turned again every sweep (it is a busy outcome,
 //     doorbell.ts investRests) and spends its whole gate against a limiter that
 //     is still refusing (m6-numbers.json: refused_requotes_every_sweep).
@@ -265,6 +269,8 @@ export class JupiterPacer {
   #nextCallAt = 0;
   /** When the last call really left: the gap is measured from it as well as from the slot. */
   #lastCallAt = Number.NEGATIVE_INFINITY;
+  /** The slot that last call had claimed: a later slot than a waking call's means that call was overtaken. */
+  #lastSlot = Number.NEGATIVE_INFINITY;
   #blockedUntil = 0;
   #backoffMs = JUPITER_BACKOFF_BASE_MS;
   #reservations = 0;
@@ -403,17 +409,22 @@ export class JupiterPacer {
    * holds the event loop — wakes a call after a LATER slot's call has already
    * left, and leaving then would put two calls inside one gap. So a woken call
    * leaves only if the last call that really left is a whole gap behind, checked
-   * with nothing awaited between that check and counting the call; overtaken,
-   * it takes the next free slot like any new call — behind the calls already
-   * queued, not tied with each of them in turn, so one late wake cannot hold a
-   * turn back until the other has spent its whole basket. A wake that comes
+   * with nothing awaited between that check and counting the call. OVERTAKEN —
+   * the call that left had a later slot — it takes the next free slot like any
+   * new call: behind the calls already queued, not tied with each of them in
+   * turn. MERELY LATE BEHIND ITS OWN PREDECESSOR — the call before it, on an
+   * earlier slot, woke a millisecond late — it sleeps out the rest of that gap
+   * and keeps its place: a timer routinely fires a millisecond or two late, and
+   * sending such a call to the back made two turns run about 1.4 times slower
+   * and let one starve the other until its whole basket was spent
+   * (test/jupiter-pacer.test.ts, "a wake a millisecond late"). A wake that comes
    * EARLY sleeps out the rest of its own slot.
    *
    * A CLAIMED SLOT THAT MEETS A BACKOFF IS NOT HANDED BACK: the call throws and
    * the slot stays spent. The next call waits one gap more than it needed —
    * nothing, beside the minute a 429 blocks new turns for.
    */
-  async _beforeCall(reservation: JupiterReservation): Promise<void> {
+  async _beforeCall(reservation: JupiterReservation): Promise<number> {
     let now = this.#now();
     if (now < this.#blockedUntil) throw new JupiterBackoffError(this.#blockedUntil, now);
     let slot = this.#claimSlot(now);
@@ -425,14 +436,24 @@ export class JupiterPacer {
         continue;
       }
       if (now >= this.#lastCallAt + this.#minGapMs) break;
+      if (this.#lastSlot <= slot) {
+        // LATE BEHIND ITS OWN PREDECESSOR, not overtaken: the rest of the gap, and the same place.
+        await this.#sleep(this.#lastCallAt + this.#minGapMs - now);
+        now = this.#now();
+        if (now < this.#blockedUntil) throw new JupiterBackoffError(this.#blockedUntil, now);
+        continue;
+      }
       slot = this.#claimSlot(now);
     }
     this.#prune(now);
     this.#spent.push(now);
     this.#lastCallAt = now;
+    this.#lastSlot = slot;
     this.#calls += 1;
     if (reservation._take()) this.#outstanding -= 1;
     else this.#overdrawn += 1;
+    // THE CALL'S TICKET: the 429s noted before it left. Its answer resets the step only if none came since (_noteAnswered).
+    return this.#http429;
   }
 
   /** The next free slot from `now`: never before a queued slot, nor within a gap of the last call that left. Moves the queue a gap on. */
@@ -451,10 +472,19 @@ export class JupiterPacer {
     this.#backoffMs = Math.min(this.#backoffMs * 2, JUPITER_BACKOFF_MAX_MS);
   }
 
-  /** @internal — a reservation ending: unspent calls go back, and a turn with no 429 resets the backoff step. */
-  _release(unspent: number, saw429: boolean): void {
+  /**
+   * @internal — a paced call answered with anything but 429. The step goes back
+   * to a minute only when no 429 was noted after that call left (its ticket,
+   * from _beforeCall): an answer to a call that was already in flight when the
+   * 429 came says nothing about Jupiter after it.
+   */
+  _noteAnswered(ticket: number): void {
+    if (ticket === this.#http429) this.#backoffMs = JUPITER_BACKOFF_BASE_MS;
+  }
+
+  /** @internal — a reservation ending: unspent calls go back. The backoff step is not touched (_noteAnswered is what resets it). */
+  _release(unspent: number): void {
     this.#outstanding -= unspent;
-    if (!saw429) this.#backoffMs = JUPITER_BACKOFF_BASE_MS;
   }
 
   status(): JupiterPacerStatus {
@@ -495,7 +525,8 @@ export class JupiterReservation {
   readonly reserved: number;
   #remaining: number;
   #released = false;
-  #saw429 = false;
+  /** The ticket of this turn's latest call (_beforeCall), for an answer observed without its own. */
+  #lastTicket: number | null = null;
 
   constructor(pacer: JupiterPacer, calls: number) {
     this.#pacer = pacer;
@@ -514,16 +545,29 @@ export class JupiterReservation {
     return true;
   }
 
-  /** Before each Jupiter request this turn makes: waits out the spacing, counts the call, or throws (sending nothing) while backed off. */
-  async beforeCall(): Promise<void> {
+  /**
+   * Before each Jupiter request this turn makes: waits out the spacing, counts
+   * the call, or throws (sending nothing) while backed off. Answers the call's
+   * ticket, for observe.
+   */
+  async beforeCall(): Promise<number> {
     if (this.#released) throw new Error("a released Jupiter reservation was asked for a call: the turn it belonged to has ended");
-    await this.#pacer._beforeCall(this);
+    const ticket = await this.#pacer._beforeCall(this);
+    this.#lastTicket = ticket;
+    return ticket;
   }
 
-  /** After each answer: a 429 starts or extends the backoff, at least to Jupiter's own `x-ratelimit-reset`. */
-  observe(status: number, headers: { get(name: string): string | null }): void {
-    if (status !== 429) return;
-    this.#saw429 = true;
+  /**
+   * After each answer: a 429 starts or extends the backoff, at least to
+   * Jupiter's own `x-ratelimit-reset`; anything else is Jupiter answering, which
+   * resets the step if no 429 came since the call left. `ticket` is that call's
+   * (beforeCall); without it, this turn's latest call's.
+   */
+  observe(status: number, headers: { get(name: string): string | null }, ticket: number | null = this.#lastTicket): void {
+    if (status !== 429) {
+      if (ticket !== null) this.#pacer._noteAnswered(ticket);
+      return;
+    }
     const reset = Number(headers.get("x-ratelimit-reset"));
     this.#pacer._note429(Number.isFinite(reset) && reset > 0 ? reset * 1_000 : null);
   }
@@ -531,7 +575,7 @@ export class JupiterReservation {
   release(): void {
     if (this.#released) return;
     this.#released = true;
-    this.#pacer._release(this.#remaining, this.#saw429);
+    this.#pacer._release(this.#remaining);
     this.#remaining = 0;
   }
 }
@@ -564,7 +608,7 @@ export function jupiterApiForTurn(access: JupiterAccess, reservation: JupiterRes
   return {
     baseUrl: access.baseUrl,
     fetch: async (url: string, init: RequestInit): Promise<Response> => {
-      await reservation.beforeCall();
+      const ticket = await reservation.beforeCall();
       let sent = init;
       if (access.apiKey !== null) {
         const headers = new Headers(init.headers);
@@ -572,7 +616,7 @@ export function jupiterApiForTurn(access: JupiterAccess, reservation: JupiterRes
         sent = { ...init, headers };
       }
       const response = await globalThis.fetch(url, sent);
-      reservation.observe(response.status, response.headers);
+      reservation.observe(response.status, response.headers, ticket);
       return response;
     },
   };
