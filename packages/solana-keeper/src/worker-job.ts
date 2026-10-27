@@ -69,7 +69,8 @@ import type { ClaimedVault, Completion, GateAnswer, IntentKind, Lane } from "./d
 import { investRests, settleRests, turnRests, type TurnInvest, type TurnSettle } from "./doorbell.js";
 import { CrankSender, type SigningWallet } from "./explicit-send.js";
 import { JobFence, type FenceStore } from "./fenced-sender.js";
-import { investFailedStreak } from "./invest-decision.js";
+import type { Alert } from "./alerts.js";
+import { investFailedStreak, type WrapReport } from "./invest-decision.js";
 import { readSweepState, settleLeavesSnapshotTrue, type InvestSnapshot } from "./invest-snapshot.js";
 import { runInvestTick, type InvestDeps, type InvestResult } from "./invest-tick.js";
 import type { JobChain } from "./job-chain.js";
@@ -81,7 +82,7 @@ import type { InvestmentRow, SettlementRow } from "./read-model.js";
 import type { RestBook } from "./rest-book.js";
 import { SAFETY_PASS_STEPS_MS } from "./credit-governor.js";
 import { keeperModeFor } from "./role-registry.js";
-import { activeBps, settleRetryStreak, type CarryBook } from "./settle-decision.js";
+import { activeBps, settleRetryStreak, type CarryBook, type SettleWaitingOn } from "./settle-decision.js";
 import { settleModuleFor, type ModulePrepared, type PerTradeServing } from "./settle-modules.js";
 import { runSettleTick, type SettleDeps, type SettleResult } from "./settle-tick.js";
 import { legOutbox, resolvePriorIntents, waitForPlanFloor, type TakeoverStore } from "./worker-takeover.js";
@@ -184,6 +185,8 @@ export interface LinkTurn {
   readonly detail: string;
   /** A per-trade span waiting on its own clock: the unix second it settles (SettleResult.dueAt). */
   readonly dueAt?: number;
+  /** A RETRY that waited on something shared (the loss-carry store): it neither counts nor pages per wallet (settleAlert). */
+  readonly waitingOn?: SettleWaitingOn;
   /**
    * A per-trade turn's rows, one per trade the probe counted: what the shadow
    * comparator and an operator read (ADR §5.7 M4: "/status lists per-trade rows").
@@ -214,6 +217,8 @@ export interface JobReport {
   readonly module: string | null;
   readonly settles: readonly LinkTurn[];
   readonly invest: { readonly outcome: TurnInvest; readonly detail: string } | null;
+  /** What the invest turn reported beside its outcome, for the alerts the legacy sweep raises from it (src/worker-alerts.ts). */
+  readonly investFacts?: { readonly wrap?: WrapReport; readonly feeWarnings?: readonly Alert[] };
   /** Intents this job gated. */
   readonly intents: number;
   /** Earlier fences' intents this job's takeover resolved. */
@@ -287,13 +292,17 @@ export function completionFor(input: {
   const { settles, invest, previous } = input;
   const settleRetries: Record<string, number> = {};
   for (const turn of settles) {
-    const n = settleRetryStreak(previous.settleRetries[turn.wallet] ?? 0, turn.outcome === "THREW" ? "RETRY" : turn.outcome);
+    // AS THE LEGACY SWEEP COUNTS THEM: a turn that THREW pages on its own
+    // (settleThrewAlert) and ends the RETRY run; a RETRY that waited on the shared
+    // carry store does not count (settleRetryStreak's waitingOn).
+    const n = turn.outcome === "THREW" ? 0 : settleRetryStreak(previous.settleRetries[turn.wallet] ?? 0, turn.outcome, turn.waitingOn);
     if (n > 0) settleRetries[turn.wallet] = n;
   }
   const investOutcome = invest?.outcome ?? null;
   const next: JobStreaks = {
     settleRetries,
-    investFailed: investOutcome === null || investOutcome === "THREW" ? previous.investFailed : investFailedStreak(previous.investFailed, investOutcome),
+    // A THROW IN THE INVEST HALF IS A FAILED TURN, as the legacy sweep folds it: it escalates to critical on the third.
+    investFailed: investOutcome === null ? previous.investFailed : investFailedStreak(previous.investFailed, investOutcome === "THREW" ? "FAILED" : investOutcome),
     investRefused: investOutcome === "REFUSED" ? previous.investRefused + 1 : investOutcome === null || investOutcome === "DEFERRED" ? previous.investRefused : 0,
     wrapShort: invest === null ? previous.wrapShort : input.wrapShort ? previous.wrapShort + 1 : 0,
   };
@@ -591,6 +600,7 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       outcome: result.outcome,
       detail: result.detail,
       ...(result.dueAt === undefined ? {} : { dueAt: result.dueAt }),
+      ...(result.waitingOn === undefined ? {} : { waitingOn: result.waitingOn }),
       ...(result.perTrade === undefined ? {} : { perTrade: perTradeLogRows(result.perTrade) }),
     });
     // THE MODULE HEARS HOW THE TURN ENDED before the next link's is built: a per-trade vault's daily counter moves with each settle.
@@ -673,6 +683,10 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
       });
       investTurn = { outcome: result.outcome, detail: result.detail };
       wrapShort = result.wrap?.short === true;
+      report.investFacts = {
+        ...(result.wrap === undefined ? {} : { wrap: result.wrap }),
+        ...(result.feeWarnings === undefined ? {} : { feeWarnings: result.feeWarnings }),
+      };
       if (result.outcome === "INVESTED" || result.outcome === "FAILED" || result.outcome === "REFUSED") {
         log(result.outcome === "INVESTED" ? "info" : "warn", `invest ${result.outcome.toLowerCase()}`, { vault: vaultAddr, detail: result.detail });
       }

@@ -29,12 +29,14 @@
 // SIGTERM: stop claiming, drain sends in flight for up to SIGTERM_DRAIN_MS, then
 // release every vault still held (due now), close the worker row, exit 0.
 //
-// NOT HERE YET, said once: the per-wallet alert ladder the legacy sweep pages
-// with (settleAlert, investFailedAlert, the seat alerts) and the Privy
-// authorization-key check. A worker logs every money outcome and keeps the
-// streaks in vault_work.streaks; the fleet's own alerts (lease-expired,
-// fence-reject, queue-lag, scheduler-stale, pg-saturated) are the scheduler's
-// (src/fleet-alerts.ts). Both are preconditions of P3c, not of a shadow.
+// ITS ALERTS (P3c's preconditions, 2026-10-27): the legacy sweep's per-wallet and
+// per-vault ladder, applied to each completed job (src/worker-alerts.ts: the same
+// functions, the same keys, the streaks from vault_work.streaks); the seat alert
+// where a wallet's Privy signer is resolved; and the Privy authorization-key
+// check at boot and every AUTHORIZATION_KEY_RECHECK_MS. They go to the keeper's
+// SIP_SOLANA_ALERT_WEBHOOK, titled "[worker] " (a shadow's "[worker, shadow] ").
+// The fleet's own alerts (lease-expired, fence-reject, queue-lag,
+// scheduler-stale, pg-saturated) stay the scheduler's (src/fleet-alerts.ts).
 
 import "../src/console-bridge.js";
 import { randomUUID } from "node:crypto";
@@ -48,7 +50,8 @@ import { RpcUsageCollector } from "../src/credit-governor.js";
 import { DispatchStore, PgRpcUsageFeed, createDispatchPool } from "../src/dispatch-store.js";
 import { createJobChain, type JobWallet } from "../src/job-chain.js";
 import { JupiterPacer, type JupiterAccess } from "../src/jupiter-pacer.js";
-import { createKeeperLogger } from "../src/keeper-log.js";
+import { createAlerter } from "../src/alerts.js";
+import { createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
 import { WalkCache, readTransaction } from "../src/measure-window.js";
 import { PolicyBoundaryBook, type OwnerHistoryReader } from "../src/policy-boundary.js";
 import { PgPriceTape, missingTapeColumns } from "../src/price-tape.js";
@@ -57,7 +60,24 @@ import { MODE_ROUNDUP_BYTE } from "../src/role-registry.js";
 import type { PerTradeServing } from "../src/settle-modules.js";
 import { runPreflight } from "../src/preflight.js";
 import { PrivyAddressBook, confirmedSubmitter } from "../src/privy-address-book.js";
-import { createPrivySolanaSigner, privyAddressSource, seatsSignable, type PrivySolanaConfig, type SolanaWalletSubmitter } from "../src/privy-signer.js";
+import {
+  AUTHORIZATION_KEY_BROKEN,
+  AuthorizationKeyUnreadable,
+  compareWithQuorum,
+  derivePrivyPublicKey,
+  quorumReadVerdict,
+  unreadableKeyVerdict,
+  type AuthorizationKeyCheck,
+  type AuthorizationKeyVerdict,
+} from "../src/privy-authorization-key.js";
+import {
+  createPrivySolanaSigner,
+  privyAddressSource,
+  readPrivyKeyQuorum,
+  seatsSignable,
+  type PrivySolanaConfig,
+  type SolanaWalletSubmitter,
+} from "../src/privy-signer.js";
 import { KEYED_API, LITE_API } from "../src/program-scripts.js";
 import { SolanaReadModel } from "../src/read-model.js";
 import { RestBook } from "../src/rest-book.js";
@@ -67,6 +87,7 @@ import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
 import { loadLocalSigners } from "../src/signers.js";
 import { keeperEnvOf, readWorkerSettings, workerRefusals, type WorkerSettings } from "../src/worker-config.js";
 import { jobLogFields, runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
+import { jobAlerts } from "../src/worker-alerts.js";
 import { WorkerLoop } from "../src/worker-loop.js";
 
 const log = createKeeperLogger();
@@ -131,6 +152,21 @@ const workerId = `worker:${hostname()}:${randomUUID()}`;
 const version = process.env["RAILWAY_GIT_COMMIT_SHA"]?.slice(0, 40) ?? "local";
 const programId = new PublicKey(config.programId);
 const world = settings.mode === "shadow" ? "shadow" : "live";
+
+// ── its alerts: the keeper's destination, told apart in the one chat ─────────
+const alerter = createAlerter({
+  webhookUrl: config.alertWebhook,
+  minSeverity: config.alertMinSeverity,
+  destination: config.alertChatId === null ? { kind: "webhook" } : { kind: "telegram", chatId: config.alertChatId },
+  links: { statusUrl: config.statusUrl },
+  titlePrefix: world === "shadow" ? "[worker, shadow] " : "[worker] ",
+  log: (severity, line) => log[severity === "critical" ? "error" : "warn"](`alert ${severity}`, fields({ detail: line })),
+  // THE BODY LEAVES THE BOX: what a log line passes, as every keeper alert (bin/keeper.mts).
+  sanitize: (text) => scrubbedForExport(text),
+});
+if (world === "live" && config.alertWebhook === null) {
+  log.warn("armed with no alert destination: a failed settle or buy on a queue vault reaches only this log", fields({}));
+}
 
 // ── the store: two connections, the replica's whole budget (ADR §3.11) ───────
 const pool = createDispatchPool(config.databaseUrl!, "worker", workerId.slice(0, 60), (message, extra) => log.warn(message, fields(extra)));
@@ -217,6 +253,23 @@ const keys: JobKeys | null =
           const view = await prepared;
           if (view.failed.has(address)) return local;
           const resolution = await createPrivySolanaSigner(privyConfig, wallet, config.privySignerId ?? undefined, view.index, config.privyPolicyId ?? undefined);
+          // THE LEGACY KEEPER'S SEAT ALERT (bin/keeper.mts), same key: a seat with no
+          // policy of its own could sign anything with that wallet, and nothing else
+          // here would say so. Cleared on every other outcome.
+          if (resolution.outcome === "SEAT_NOT_BOUNDED") {
+            alerter.fire({
+              key: `seat-unbounded:${address}`,
+              severity: "critical",
+              title: "A trading wallet seats the keeper's signer with no policy of its own",
+              detail:
+                "Nothing is signed for it. A seat without exactly the keeper's override policy could sign any " +
+                "message, send any transaction and export that wallet's key. Re-seat it from the web and check it " +
+                "with `privy-policy verify`.",
+              context: { wallet: address, overridePolicyIds: resolution.overridePolicyIds, expected: config.privyPolicyId },
+            });
+          } else {
+            alerter.clear(`seat-unbounded:${address}`);
+          }
           if (resolution.outcome === "SIGNER") return confirmedSubmitter(resolution.signer, privyBook);
           log.warn("no Privy signer for this wallet", fields({ wallet: address, outcome: resolution.outcome }));
           return local;
@@ -271,6 +324,15 @@ const loop = new WorkerLoop({
     });
     // EACH WALLET'S SETTLE BY ADDRESS, beside the outcomes: what the local shadow compares with production's /status.
     log.info(end.kind === "complete" ? "job done" : "job stopped", fields(jobLogFields(end)));
+    // THE LEGACY SWEEP'S LADDER, for this vault's wallets and its invest: cleared, then fired.
+    try {
+      const rules = jobAlerts(end);
+      for (const key of rules.clear) alerter.clear(key);
+      for (const alert of rules.fire) alerter.fire(alert);
+    } catch (error) {
+      // An alert that cannot be raised never fails a job that moved money.
+      log.warn("the job's alerts could not be raised", fields({ vault: claimed.vault, detail: summarizeUpstreamError(error) }));
+    }
     return end;
   },
   beat: async () => {
@@ -299,10 +361,75 @@ log.info("worker starting", fields({
         },
 }));
 
+// ── the Privy authorization key, at boot and on a cadence (bin/keeper.mts's rule) ─
+// WHY: every other signal is healthy when the key does not belong to the signer
+// quorum; Privy refuses only at the send, so the first sign of it would be a
+// settle of a user's money that does not go out. It arms and reports loudly; it
+// does not refuse to start (the legacy keeper's reasons, establishAuthorizationKey).
+// A shadow worker reads no signing secret, so privyConfig is null and nothing runs.
+const AUTHORIZATION_KEY_ALERT_KEY = "privy-authorization-key";
+const AUTHORIZATION_KEY_RECHECK_MS = 30 * 60_000;
+/** Unreadable quorum reads in a row before the unknown itself is worth saying. */
+const AUTHORIZATION_KEY_UNREADABLE_STREAK = 3;
+let authorizationKeyUnreadable = 0;
+let lastAuthorizationKeyCheck: AuthorizationKeyCheck | null = null;
+async function checkAuthorizationKey(): Promise<void> {
+  const signerId = config.privySignerId;
+  if (privyConfig === null || signerId === null) return;
+  let verdict: AuthorizationKeyVerdict;
+  let detail: string | null = null;
+  try {
+    // REVEALED INSIDE THE CALL THAT NEEDS IT; what comes back is a PUBLIC key.
+    const derived = derivePrivyPublicKey(privyConfig.authorizationKey.reveal());
+    try {
+      verdict = compareWithQuorum(derived, await readPrivyKeyQuorum(privyConfig, signerId));
+    } catch (error) {
+      verdict = quorumReadVerdict(error, derived);
+      detail = summarizeUpstreamError(error, { take: 3, maxChars: 400 });
+    }
+  } catch (error) {
+    if (!(error instanceof AuthorizationKeyUnreadable)) throw error;
+    verdict = unreadableKeyVerdict();
+    detail = error.message;
+  }
+  const changed = lastAuthorizationKeyCheck !== verdict.check;
+  if (changed && lastAuthorizationKeyCheck !== null) alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+  lastAuthorizationKeyCheck = verdict.check;
+  authorizationKeyUnreadable = verdict.check === "quorum-unreadable" ? authorizationKeyUnreadable + 1 : 0;
+  const context = { signerId, verdict: verdict.check, derivedPublicKey: verdict.derivedPublicKey, meaning: verdict.meaning, next: verdict.next, ...(detail === null ? {} : { detail }) };
+  if (verdict.check === "matches") {
+    if (changed) log.info("privy authorization key belongs to the signer quorum", fields(context));
+    alerter.clear(AUTHORIZATION_KEY_ALERT_KEY);
+    return;
+  }
+  const broken = AUTHORIZATION_KEY_BROKEN.has(verdict.check);
+  log[broken ? "error" : "warn"]("privy authorization key", fields(context));
+  if (verdict.check === "quorum-unreadable" && authorizationKeyUnreadable < AUTHORIZATION_KEY_UNREADABLE_STREAK) return;
+  const unknown = verdict.check === "quorum-unreadable";
+  alerter.fire({
+    key: AUTHORIZATION_KEY_ALERT_KEY,
+    severity: broken ? "critical" : "warn",
+    title: broken
+      ? "The worker's authorization key does not belong to its signer quorum"
+      : unknown
+        ? "The worker has not been able to check its authorization key for hours"
+        : "The worker's authorization key could not be checked against its signer quorum",
+    detail: `${verdict.meaning} ${verdict.next}`,
+    context: { signerId, derivedPublicKey: verdict.derivedPublicKey, ...(unknown ? { consecutiveAttempts: authorizationKeyUnreadable } : {}) },
+  });
+}
+const recheckAuthorizationKey = (): void =>
+  void checkAuthorizationKey().catch((error: unknown) =>
+    log.warn("the authorization key could not be checked", fields({ detail: summarizeUpstreamError(error, { take: 3, maxChars: 400 }) })),
+  );
+recheckAuthorizationKey();
+const authorizationKeyTimer = privyConfig === null ? null : setInterval(recheckAuthorizationKey, AUTHORIZATION_KEY_RECHECK_MS);
+
 let stopping = false;
 const shutdown = async (signal: string): Promise<void> => {
   if (stopping) return;
   stopping = true;
+  if (authorizationKeyTimer !== null) clearInterval(authorizationKeyTimer);
   log.info("worker stopping", fields({ signal, busy: loop.busy }));
   const drained = await loop.stop();
   await collector.flush(usageFeed).catch(() => undefined);
