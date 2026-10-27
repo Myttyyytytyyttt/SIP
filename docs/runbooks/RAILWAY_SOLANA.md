@@ -878,6 +878,11 @@ recibos y 150 bloques; lo que hace está en `scheduler.autoArm` de su `/status`,
 (sin poner, los dos); con los vigilantes de siempre parados es `none`, y aun así toda fila suya no marcada `gone` tiene
 que haber leído el vault, así que márcalas cuando hayas comprobado en Railway que sus contenedores ya no existen
 (`H gone --stale`, pasados 15 min sin leer). `H new-vaults legacy` lo deshace para los vaults que aún no tengan fila.
+Si queda un vault `legacy` con un enlace vivo, o `fleet.new_vault_system` sigue en `legacy`, mientras los vigilantes de
+siempre están retirados (`SIP_SOLANA_LEGACY_ROLES=none`) o ninguno ha leído en 15 min, el scheduler avisa al momento y a
+los 30 min despierta (`legacy-orphaned`; lo que ve está en `fleet.legacy` de su `/status`): sin los vigilantes de
+siempre, nadie liquida ni compra para esos usuarios. Termina el traspaso con `flota-prod traspasar-todos` y `flota-prod nuevos-a-la-cola`, o vuelve a arrancar
+los vigilantes (y quita `none`).
 
 **Ver y desaparcar.** `H status --all` lista todas las filas de `vault_work`, también las `legacy`, con su último
 resultado, `parked_reason` y `webhookOwner`. Un vault que el scheduler aparcó (`vault-parked`: 5 reclamaciones seguidas

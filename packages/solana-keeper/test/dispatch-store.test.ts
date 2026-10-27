@@ -185,6 +185,8 @@ describe("the four statements, as ADR §3.5 writes them", () => {
     expect(COMPLETE_SQL).toContain("SET holder = NULL, lease_until = NULL, last_holder = $2, attempts = 0");
     // NOTHING BUT A CLAIM MOVES A FENCE: complete only matches on it.
     expect(COMPLETE_SQL.slice(COMPLETE_SQL.indexOf("SET"), COMPLETE_SQL.indexOf("WHERE"))).not.toContain("fence");
+    // THE MODE BYTE THE JOB READ, FOR THE PAGE: a completion without one keeps the row's.
+    expect(COMPLETE_SQL).toContain("skim_mode = COALESCE($11::smallint, skim_mode)");
   });
 
   it("the overlap audit is the ADR's, except that a NULL plan height is an audit row instead of dropping out of it", () => {
@@ -377,7 +379,7 @@ describe("DispatchStore, over a scripted client", () => {
     const db = scripted(() => ({ rows: [{ vault_addr: "V" }] }));
     const done = await new DispatchStore(db.pool, "w").complete({ vault: "V", fence: 3n }, { rests: true, lane: "busy", streaks: { a: 1 }, outcome: "INVESTED", detail: "more left", dueInSeconds: 60 });
     expect(done).toBe(true);
-    expect(db.sent).toEqual([{ text: COMPLETE_SQL, values: ["V", "w", "3", true, "busy", LANE_PRIORITY.busy, '{"a":1}', "INVESTED", "more left", 60] }]);
+    expect(db.sent).toEqual([{ text: COMPLETE_SQL, values: ["V", "w", "3", true, "busy", LANE_PRIORITY.busy, '{"a":1}', "INVESTED", "more left", 60, null] }]);
     await expect(new DispatchStore(db.pool, "w").complete({ vault: "V", fence: 3n }, { rests: true, lane: "busy", streaks: {}, outcome: "X", detail: null, dueInSeconds: -1 })).rejects.toThrow(
       /delay of 0 or more seconds/,
     );
@@ -387,7 +389,18 @@ describe("DispatchStore, over a scripted client", () => {
     const db = scripted(() => ({ rows: [] }));
     const released = await new DispatchStore(db.pool, "w").release({ vault: "V", fence: 3n, lane: "safety", skimMode: 0, streaks: { s: 1 }, attempts: 2 }, "SIGTERM");
     expect(released).toBe(false);
-    expect(db.sent[0]!.values).toEqual(["V", "w", "3", false, "safety", LANE_PRIORITY.safety, '{"s":1}', "RELEASED", "SIGTERM", 0]);
+    // THE CLAIM'S BYTE IS NOT WRITTEN BACK: a release read no vault, and the row keeps what it has.
+    expect(db.sent[0]!.values).toEqual(["V", "w", "3", false, "safety", LANE_PRIORITY.safety, '{"s":1}', "RELEASED", "SIGTERM", 0, null]);
+  });
+
+  it("writes the mode byte a job read, and nothing for a value that is not a byte: the row keeps its own", async () => {
+    const db = scripted(() => ({ rows: [{ vault_addr: "V" }] }));
+    const store = new DispatchStore(db.pool, "w");
+    const done = { rests: true, lane: "safety", streaks: {}, outcome: "IDLE", detail: null, dueInSeconds: 60 } as const;
+    for (const skimMode of [0, 1, 255, null, undefined, -1, 256, 1.5, Number.NaN]) {
+      await store.complete({ vault: "V", fence: 3n }, skimMode === undefined ? done : { ...done, skimMode });
+    }
+    expect(db.sent.map((sent) => sent.values?.at(-1))).toEqual([0, 1, 255, null, null, null, null, null, null]);
   });
 
   it("records a settle's signature once, when Privy answers, and never over another", async () => {

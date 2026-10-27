@@ -1,7 +1,8 @@
 // The dispatcher's five alerts (Q5): lease-expired, fence-reject, queue-lag,
 // scheduler-stale and pg-saturated (dispatcher ADR §6.3 rows "leases (L4+)" and
 // "Postgres (L4+)", §4.9 rows 1-7 and 15, §3.11 "Health"; plan §3.3.1 Q5) —
-// and a sixth the cut-over needs, vault-unserved, one key per vault.
+// and two the cut-over needs: vault-unserved, one key per vault, and
+// legacy-orphaned, one for the fleet.
 //
 // THE ADR'S SEVERITIES AND NOTHING LOUDER. Only `critical` leaves the box
 // (src/alerts.ts), so the severity IS the decision to wake somebody:
@@ -15,6 +16,9 @@
 //   | pg-saturated           | —                            | queries waiting for a connection on    |
 //   |                        |                              | 3 ticks in a row                       |
 //   | vault-unserved:<vault> | draining > 15 minutes        | draining > 60 minutes                  |
+//   | legacy-orphaned        | a legacy vault (or new vaults| the same for 30 minutes                |
+//   |                        | going legacy) with keepers   |                                        |
+//   |                        | retired or 15 minutes silent |                                        |
 //
 // Where the ADR names only the page, there is no warn: a lower rung nobody
 // asked for is a new behaviour, and on this branch a new behaviour is off until
@@ -35,6 +39,24 @@
 // the same view (fleet.unserved), but it already pages as vault-parked when the
 // reap parks it (src/scheduler.ts), so nothing here pages it again.
 //
+// legacy-orphaned IS THE CUT-OVER'S TOO (2026-10-27), for its last step: the
+// legacy keepers are stopped (not deleted) and SIP_SOLANA_LEGACY_ROLES=none says
+// so on the scheduler. A vault still 'legacy' then is one the legacy keepers
+// alone may act on (src/dispatch-select.ts) and no worker claims — and
+// fleet.new_vault_system = 'legacy' hands every new user's vault to them too.
+// Nothing else pages it: such a row is not draining, so vault-unserved never
+// sees it, and the keepers that used to page about their own wallets are the
+// ones that stopped. It fires when legacy vaults exist (or new vaults go there)
+// AND either the operator has declared the keepers retired (`retired`, the
+// variable) or none of them has read in LEGACY_READ_FRESH_MS (fleet.legacy:
+// fresh 0 — they are down whatever the variable says). It warns at once and
+// pages once it has lasted 30 minutes, timed from the last legacy read when
+// they are silent (the database's clock: since then nobody has served those
+// vaults), and from this process's first sight of it otherwise. Only the lock
+// holder raises it, only under SIP_SOLANA_DISPATCH=on (bin/scheduler.mts hands
+// the evaluator `legacy` there alone): a shadow scheduler's database is not the
+// one users are served from, and has no legacy keeper writing receipts to it.
+//
 // scheduler-stale IS ALSO A WORKER'S (ADR §3.11). The scheduler's two replicas
 // page it about each other; when both are gone, nobody would. So a worker reads
 // fleet.tick_at on its own beat and applies the same rule through
@@ -50,7 +72,7 @@
 // WHO EVALUATES WHAT. Two scheduler replicas read the same snapshot; if both
 // paged, every condition would page twice. So only the replica that holds the
 // scheduler lock (`acting`) raises the fleet's conditions — lease-expired,
-// fence-reject, queue-lag, vault-unserved. scheduler-stale is evaluated by EVERY reader, the
+// fence-reject, queue-lag, vault-unserved, legacy-orphaned. scheduler-stale is evaluated by EVERY reader, the
 // standby above all: a hung lock holder is exactly the process that will not
 // page about itself (ADR §4.9 row 15), and the ADR has workers page it too
 // (§3.11). pg-saturated is about this process's own pools, so each process
@@ -60,7 +82,7 @@
 // only who is woken.
 
 import type { Alerter } from "./alerts.js";
-import type { FleetSnapshot, PoolSample, UnservedVault } from "./fleet-status.js";
+import type { FleetLegacy, FleetSnapshot, PoolSample, UnservedVault } from "./fleet-status.js";
 import type { AlertDecision } from "./usage-alerts.js";
 
 const nothing: AlertDecision = { fire: null, clear: false };
@@ -307,6 +329,98 @@ export function vaultUnservedAlert(input: { readonly vault: string; readonly for
   };
 }
 
+// --- legacy-orphaned ---------------------------------------------------------
+
+export const LEGACY_ORPHANED_ALERT_KEY = "legacy-orphaned";
+/**
+ * How long a legacy keeper may go without reading before it counts as down: 15
+ * minutes, handover.ts's LEGACY_READ_FRESH_MS, which fleet.legacy.fresh counts
+ * by (src/fleet-pg.ts). Redeclared because a worker loads this file and must not
+ * load the handover's (test/fleet-alerts.test.ts holds the two equal).
+ */
+export const LEGACY_SILENT_AFTER_MS = 15 * 60_000;
+/** Orphaned this long, it pages: half an hour. */
+export const LEGACY_ORPHANED_CRITICAL_MS = 30 * 60_000;
+
+/**
+ * The condition, without its clock: vaults the legacy keepers alone serve — a
+ * 'legacy' row a live link names, or new vaults enrolled as 'legacy' — while
+ * those keepers are retired (SIP_SOLANA_LEGACY_ROLES=none) or silent (no
+ * receipt not marked gone has read within LEGACY_SILENT_AFTER_MS).
+ */
+export function legacyOrphaned(legacy: FleetLegacy, retired: boolean): boolean {
+  const exposed = legacy.vaults > 0 || legacy.newVaultSystem === "legacy";
+  return exposed && (retired || legacy.fresh === 0);
+}
+
+/**
+ * How long the condition has lasted, or null when it does not hold: since the
+ * last legacy read when the keepers are silent (nobody has served those vaults
+ * since), and never less than `observedForMs`, what this evaluator has watched
+ * — the only clock while keepers declared retired are still reading, or when
+ * none ever read.
+ */
+export function legacyOrphanedForMs(input: { readonly legacy: FleetLegacy; readonly retired: boolean; readonly observedForMs: number }): number | null {
+  const { legacy, retired } = input;
+  if (!legacyOrphaned(legacy, retired)) return null;
+  const silentForMs = legacy.fresh === 0 ? (legacy.lastReadAgeMs ?? 0) : 0;
+  return Math.max(0, input.observedForMs, silentForMs);
+}
+
+/**
+ * legacy-orphaned (the header): warn as soon as it holds, page from
+ * LEGACY_ORPHANED_CRITICAL_MS, clear once it does not.
+ *
+ * WHAT TO DO IS IN THE DETAIL, in the owner's own commands: `flota-prod
+ * traspasar-todos` moves every legacy vault to the queue, one after another, and
+ * `flota-prod nuevos-a-la-cola` sends new vaults there (it refuses unless the
+ * scheduler arms by itself, SIP_SOLANA_AUTO_ARM=on); or, if the legacy keepers
+ * are meant to be up, they are restarted.
+ */
+export function legacyOrphanedAlert(input: { readonly legacy: FleetLegacy; readonly retired: boolean; readonly observedForMs: number }): AlertDecision {
+  const forMs = legacyOrphanedForMs(input);
+  if (forMs === null) return cleared;
+  const { legacy, retired } = input;
+  const critical = forMs >= LEGACY_ORPHANED_CRITICAL_MS;
+  const n = legacy.vaults;
+  const newGoLegacy = legacy.newVaultSystem === "legacy";
+  const silent = legacy.fresh === 0;
+  const left = [
+    ...(n === 0
+      ? []
+      : [`${n} vault${n === 1 ? "" : "s"} with a live link ${n === 1 ? "is" : "are"} still 'legacy' (vault_work.system): no worker claims ${n === 1 ? "it" : "them"}`]),
+    ...(newGoLegacy ? ["fleet.new_vault_system is 'legacy': every new user's vault is enrolled for the legacy keepers"] : []),
+  ];
+  const who = n === 0 ? "new users" : n === 1 && !newGoLegacy ? "that user" : "those users";
+  // RETIRED BUT STILL READING IS A PAGE ABOUT WHAT COMES NEXT, not a claim that nobody serves them now.
+  const consequence = silent
+    ? `nobody settles or buys for ${who}`
+    : `${legacy.fresh} legacy keeper${legacy.fresh === 1 ? " still reads" : "s still read"}, and once ${legacy.fresh === 1 ? "it stops" : "they stop"} nobody settles or buys for ${who}`;
+  const lastRead = legacy.lastReadAgeMs === null ? "none ever has" : `the last read was ${minutes(legacy.lastReadAgeMs)} min ago`;
+  const why =
+    retired && silent
+      ? `SIP_SOLANA_LEGACY_ROLES=none on this scheduler says the legacy keepers are retired, and none has read in ${LEGACY_SILENT_AFTER_MS / 60_000} min (${lastRead})`
+      : retired
+        ? "SIP_SOLANA_LEGACY_ROLES=none on this scheduler says the legacy keepers are retired"
+        : `no legacy keeper has read in ${LEGACY_SILENT_AFTER_MS / 60_000} min (${lastRead}): stopped, crashing, or running without SIP_SOLANA_DISPATCH`;
+  return {
+    fire: {
+      key: LEGACY_ORPHANED_ALERT_KEY,
+      severity: critical ? "critical" : "warn",
+      title: critical
+        ? "For half an hour, vaults have been left to legacy keepers that are retired or silent"
+        : "Vaults are still the legacy keepers', and those keepers are retired or silent",
+      detail:
+        `${left.join("; ")}. ${why}: ${consequence}. This has held for ${minutes(forMs)} min. ` +
+        "To finish the move: `flota-prod traspasar-todos` moves every legacy vault to the queue, and " +
+        "`flota-prod nuevos-a-la-cola` sends new vaults there (with SIP_SOLANA_AUTO_ARM=on on the scheduler). To keep the legacy keepers " +
+        `instead: restart sip-solana-keeper and sip-solana-volume-keeper${retired ? " and unset SIP_SOLANA_LEGACY_ROLES" : ""}. Read fleet.legacy on /status.`,
+      context: { legacyVaults: n, newVaultSystem: legacy.newVaultSystem, retired, fresh: legacy.fresh, lastReadAgeMs: legacy.lastReadAgeMs, forMs },
+    },
+    clear: false,
+  };
+}
+
 // --- scheduler-stale, from a worker ------------------------------------------
 
 /** What a worker's watch shows of the scheduler's tick. */
@@ -394,6 +508,8 @@ export interface FleetAlertsStatus {
   readonly schedulerTickAgeMs: number | null;
   /** The longest any vault has been draining (fleet.unserved), what `vault-unserved` reads; null when none is. */
   readonly unservedOldestMs: number | null;
+  /** How long legacy-orphaned's condition has held (legacyOrphanedForMs); null when it does not, or when this process does not evaluate it. */
+  readonly legacyOrphanedForMs: number | null;
   /** This process's pools at the last tick, summed, and how many ticks in a row had queries waiting. */
   readonly pg: { readonly waiting: number; readonly total: number; readonly idle: number; readonly saturatedStreak: number } | null;
   /** Keys this evaluator has raised and not cleared. */
@@ -404,11 +520,17 @@ export interface FleetAlertsOptions {
   readonly alerter: Pick<Alerter, "fire" | "clear">;
   /** One window: the scheduler's tick (SIP_SOLANA_SWEEP_MS, 60 s by default). */
   readonly windowMs: number;
+  /**
+   * legacy-orphaned's input from the scheduler's configuration: `retired` is
+   * SIP_SOLANA_LEGACY_ROLES=none. Absent or null, the rule is not evaluated —
+   * bin/scheduler.mts hands it only under SIP_SOLANA_DISPATCH=on.
+   */
+  readonly legacy?: { readonly retired: boolean } | null;
   readonly now?: () => number;
 }
 
 /**
- * Applies the five rules to what a dispatcher process sees: each fleet snapshot
+ * Applies the rules to what a dispatcher process sees: each fleet snapshot
  * (observeSnapshot, from FleetStatusReader's onSnapshot) and its own pools once
  * per tick (observePools).
  */
@@ -437,12 +559,17 @@ export class FleetAlerts {
   #unservedOldestMs: number | null = null;
   /** The vaults this evaluator has raised `vault-unserved` for and not cleared. */
   readonly #unservedFiring = new Set<string>();
+  readonly #legacy: { readonly retired: boolean } | null;
+  /** When this process first saw legacy-orphaned's condition hold, unbroken since; null while it does not. */
+  #legacyOrphanSince: number | null = null;
+  #legacyOrphanedForMs: number | null = null;
   #pool: { waiting: number; total: number; idle: number } | null = null;
   #saturatedStreak = 0;
 
   constructor(options: FleetAlertsOptions) {
     this.#alerter = options.alerter;
     this.#windowMs = options.windowMs;
+    this.#legacy = options.legacy ?? null;
     this.#now = options.now ?? (() => Date.now());
     this.#startedAt = this.#now();
   }
@@ -460,7 +587,7 @@ export class FleetAlerts {
   /**
    * One snapshot. The evidence is kept whether or not this process is acting —
    * a standby that takes the lock pages on the hour it already watched — but
-   * only the acting replica raises the fleet's four conditions.
+   * only the acting replica raises the fleet's conditions.
    */
   observeSnapshot(snapshot: FleetSnapshot, input: { readonly acting: boolean }): void {
     const now = this.#now();
@@ -511,6 +638,17 @@ export class FleetAlerts {
     const draining = snapshot.unserved.vaults.filter((row) => row.system === "draining");
     this.#unservedOldestMs = draining.reduce<number | null>((oldest, row) => (row.forMs !== null && (oldest === null || row.forMs > oldest) ? row.forMs : oldest), null);
 
+    // LEGACY-ORPHANED'S CLOCK RUNS ON EVERY REPLICA, like the hour of leases. A
+    // snapshot without the block is no evidence: the clock and the page stand.
+    let legacyDecision: AlertDecision | null = null;
+    if (this.#legacy !== null && snapshot.legacy !== null) {
+      const holds = legacyOrphaned(snapshot.legacy, this.#legacy.retired);
+      this.#legacyOrphanSince = holds ? (this.#legacyOrphanSince ?? now) : null;
+      const input = { legacy: snapshot.legacy, retired: this.#legacy.retired, observedForMs: holds ? now - this.#legacyOrphanSince! : 0 };
+      this.#legacyOrphanedForMs = legacyOrphanedForMs(input);
+      legacyDecision = legacyOrphanedAlert(input);
+    }
+
     if (input.acting) {
       this.#apply(leaseExpiredAlert({ expiredLastHour: this.#expiries.size, latest: this.#latestExpiry }), LEASE_EXPIRED_ALERT_KEY);
       const workers = [...new Set(this.#rejectEvents.map((event) => event.worker))];
@@ -520,11 +658,13 @@ export class FleetAlerts {
         QUEUE_LAG_ALERT_KEY,
       );
       this.#evaluateUnserved(draining, snapshot.unserved.draining);
+      if (legacyDecision !== null) this.#apply(legacyDecision, LEGACY_ORPHANED_ALERT_KEY);
     } else {
       // A REPLICA THAT STOPPED ACTING HANDS ITS PAGES BACK: cleared here, so the
       // day it acts again they fire afresh, and meanwhile the holder pages them.
       for (const key of [LEASE_EXPIRED_ALERT_KEY, FENCE_REJECT_ALERT_KEY, QUEUE_LAG_ALERT_KEY]) this.#apply(cleared, key);
       for (const vault of [...this.#unservedFiring]) this.#clearUnserved(vault);
+      if (this.#legacy !== null) this.#apply(cleared, LEGACY_ORPHANED_ALERT_KEY);
     }
     this.#apply(schedulerStaleAlert({ tickAgeMs: this.#tickAgeMs, upMs: now - this.#startedAt }), SCHEDULER_STALE_ALERT_KEY);
   }
@@ -602,6 +742,7 @@ export class FleetAlerts {
       queueOldestDueMs: this.#queueOldestDueMs,
       schedulerTickAgeMs: this.#tickAgeMs,
       unservedOldestMs: this.#unservedOldestMs,
+      legacyOrphanedForMs: this.#legacyOrphanedForMs,
       pg: this.#pool === null ? null : { ...this.#pool, saturatedStreak: this.#saturatedStreak },
       firing: [...this.#firing].sort(),
     };

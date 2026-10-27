@@ -133,6 +133,8 @@
 //     ONE (holder 1 + 1 pinned, standby 1). The pools here are sized to the
 //     table: SCHEDULER_POOL_MAX = 1, WORKER_POOL_MAX = 2.
 //   * COMPLETE's `$10` is a delay in seconds (the clock paragraph above says why).
+//   * COMPLETE also writes skim_mode ($11), which the ADR's statement leaves to
+//     nobody: the mode byte the job read from the chain, for the page only.
 //   * CLAIM's affinity is bounded (CLAIM_AFFINITY_SECONDS): the ADR's
 //     unbounded order starved a dead worker's vaults under a full-pass backlog.
 //   * The overlap audit counts a NULL plan_cleared_height as -1 (OVERLAP_AUDIT_SQL
@@ -338,10 +340,20 @@ SELECT (SELECT id FROM i) AS id, EXISTS (SELECT 1 FROM l) AS held, (SELECT floor
  * COMPLETE (ADR §3.5), and RELEASE with a delay of 0. A bell rung after the claim
  * makes the vault due at once: a bell during the turn is not lost. `$10` is a
  * delay in seconds added to the database's clock (the header says why).
+ *
+ * `$11` IS THE MODE BYTE THE JOB READ FROM THE CHAIN, OR NULL, AND ONLY THE
+ * PAGES SHOW IT (fleet.vaults, `dispatch-handover status`, flota-prod); CLAIM
+ * hands it back in ClaimedVault.skimMode, which nothing reads. Until it was
+ * written here nothing wrote skim_mode, so every row showed no mode. COALESCE:
+ * a job that never read the vault (a takeover's wait, a vault account missing,
+ * a THREW, a release) keeps the byte the last read left. Nothing picks a module
+ * from the column: the job picks it from its own fresh read (src/worker-job.ts,
+ * settleModuleFor(vault.skimMode)), so a stale byte here moves no money.
  */
 export const COMPLETE_SQL = `UPDATE ${VAULT_WORK}
    SET holder = NULL, lease_until = NULL, last_holder = $2, attempts = 0, rests = $4, lane = $5,
        priority = $6, streaks = $7, last_outcome = $8, last_detail = $9, last_done_at = clock_timestamp(),
+       skim_mode = COALESCE($11::smallint, skim_mode),
        due_at = CASE WHEN bell_at > claimed_at THEN clock_timestamp()
                      ELSE clock_timestamp() + make_interval(secs => $10::double precision) END
  WHERE vault_addr = $1 AND holder = $2 AND fence = $3
@@ -543,7 +555,10 @@ export interface ClaimedVault {
   readonly vault: string;
   readonly fence: bigint;
   readonly lane: string;
-  /** The last mode byte read, or null: it picks the job's module and is never trusted to settle. */
+  /**
+   * The mode byte the last COMPLETE recorded, or null. Read back for nothing:
+   * the job picks its module from the vault it reads fresh, never from this.
+   */
   readonly skimMode: number | null;
   readonly streaks: Readonly<Record<string, unknown>>;
   /** Consecutive claims that did not complete, this one included. */
@@ -608,7 +623,17 @@ export interface Completion {
   readonly detail: string | null;
   /** Seconds after the database's clock at which the vault is due again; 0 for at once. */
   readonly dueInSeconds: number;
+  /**
+   * The mode byte this job read from the vault on chain, for the page only
+   * (COMPLETE_SQL's `$11`). Absent or null — a job that read no vault — keeps
+   * the row's; a value that is not a byte is not written either.
+   */
+  readonly skimMode?: number | null;
 }
+
+/** A mode byte COMPLETE may write: a whole number in 0..255, else null (the row keeps its own). */
+const modeByteOrNull = (value: number | null | undefined): number | null =>
+  typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 255 ? value : null;
 
 /** An open intent of an earlier fence, as a job's takeover reads it. */
 export interface OpenIntent {
@@ -806,6 +831,7 @@ export class DispatchStore {
       done.outcome,
       done.detail,
       done.dueInSeconds,
+      modeByteOrNull(done.skimMode),
     ]);
     return rows.length > 0;
   }

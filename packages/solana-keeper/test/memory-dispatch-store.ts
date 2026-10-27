@@ -17,7 +17,8 @@
 //     fence's COALESCE(resolved_height, last_valid_block_height), NULL only when
 //     there is none); a shadow store's rows are 'shadow' and its carries dropped;
 //   * COMPLETE / RELEASE — only while still held at this fence; a bell rung after
-//     the claim makes the vault due at once;
+//     the claim makes the vault due at once; the job's mode byte written when it
+//     carries one that is a byte, the row's kept otherwise (COALESCE);
 //   * the overlap audit, NULL-aware as the store's is.
 
 import type {
@@ -271,6 +272,8 @@ export class MemoryDispatchStore {
     row.streaks = { ...done.streaks };
     row.lastOutcome = done.outcome;
     row.lastDetail = done.detail;
+    const mode = done.skimMode;
+    if (typeof mode === "number" && Number.isInteger(mode) && mode >= 0 && mode <= 255) row.skimMode = mode;
     row.dueAt = row.bellAt !== null && row.claimedAt !== null && row.bellAt > row.claimedAt ? now : now + done.dueInSeconds * 1_000;
     return true;
   }

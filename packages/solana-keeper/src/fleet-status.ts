@@ -222,6 +222,28 @@ export interface FleetUnserved {
 }
 
 /**
+ * THE LEGACY KEEPERS' SIDE OF THE FLEET, counted whole: what `legacy-orphaned`
+ * reads (src/fleet-alerts.ts). The vaults still theirs, where a new vault goes,
+ * and whether any of them is still reading — sip_solana.legacy_process, the
+ * receipt each legacy keeper running with SIP_SOLANA_DISPATCH writes once a
+ * sweep (src/dispatch-select.ts). Once the keepers are stopped, a vault here is
+ * one nobody settles or buys for, and the unserved view (draining and parked
+ * rows only) does not list it.
+ */
+export interface FleetLegacy {
+  /** Rows with system = 'legacy' whose vault a live link still names (keeper_link, gone_at IS NULL): users only a legacy keeper serves. */
+  readonly vaults: number;
+  /** fleet.new_vault_system: 'legacy' gives every new vault to the legacy keepers; null when no fleet row exists (then nothing is enrolled). */
+  readonly newVaultSystem: string | null;
+  /** legacy_process rows not marked gone. */
+  readonly receipts: number;
+  /** Of those, the ones read within LEGACY_READ_FRESH_MS (15 minutes, src/handover.ts): legacy keepers reading lately. */
+  readonly fresh: number;
+  /** How long ago any legacy keeper last read, gone or not, by the database's clock; null when none ever has. */
+  readonly lastReadAgeMs: number | null;
+}
+
+/**
  * What a worker reports about itself in `worker.stats` (jsonb), the contract
  * between the worker (Q3, which writes it on its heartbeat) and this page.
  * COUNTERS SINCE THAT WORKER'S BOOT, and two over a window of its own. Only
@@ -370,6 +392,8 @@ export interface FleetSnapshot {
   readonly vaultsTruncated: number;
   /** The vaults nobody serves: draining, or parked on the queue. */
   readonly unserved: FleetUnserved;
+  /** The legacy keepers' vaults and receipts; null when the statement returned no such block (no evidence, never zeros). */
+  readonly legacy: FleetLegacy | null;
 }
 
 /**

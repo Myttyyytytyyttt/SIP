@@ -26,9 +26,10 @@
 //   5. INVEST ONCE for the vault (owner decision 11), every wrap, convert and leg
 //      gated by the fence through the explicit-send order; each landed leg's
 //      history row written before its intent is resolved (the outbox, S-9).
-//   6. COMPLETE, due again by what it found (ADR §3.7), or — when the job may no
-//      longer act (its lease, its ceiling, a SIGTERM) — stop, and the loop
-//      releases what it still holds.
+//   6. COMPLETE, due again by what it found (ADR §3.7), with the mode byte step 3
+//      read (vault_work.skim_mode: the page's, never this job's input), or — when
+//      the job may no longer act (its lease, its ceiling, a SIGTERM) — stop, and
+//      the loop releases what it still holds.
 //
 // THE SHADOW WORLD (SIP_SOLANA_DISPATCH=shadow): the same job, keyless and dry.
 // Every would-be send is gated as a 'shadow' intent and nothing is sent: the
@@ -432,7 +433,14 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
   let fence: JobFence | null = null;
   const stopReason = (): string | null => fence?.lostReason ?? deps.mayAct();
   const stop = (reason: string): JobEnd => ({ kind: "stop", reason, report: { ...report, intents: fence?.intents.length ?? 0 } });
-  const complete = (completion: Completion): JobEnd => ({ kind: "complete", completion, report: { ...report, intents: fence?.intents.length ?? 0 } });
+  // THE MODE BYTE THIS JOB READ, ON EVERY COMPLETE AFTER THE READ: for the page
+  // only (COMPLETE_SQL's `$11`). Before the read report.mode is null, and the row
+  // keeps the byte the last read left.
+  const complete = (completion: Completion): JobEnd => ({
+    kind: "complete",
+    completion: report.mode === null ? completion : { ...completion, skimMode: report.mode },
+    report: { ...report, intents: fence?.intents.length ?? 0 },
+  });
   const waiting = (outcome: string, detail: string, dueInSeconds: number): JobEnd =>
     complete({ rests: false, lane: "retry", streaks: claimed.streaks, outcome, detail, dueInSeconds });
 

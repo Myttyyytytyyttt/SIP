@@ -181,6 +181,36 @@ describe.skipIf(!usable)("a worker job on the real store, Postgres 16 (needs KEE
     void vault;
   });
 
+  it("COMPLETE writes the mode byte the job read on chain — the row's own byte picked nothing — and a release, or a value that is not a byte, keeps it", async () => {
+    const world = new SettleWorld();
+    world.trade(400_000_000);
+    world.finalizeTo(world.tip);
+    const vault = await queuedOnPg(world);
+    const mode = async (): Promise<number | null> =>
+      (await db.query<{ skim_mode: number | null }>("SELECT skim_mode FROM sip_solana.vault_work WHERE vault_addr = $1", [vault])).rows[0]!.skim_mode;
+    // THE ROW SAYS VOLUME, THE CHAIN SAYS PROFIT (jobChain's vault): the job settles by the chain's.
+    await db.query("UPDATE sip_solana.vault_work SET skim_mode = 1 WHERE vault_addr = $1", [vault]);
+    const store = new DispatchStore(db, "worker-shadow", "shadow");
+    const { chain } = jobChain([world], intents);
+    const [first] = await store.claim(1);
+    expect(first!.skimMode).toBe(1);
+    const end = await runVaultJob(first!, deps(store, chain, { invest: buyingInvest(chain.program).invest }));
+    expect(end.report.module).toBe("PROFIT");
+    if (end.kind !== "complete") throw new Error(`the job did not complete: ${end.reason}`);
+    expect(await store.complete(first!, { ...end.completion, dueInSeconds: 0 })).toBe(true);
+    expect(await mode()).toBe(0);
+
+    // A RELEASE READ NO VAULT: the byte the last read left stays. So does a value that is not a byte.
+    await db.query("UPDATE sip_solana.vault_work SET skim_mode = 1 WHERE vault_addr = $1", [vault]);
+    const [second] = await store.claim(1);
+    expect(await store.release(second!, "SIGTERM")).toBe(true);
+    expect(await mode()).toBe(1);
+    const [third] = await store.claim(1);
+    expect(await store.complete(third!, { rests: true, lane: "safety", streaks: {}, outcome: "IDLE", detail: null, dueInSeconds: 0, skimMode: 300 })).toBe(true);
+    expect(await mode()).toBe(1);
+    expect(await audit()).toEqual([]);
+  });
+
   it("CLAIM under a saturated queue (a full pass's backlog): a vault whose holder is gone is not starved by the claimer's own vaults", async () => {
     // worker-b's own five vaults come due again the moment each completes; worker-a released 'orphan' six minutes
     // ago on SIGTERM and is gone; 'recent' it released one minute ago.

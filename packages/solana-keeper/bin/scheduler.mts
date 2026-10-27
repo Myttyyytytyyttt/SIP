@@ -208,7 +208,11 @@ const receiver =
         authorized: authorizationMatcher(base.doorbellSecret),
         log: (level, message, fields) => log[level](message, fields ?? {}),
       });
-const fleetAlerts = new FleetAlerts({ alerter, windowMs: base.sweepMs });
+// legacy-orphaned only under `on`: a shadow scheduler's database serves no user,
+// and no legacy keeper writes receipts to it. SIP_SOLANA_LEGACY_ROLES=none is
+// the operator saying the legacy keepers are retired (src/fleet-alerts.ts).
+const legacyRetired = config.legacyRoles.length === 0;
+const fleetAlerts = new FleetAlerts({ alerter, windowMs: base.sweepMs, legacy: config.dispatch === "on" ? { retired: legacyRetired } : null });
 const board = new FleetBoard({
   readModel: SolanaReadModel.overPool(pool, (message, fields) => log.warn(message, fields ?? {})),
   log: (_level, message, fields) => log.warn(message, fields ?? {}),
@@ -404,6 +408,12 @@ log.info("scheduler starting", {
   autoArm: autoArm.enabled
     ? `on — the lock holder arms the vaults it enrolled as draining; acting receipts required from: ${config.legacyRoles.length === 0 ? "none (legacy keepers retired)" : config.legacyRoles.join(", ")}`
     : "off — a vault enrolled as draining waits for dispatch-handover arm",
+  legacyOrphaned:
+    config.dispatch !== "on"
+      ? "off — not evaluated under shadow"
+      : legacyRetired
+        ? "on — SIP_SOLANA_LEGACY_ROLES=none: a linked vault still 'legacy', or new vaults going there, warns at once and pages at 30 min"
+        : "on — warns when a linked vault is still 'legacy' (or new vaults go there) and no legacy keeper has read in 15 min; pages at 30 min",
 });
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {

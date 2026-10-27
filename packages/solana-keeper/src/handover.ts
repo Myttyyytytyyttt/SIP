@@ -72,8 +72,9 @@
 //
 // DARK. Only the dispatcher's entry points load this file: bin/dispatch-handover.mts
 // (an operator's command, never started by production) and bin/scheduler.mts,
-// for the auto-arm step and nothing else (test/dispatch-dark.test.ts). Every
-// statement is on the database's clock.
+// for the auto-arm step and for LEGACY_READ_FRESH_MS in its fleet page's
+// receipt count (src/fleet-pg.ts), and nothing else (test/dispatch-dark.test.ts).
+// Every statement is on the database's clock.
 
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 import type { NewVaultSystem, VaultSystem } from "./dispatch-select.js";

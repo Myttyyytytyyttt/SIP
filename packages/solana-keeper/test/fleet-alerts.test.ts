@@ -1,5 +1,6 @@
-// The dispatcher's five alerts (src/fleet-alerts.ts): every threshold the ADR
-// sets (§6.3), pinned on the pure rules, and who raises what on the evaluator.
+// The dispatcher's alerts (src/fleet-alerts.ts): every threshold the ADR sets
+// (§6.3) and the two the cut-over added, pinned on the pure rules, and who
+// raises what on the evaluator.
 
 import { Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
@@ -9,6 +10,9 @@ import {
   FleetAlerts,
   LEASE_EXPIRED_ALERT_KEY,
   LEASE_EXPIRED_CRITICAL_PER_HOUR,
+  LEGACY_ORPHANED_ALERT_KEY,
+  LEGACY_ORPHANED_CRITICAL_MS,
+  LEGACY_SILENT_AFTER_MS,
   PG_SATURATED_ALERT_KEY,
   PG_SATURATED_CRITICAL_STREAK,
   QUEUE_LAG_ALERT_KEY,
@@ -19,13 +23,17 @@ import {
   VAULT_UNSERVED_WARN_MS,
   fenceRejectAlert,
   leaseExpiredAlert,
+  legacyOrphaned,
+  legacyOrphanedAlert,
+  legacyOrphanedForMs,
   pgSaturatedAlert,
   queueLagAlert,
   schedulerStaleAlert,
   vaultUnservedAlert,
   vaultUnservedKey,
 } from "../src/fleet-alerts.js";
-import type { FleetSnapshot, FleetUnserved, FleetWorkerRow, UnservedVault } from "../src/fleet-status.js";
+import type { FleetLegacy, FleetSnapshot, FleetUnserved, FleetWorkerRow, UnservedVault } from "../src/fleet-status.js";
+import { LEGACY_READ_FRESH_MS } from "../src/handover.js";
 
 const WINDOW = 60_000;
 const T0 = Date.parse("2026-10-12T12:00:00Z");
@@ -50,7 +58,15 @@ function worker(workerId: string, fenceRejects: number | null, fenceRejectsLastH
 }
 
 function snapshot(
-  over: Partial<{ expiries: FleetSnapshot["expiries"]; workers: FleetWorkerRow[]; oldestDueMs: number | null; due: number; tickAgeMs: number | null; unserved: FleetUnserved }> = {},
+  over: Partial<{
+    expiries: FleetSnapshot["expiries"];
+    workers: FleetWorkerRow[];
+    oldestDueMs: number | null;
+    due: number;
+    tickAgeMs: number | null;
+    unserved: FleetUnserved;
+    legacy: FleetLegacy | null;
+  }> = {},
 ): FleetSnapshot {
   return {
     now: new Date(T0).toISOString(),
@@ -79,6 +95,7 @@ function snapshot(
     vaults: [],
     vaultsTruncated: 0,
     unserved: over.unserved ?? { draining: 0, parked: 0, vaults: [] },
+    legacy: over.legacy ?? null,
   };
 }
 
@@ -93,13 +110,14 @@ const unserved = (rows: UnservedVault[], counts: Partial<{ draining: number; par
   vaults: rows,
 });
 
-function evaluator() {
+function evaluator(legacy: { readonly retired: boolean } | null = null) {
   let now = T0;
   const fired: Alert[] = [];
   const clearedKeys: string[] = [];
   const alerts = new FleetAlerts({
     alerter: { fire: (alert) => fired.push(alert), clear: (key) => clearedKeys.push(key) },
     windowMs: WINDOW,
+    legacy,
     now: () => now,
   });
   return {
@@ -391,5 +409,142 @@ describe("scheduler-stale from a worker (SchedulerStaleWatch)", () => {
     watcher.observe(SCHEDULER_STALE_AFTER_MS + 70_000);
     expect(lines).toEqual([expect.stringMatching(/^\[CRITICAL\] \[worker\] The dispatcher's scheduler has stopped ticking — fleet\.tick_at is 11 min old/)]);
     expect(posted).toHaveLength(1);
+  });
+});
+
+/** fleet.legacy as FLEET_SNAPSHOT_SQL counts it; by default the cut-over's end state: nothing legacy, keepers stopped and marked gone. */
+const legacyBlock = (over: Partial<FleetLegacy> = {}): FleetLegacy => ({ vaults: 0, newVaultSystem: "queue", receipts: 0, fresh: 0, lastReadAgeMs: 2 * 24 * 60 * 60_000, ...over });
+const MIN = 60_000;
+
+describe("legacy-orphaned: vaults the legacy keepers alone serve, while they are retired or silent", () => {
+  it("holds only when a legacy vault exists or new vaults go legacy, AND the keepers are retired or none has read in 15 minutes", () => {
+    // THE END STATE: nothing legacy, new vaults to the queue, keepers retired and silent. Nobody is left behind.
+    expect(legacyOrphaned(legacyBlock(), true)).toBe(false);
+    // THE MIDDLE OF THE MOVE: two legacy vaults, keepers up and not declared retired.
+    expect(legacyOrphaned(legacyBlock({ vaults: 2, receipts: 2, fresh: 2, lastReadAgeMs: 30_000 }), false)).toBe(false);
+    // RETIRED BY THE OPERATOR, whatever they are doing.
+    expect(legacyOrphaned(legacyBlock({ vaults: 2, receipts: 2, fresh: 2, lastReadAgeMs: 30_000 }), true)).toBe(true);
+    // SILENT, whatever the operator said.
+    expect(legacyOrphaned(legacyBlock({ vaults: 1, receipts: 2, fresh: 0, lastReadAgeMs: 16 * MIN }), false)).toBe(true);
+    // NO LEGACY VAULT, BUT EVERY NEW ONE GOES LEGACY.
+    expect(legacyOrphaned(legacyBlock({ newVaultSystem: "legacy" }), true)).toBe(true);
+    expect(legacyOrphaned(legacyBlock({ newVaultSystem: "legacy", receipts: 2, fresh: 2, lastReadAgeMs: 30_000 }), false)).toBe(false);
+    // NO fleet ROW: nothing is enrolled at all, so nothing goes legacy.
+    expect(legacyOrphaned(legacyBlock({ newVaultSystem: null }), true)).toBe(false);
+    // THE SAME 15 MINUTES AS THE HANDOVER'S RECEIPTS, which fleet.legacy.fresh is counted by.
+    expect(LEGACY_SILENT_AFTER_MS).toBe(LEGACY_READ_FRESH_MS);
+  });
+
+  it("warns as soon as it holds and pages at 30 minutes, timed from the last legacy read when the keepers are silent", () => {
+    const silent = (lastReadAgeMs: number) => legacyOrphanedAlert({ legacy: legacyBlock({ vaults: 2, receipts: 2, fresh: 0, lastReadAgeMs }), retired: false, observedForMs: 0 });
+    const warn = silent(16 * MIN).fire!;
+    expect([warn.key, warn.severity]).toEqual([LEGACY_ORPHANED_ALERT_KEY, "warn"]);
+    expect(silent(LEGACY_ORPHANED_CRITICAL_MS - 1).fire?.severity).toBe("warn");
+    expect(silent(LEGACY_ORPHANED_CRITICAL_MS).fire?.severity).toBe("critical");
+    // STOPPED TWO DAYS AGO, SEEN JUST NOW: it has been two days, and it pages at once.
+    expect(silent(2 * 24 * 60 * MIN).fire?.severity).toBe("critical");
+    expect(LEGACY_ORPHANED_CRITICAL_MS).toBe(30 * MIN);
+  });
+
+  it("is timed by what this process has watched while retired keepers still read, or when none ever read", () => {
+    const reading = legacyBlock({ vaults: 1, receipts: 1, fresh: 1, lastReadAgeMs: 20_000 });
+    expect(legacyOrphanedForMs({ legacy: reading, retired: true, observedForMs: 5 * MIN })).toBe(5 * MIN);
+    expect(legacyOrphanedAlert({ legacy: reading, retired: true, observedForMs: 0 }).fire?.severity).toBe("warn");
+    expect(legacyOrphanedAlert({ legacy: reading, retired: true, observedForMs: LEGACY_ORPHANED_CRITICAL_MS }).fire?.severity).toBe("critical");
+    const never = legacyBlock({ vaults: 1, receipts: 0, fresh: 0, lastReadAgeMs: null });
+    expect(legacyOrphanedForMs({ legacy: never, retired: false, observedForMs: 0 })).toBe(0);
+    expect(legacyOrphanedAlert({ legacy: never, retired: false, observedForMs: LEGACY_ORPHANED_CRITICAL_MS }).fire?.severity).toBe("critical");
+    expect(legacyOrphanedForMs({ legacy: legacyBlock(), retired: true, observedForMs: 99 * MIN })).toBeNull();
+    expect(legacyOrphanedAlert({ legacy: legacyBlock(), retired: true, observedForMs: 99 * MIN })).toEqual({ fire: null, clear: true });
+  });
+
+  it("names how many, why, and what the owner runs — and never says nobody serves them while a retired keeper still reads", () => {
+    const silent = legacyOrphanedAlert({ legacy: legacyBlock({ vaults: 2, receipts: 2, fresh: 0, lastReadAgeMs: 40 * MIN }), retired: true, observedForMs: 0 }).fire!;
+    expect(silent.detail).toContain("2 vaults with a live link are still 'legacy'");
+    expect(silent.detail).toContain("SIP_SOLANA_LEGACY_ROLES=none");
+    expect(silent.detail).toContain("none has read in 15 min (the last read was 40 min ago)");
+    expect(silent.detail).toContain("nobody settles or buys for those users");
+    expect(silent.detail).toContain("flota-prod traspasar-todos");
+    expect(silent.detail).toContain("flota-prod nuevos-a-la-cola");
+    expect(silent.detail).toContain("restart sip-solana-keeper and sip-solana-volume-keeper and unset SIP_SOLANA_LEGACY_ROLES");
+    expect(silent.context).toMatchObject({ legacyVaults: 2, retired: true, fresh: 0, forMs: 40 * MIN });
+
+    const reading = legacyOrphanedAlert({ legacy: legacyBlock({ vaults: 1, receipts: 1, fresh: 1, lastReadAgeMs: 20_000 }), retired: true, observedForMs: 0 }).fire!;
+    expect(reading.detail).toContain("1 vault with a live link is still 'legacy'");
+    expect(reading.detail).toContain("1 legacy keeper still reads, and once it stops nobody settles or buys for that user");
+
+    const down = legacyOrphanedAlert({ legacy: legacyBlock({ newVaultSystem: "legacy", receipts: 2, fresh: 0, lastReadAgeMs: 17 * MIN }), retired: false, observedForMs: 0 }).fire!;
+    expect(down.detail).toContain("fleet.new_vault_system is 'legacy'");
+    expect(down.detail).toContain("no legacy keeper has read in 15 min");
+    expect(down.detail).toContain("nobody settles or buys for new users");
+    expect(down.detail).not.toContain("unset SIP_SOLANA_LEGACY_ROLES");
+    expect(down.detail).not.toContain("still 'legacy' (vault_work.system)");
+  });
+});
+
+describe("legacy-orphaned on the evaluator", () => {
+  it("is not evaluated without the scheduler's configuration (a worker, a shadow scheduler)", () => {
+    const { alerts, keys, clearedKeys } = evaluator(null);
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock({ vaults: 2 }) }), { acting: true });
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock({ vaults: 2 }) }), { acting: false });
+    expect(keys()).toEqual([]);
+    expect(clearedKeys).not.toContain(LEGACY_ORPHANED_ALERT_KEY);
+    expect(alerts.status().legacyOrphanedForMs).toBeNull();
+  });
+
+  it("warns while acting, pages once it has lasted 30 minutes, and clears once the last vault is moved and new vaults go to the queue", () => {
+    const { alerts, keys, clearedKeys, at } = evaluator({ retired: true });
+    const twoLeft = snapshot({ legacy: legacyBlock({ vaults: 2, receipts: 2, fresh: 2, lastReadAgeMs: 30_000 }) });
+    alerts.observeSnapshot(twoLeft, { acting: true });
+    expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:warn`]);
+    expect(alerts.status().legacyOrphanedForMs).toBe(0);
+    at(T0 + LEGACY_ORPHANED_CRITICAL_MS);
+    alerts.observeSnapshot(twoLeft, { acting: true });
+    expect(keys().at(-1)).toBe(`${LEGACY_ORPHANED_ALERT_KEY}:critical`);
+    expect(alerts.status().firing).toEqual([LEGACY_ORPHANED_ALERT_KEY]);
+    // traspasar-todos AND nuevos-a-la-cola: nothing legacy is left, and nothing new goes there.
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock() }), { acting: true });
+    expect(clearedKeys).toContain(LEGACY_ORPHANED_ALERT_KEY);
+    expect(alerts.status().firing).toEqual([]);
+    expect(alerts.status().legacyOrphanedForMs).toBeNull();
+    // A NEXT TIME STARTS ITS OWN CLOCK: a warn, not the old page.
+    at(T0 + 2 * LEGACY_ORPHANED_CRITICAL_MS);
+    alerts.observeSnapshot(twoLeft, { acting: true });
+    expect(keys().at(-1)).toBe(`${LEGACY_ORPHANED_ALERT_KEY}:warn`);
+  });
+
+  it("clears when the keepers are not retired and read again", () => {
+    const { alerts, keys, clearedKeys } = evaluator({ retired: false });
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock({ vaults: 2, receipts: 2, fresh: 0, lastReadAgeMs: 20 * MIN }) }), { acting: true });
+    expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:warn`]);
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock({ vaults: 2, receipts: 2, fresh: 1, lastReadAgeMs: 10_000 }) }), { acting: true });
+    expect(clearedKeys).toContain(LEGACY_ORPHANED_ALERT_KEY);
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("is the lock holder's only, on a clock every replica keeps: a standby that takes the lock pages on the half hour it watched", () => {
+    const { alerts, keys, clearedKeys, at } = evaluator({ retired: true });
+    const left = snapshot({ legacy: legacyBlock({ vaults: 1, receipts: 1, fresh: 1, lastReadAgeMs: 20_000 }) });
+    alerts.observeSnapshot(left, { acting: false });
+    at(T0 + LEGACY_ORPHANED_CRITICAL_MS + MIN);
+    alerts.observeSnapshot(left, { acting: false });
+    expect(keys()).toEqual([]);
+    expect(alerts.status().legacyOrphanedForMs).toBe(LEGACY_ORPHANED_CRITICAL_MS + MIN);
+    alerts.observeSnapshot(left, { acting: true });
+    expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:critical`]);
+    // IT STOPS ACTING: the page goes back to whoever holds the lock now.
+    alerts.observeSnapshot(left, { acting: false });
+    expect(clearedKeys).toContain(LEGACY_ORPHANED_ALERT_KEY);
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("takes a snapshot without the block for no evidence: the page and its clock stand", () => {
+    const { alerts, keys, clearedKeys, at } = evaluator({ retired: false });
+    alerts.observeSnapshot(snapshot({ legacy: legacyBlock({ vaults: 1, receipts: 1, fresh: 0, lastReadAgeMs: 16 * MIN }) }), { acting: true });
+    at(T0 + 5 * MIN);
+    alerts.observeSnapshot(snapshot({ legacy: null }), { acting: true });
+    expect(keys()).toEqual([`${LEGACY_ORPHANED_ALERT_KEY}:warn`]);
+    expect(clearedKeys).not.toContain(LEGACY_ORPHANED_ALERT_KEY);
+    expect(alerts.status().firing).toEqual([LEGACY_ORPHANED_ALERT_KEY]);
   });
 });

@@ -128,6 +128,19 @@ describe("the takeover: a job waits out what an earlier holder may still land", 
     expect(db.intents[0]).toMatchObject({ state: "intent", resolvedAt: null });
   });
 
+  it("carries no mode byte while it waits — it read no vault — so the row keeps the one it had", async () => {
+    const { world, db, vault, store } = await abandoned(5_100n);
+    db.vaults.get(vault)!.skimMode = MODE_VOLUME;
+    const { chain } = jobChain([world], () => db.intents.length, { finalized: 5_100n, confirmed: 5_080n, vault: vaultOf(MODE_PROFIT) });
+    const claimed = await claimOne(store);
+    const end = await runVaultJob(claimed, deps(store, chain, { keys: keysFor([world]), settle: never, invest: never }));
+    expect(end.kind === "complete" && end.completion.outcome).toBe("WAITING_INTENT");
+    if (end.kind !== "complete") return;
+    expect(end.completion.skimMode).toBeUndefined();
+    expect(await store.complete(claimed, end.completion)).toBe(true);
+    expect(db.vaults.get(vault)!.skimMode).toBe(MODE_VOLUME);
+  });
+
   it("once the finalized height has passed it: expires it, plans ABOVE it, reads from the slot the wait cleared at, and only then acts", async () => {
     const { world, db, store } = await abandoned(5_100n);
     const { chain, required } = jobChain([world], () => db.intents.length, { finalized: 5_101n, confirmed: 5_130n });
@@ -325,6 +338,45 @@ describe("module selection by the vault's own skim_mode", () => {
     expect(end.report.module).toBeNull();
     expect(d.settles).toEqual([]);
     expect(end.report.settles[0]!.outcome).toBe("UNSUPPORTED_MODE");
+    // THE BYTE IS STILL THE PAGE'S TO SHOW: the row says which mode nobody serves.
+    expect(end.kind === "complete" && end.completion.skimMode).toBe(9);
+  });
+
+  it("COMPLETE records the byte the job read, for the page; the row's own byte picks nothing — a row saying VOLUME on a PROFIT vault settles PROFIT", async () => {
+    const world = new SettleWorld();
+    const db = new MemoryDb();
+    const vault = queued(db, [world]);
+    db.vaults.get(vault)!.skimMode = MODE_VOLUME;
+    const store = new MemoryDispatchStore(db, "worker-shadow", "shadow");
+    const { chain } = jobChain([world], () => db.intents.length, { vault: vaultOf(MODE_PROFIT) });
+    const seen: SettleDeps[] = [];
+    const settle = async (settleDeps: SettleDeps) => (seen.push(settleDeps), runSettleTick(settleDeps));
+    const claimed = await claimOne(store);
+    expect(claimed.skimMode).toBe(MODE_VOLUME);
+    const end = await runVaultJob(claimed, deps(store, chain, { settle, invest: buyingInvest(chain.program).invest }));
+    expect(end.report.module).toBe("PROFIT");
+    expect(seen[0]!.settles).toEqual([MODE_PROFIT]);
+    expect(end.kind).toBe("complete");
+    if (end.kind !== "complete") return;
+    expect(end.completion.skimMode).toBe(MODE_PROFIT);
+    expect(await store.complete(claimed, end.completion)).toBe(true);
+    expect(db.vaults.get(vault)!.skimMode).toBe(MODE_PROFIT);
+  });
+
+  it("a vault account the chain does not hold carries no byte: the row keeps the one the last read left", async () => {
+    const world = new SettleWorld();
+    const db = new MemoryDb();
+    const vault = queued(db, [world]);
+    db.vaults.get(vault)!.skimMode = MODE_VOLUME;
+    const store = new MemoryDispatchStore(db, "worker-shadow", "shadow");
+    const { chain } = jobChain([world], () => db.intents.length, { vault: null });
+    const claimed = await claimOne(store);
+    const end = await runVaultJob(claimed, deps(store, chain));
+    expect(end.kind === "complete" && end.completion.outcome).toBe("FAILED");
+    if (end.kind !== "complete") return;
+    expect(end.completion.skimMode).toBeUndefined();
+    expect(await store.complete(claimed, end.completion)).toBe(true);
+    expect(db.vaults.get(vault)!.skimMode).toBe(MODE_VOLUME);
   });
 });
 

@@ -25,6 +25,7 @@ import { DispatchStore } from "../src/dispatch-store.js";
 import {
   FleetAlerts,
   LEASE_EXPIRED_ALERT_KEY,
+  LEGACY_ORPHANED_ALERT_KEY,
   QUEUE_LAG_ALERT_KEY,
   SCHEDULER_STALE_ALERT_KEY,
   SchedulerStaleWatch,
@@ -336,7 +337,9 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
 
   describe("the snapshot", () => {
     beforeEach(async () => {
-      await db.query("TRUNCATE sip_solana.keeper_link, sip_solana.vault_work, sip_solana.send_intent, sip_solana.fleet, sip_solana.worker, sip_solana.loss_carry");
+      await db.query(
+        "TRUNCATE sip_solana.keeper_link, sip_solana.vault_work, sip_solana.send_intent, sip_solana.fleet, sip_solana.worker, sip_solana.loss_carry, sip_solana.legacy_process",
+      );
       await db.query(
         `INSERT INTO sip_solana.fleet (id, scheduler_id, tick_at, discovery_ok_at)
          VALUES (true, 'sched-a', clock_timestamp() - interval '11 minutes', clock_timestamp() - interval '1 minute')`,
@@ -422,6 +425,54 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         `${vaultUnservedKey("D1-draining")}:critical`,
       ]);
       expect(alerts.status().pg?.saturatedStreak).toBe(0);
+    });
+
+    it("counts the legacy keepers' side — the 'legacy' rows a live link names, where new vaults go, the receipts not gone and those read in 15 min — and legacy-orphaned pages it", async () => {
+      // L1-legacy (seeded) gets a live link; L2 two; L3's only link is gone, so nobody is left to serve there. Q1 is the queue's.
+      await db.query("INSERT INTO sip_solana.vault_work (vault_addr, system) VALUES ('L2-legacy', 'legacy'), ('L3-legacy-unlinked', 'legacy')");
+      await db.query(
+        `INSERT INTO sip_solana.keeper_link (link_addr, wallet_addr, vault_addr, epoch, settlement_nonce, frontier_slot, seen_slot, gone_at) VALUES
+           ('LK1', 'W1', 'L1-legacy', 0, 1, 1, 1, NULL),
+           ('LK2', 'W2', 'L2-legacy', 0, 1, 1, 1, NULL),
+           ('LK2b', 'W2b', 'L2-legacy', 0, 1, 1, 1, NULL),
+           ('LK3', 'W3', 'L3-legacy-unlinked', 0, 1, 1, 1, clock_timestamp()),
+           ('LK4', 'W4', 'Q1-bell', 0, 1, 1, 1, NULL)`,
+      );
+      const read = async () => (await new PgFleetStore(db).read()).legacy!;
+      // NO RECEIPT EVER: none counted, and no age rather than an age of 0. The fleet row's default sends new vaults legacy.
+      expect(await read()).toEqual({ vaults: 2, newVaultSystem: "legacy", receipts: 0, fresh: 0, lastReadAgeMs: null });
+
+      // ONE KEEPER UP, ONE 20 MINUTES QUIET, ONE MARKED GONE — the gone one read last, and still counts for the age.
+      await db.query(
+        `INSERT INTO sip_solana.legacy_process (process_id, role, dispatch, live, read_at, absent_is, gone_at) VALUES
+           ('p-up',    'profit', 'on', true, clock_timestamp() - interval '2 minutes',  'legacy', NULL),
+           ('v-quiet', 'volume', 'on', true, clock_timestamp() - interval '20 minutes', 'legacy', NULL),
+           ('p-gone',  'profit', 'on', true, clock_timestamp() - interval '1 minute',   'legacy', clock_timestamp())`,
+      );
+      const up = await read();
+      expect(up).toMatchObject({ vaults: 2, newVaultSystem: "legacy", receipts: 2, fresh: 1 });
+      expect(Math.abs(up.lastReadAgeMs! - 60_000)).toBeLessThan(5_000);
+
+      // THE KEEPERS STOP: every receipt goes quiet, the newest 40 minutes ago. Not declared retired, it pages on their silence.
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '40 minutes' WHERE process_id = 'p-gone'");
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '50 minutes' WHERE process_id <> 'p-gone'");
+      const down = await read();
+      expect(down).toMatchObject({ receipts: 2, fresh: 0 });
+      expect(Math.abs(down.lastReadAgeMs! - 40 * 60_000)).toBeLessThan(5_000);
+      const fired: Alert[] = [];
+      const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false } });
+      const reader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => alerts.observeSnapshot(snapshot, { acting: true }) });
+      expect(await reader.refresh()).toBe(true);
+      const page = fired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY);
+      expect(page.map((alert) => alert.severity)).toEqual(["critical"]);
+      expect(page[0]!.detail).toContain("2 vaults with a live link are still 'legacy'");
+
+      // traspasar-todos AND nuevos-a-la-cola: nothing legacy with a live link, nothing new goes there.
+      await db.query("UPDATE sip_solana.vault_work SET system = 'queue' WHERE vault_addr IN ('L1-legacy', 'L2-legacy')");
+      await db.query("UPDATE sip_solana.fleet SET new_vault_system = 'queue'");
+      expect(await read()).toMatchObject({ vaults: 0, newVaultSystem: "queue" });
+      expect(await reader.refresh()).toBe(true);
+      expect(alerts.status().firing).not.toContain(LEGACY_ORPHANED_ALERT_KEY);
     });
 
     it("counts a shadow world's unresolved intents as open, its resolved ones not, however old they are", async () => {

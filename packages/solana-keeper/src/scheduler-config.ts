@@ -56,7 +56,10 @@
 //     deleted). `none` lifts only the role rule: every legacy_process row not
 //     marked gone must still have read the vault as not its own, so a legacy
 //     keeper brought back with SIP_SOLANA_DISPATCH=on holds every arm until it
-//     has. Set while the auto-arm is off, a warning says nothing reads it.
+//     has. Under SIP_SOLANA_DISPATCH=on, `none` is also what the legacy-orphaned
+//     alert reads (src/fleet-alerts.ts): with the keepers declared retired, a
+//     vault still 'legacy', or new vaults going there, is nobody's. Set while
+//     the auto-arm is off, a warning says what still reads it, if anything.
 //
 // SIP_SOLANA_CUTS ON A SCHEDULER names the scheduler's cuts: `gpa-v2` (C6, its
 // listing) and `lamports-filter` (C7, its batch read). Every legacy token is
@@ -280,7 +283,11 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
     warnings.push("SIP_SOLANA_AUTO_ARM is on under SIP_SOLANA_DISPATCH=shadow: a shadow scheduler arms nothing; it runs only under on.");
   }
   if (!autoArm && (env["SIP_SOLANA_LEGACY_ROLES"]?.trim() ?? "") !== "") {
-    warnings.push("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it.");
+    warnings.push(
+      legacyRoles.length === 0 && dispatch === "on"
+        ? "SIP_SOLANA_LEGACY_ROLES is none but SIP_SOLANA_AUTO_ARM is off: only the legacy-orphaned alert reads it (the legacy keepers are retired), and no vault is armed."
+        : "SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it.",
+    );
   }
   const jupiterCallsPerMinute = readCount(
     env,

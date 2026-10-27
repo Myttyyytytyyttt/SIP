@@ -1,6 +1,7 @@
 // The receiver's and the fleet page's statements against Postgres (Q4, Q5),
 // over the dispatcher's tables: keeper_link, vault_work, send_intent, worker and
-// fleet, plus the loss_carry table L2 already ships.
+// fleet, plus the loss_carry table L2 already ships and the migration's
+// legacy_process, read for the legacy keepers' receipts.
 //
 // THE TABLES ARE NOT THIS FILE'S. The store track (Q1) owns them, in
 // sql/sip_solana.sql with the four lease statements (src/dispatch-store.ts),
@@ -35,6 +36,7 @@ import {
   VAULT_DETAIL_READ_CHARS,
   VAULT_DETAIL_WITHHELD,
   WORKER_DEAD_AFTER_MS,
+  type FleetLegacy,
   type FleetQueue,
   type FleetSchedulerRow,
   type FleetSends,
@@ -49,6 +51,7 @@ import {
   type VaultStreaks,
   type WorkerStats,
 } from "./fleet-status.js";
+import { LEGACY_READ_FRESH_MS } from "./handover.js";
 import { scrubbedForExport } from "./keeper-log.js";
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 
@@ -86,8 +89,9 @@ export const FLEET_COLUMNS = {
   ],
   send_intent: ["id", "kind", "state", "signature", "created_at", "resolved_at", "echoed_at"],
   worker: ["worker_id", "kind", "version", "started_at", "heartbeat_at", "slots", "busy", "rps_quota", "jup_quota", "quota_at", "stopped_at", "stats"],
-  fleet: ["id", "scheduler_id", "tick_at", "full_pass_reason", "board_dirty_at", "discovery_ok_at"],
+  fleet: ["id", "scheduler_id", "tick_at", "full_pass_reason", "board_dirty_at", "discovery_ok_at", "new_vault_system"],
   loss_carry: ["link_addr"],
+  legacy_process: ["read_at", "gone_at"],
 } as const satisfies Record<string, readonly string[]>;
 
 /**
@@ -187,6 +191,15 @@ RETURNING old.full_pass_reason AS reason`;
  * `unserved` is what `vault-unserved` reads: the rows nobody acts on — draining
  * (the legacy keepers leave it, CLAIM takes only 'queue'), or parked on the
  * queue — and, for a draining one, for how long.
+ *
+ * `legacy` is what `legacy-orphaned` reads (FleetLegacy): the 'legacy' rows a
+ * live link still names — a vault whose links are all gone has nobody to serve
+ * — where fleet.new_vault_system sends a new vault, and the legacy keepers'
+ * receipts: those not marked gone, those of them read within
+ * LEGACY_READ_FRESH_MS (the complement of `dispatch-handover gone --stale`), and
+ * the newest read of any. One more count over vault_work, each 'legacy' row
+ * checked against keeper_link (indexed by vault for its live links);
+ * legacy_process holds one row per legacy container.
  *
  * HOW LONG A VAULT HAS BEEN DRAINING, WITHOUT A NEW COLUMN. A handover writes
  * system_at whenever it changes `system` (DRAIN_SQL, ROLLBACK_SQL, arm's move,
@@ -319,7 +332,16 @@ SELECT json_build_object(
                                                FROM ${S}.vault_work y
                                               WHERE y.system = 'draining' OR (y.system = 'queue' AND y.parked_reason IS NOT NULL)
                                               ORDER BY draining DESC, for_ms DESC NULLS LAST, y.vault_addr LIMIT $4) x), '[]'::json))
-                 FROM ${S}.vault_work u WHERE u.system = 'draining' OR (u.system = 'queue' AND u.parked_reason IS NOT NULL))
+                 FROM ${S}.vault_work u WHERE u.system = 'draining' OR (u.system = 'queue' AND u.parked_reason IS NOT NULL)),
+  'legacy', (SELECT json_build_object(
+               'vaults', (SELECT count(*) FROM ${S}.vault_work v
+                           WHERE v.system = 'legacy'
+                             AND EXISTS (SELECT 1 FROM ${S}.keeper_link l WHERE l.vault_addr = v.vault_addr AND l.gone_at IS NULL)),
+               'newVaultSystem', (SELECT f.new_vault_system FROM ${S}.fleet f WHERE f.id),
+               'receipts', count(*) FILTER (WHERE p.gone_at IS NULL),
+               'fresh', count(*) FILTER (WHERE p.gone_at IS NULL AND p.read_at >= t.now - interval '${LEGACY_READ_FRESH_MS / 1000} seconds'),
+               'lastReadAgeMs', round(extract(epoch FROM t.now - max(p.read_at)) * 1000))
+               FROM ${S}.legacy_process p)
 ) AS snapshot
 FROM t`;
 
@@ -457,6 +479,19 @@ function unservedOf(value: unknown): FleetUnserved {
   };
 }
 
+/** The legacy block, or null when the statement returned none: an unread block is no evidence, never a fleet of zeros. */
+function legacyOf(value: unknown): FleetLegacy | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const row = obj(value);
+  return {
+    vaults: count(row["vaults"]),
+    newVaultSystem: str(row["newVaultSystem"]),
+    receipts: count(row["receipts"]),
+    fresh: count(row["fresh"]),
+    lastReadAgeMs: num(row["lastReadAgeMs"]),
+  };
+}
+
 function countsOf(value: unknown): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [key, n] of Object.entries(obj(value))) out[key] = count(n);
@@ -554,6 +589,7 @@ export function parseFleetSnapshot(raw: unknown): FleetSnapshot {
     vaults,
     vaultsTruncated: Math.max(0, count(vaultsBlock["total"]) - vaults.length),
     unserved: unservedOf(root["unserved"]),
+    legacy: legacyOf(root["legacy"]),
   };
 }
 

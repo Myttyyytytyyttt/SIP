@@ -210,4 +210,13 @@ describe("SIP_SOLANA_AUTO_ARM and SIP_SOLANA_LEGACY_ROLES", () => {
     expect(unread.legacyRoles).toEqual(["profit"]);
     expect(unread.warnings.join(" ")).toContain("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off");
   });
+
+  it("none with the step off is still read under on — by the legacy-orphaned alert — and said so; under shadow nothing reads it", () => {
+    const retired = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_LEGACY_ROLES: "none" });
+    expect(retired.legacyRoles).toEqual([]);
+    expect(retired.warnings.join(" ")).toContain("only the legacy-orphaned alert reads it");
+    expect(retired.warnings.join(" ")).not.toContain("nothing on this scheduler reads it");
+    const shadow = load({ ...BASE, SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_LEGACY_ROLES: "none" });
+    expect(shadow.warnings.join(" ")).toContain("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it");
+  });
 });
