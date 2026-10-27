@@ -1178,8 +1178,8 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
 - **Jupiter, con su código HTTP**: el detalle de una compra que Jupiter rechazó lleva `Jupiter answered HTTP <código>`
   (en el aviso, en `flota` y en `fleet.vaults` del `/status` del scheduler). **429**: demasiadas llamadas; **401**:
   Jupiter no acepta la clave; **400**: rechaza ese par; **5xx**: Jupiter está caído. Con `jupiter-key`, tras un 429 el
-  worker no llama a Jupiter durante 1 min, y si se repite, 2, 4… hasta 10; vuelve a 1 min cuando una llamada hecha
-  después del último 429 recibe respuesta. **Primero**, con 429 o 401: Railway →
+  worker no llama a Jupiter durante 1 min, y si se repite, 2, 4… hasta 10; vuelve a 1 min cuando un turno entero,
+  empezado después del último 429, termina sin ninguno. **Primero**, con 429 o 401: Railway →
   `sip-solana-worker` → Variables: `SIP_SOLANA_CUTS` incluye `jupiter-key`, `SIP_SOLANA_JUPITER_API_KEY` es la clave y
   `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`; en `sip-solana-scheduler`, también `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`
   (el scheduler reparte el minuto: lo que le da al worker sale en `fleet.workers[].jupQuota`). La clave gratuita da 60

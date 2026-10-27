@@ -342,7 +342,7 @@ describe("after a 429", () => {
     expect(pacer.reserve(12).granted).toBe(true);
   });
 
-  it("doubles the step on each further 429 up to ten minutes, and resets it once a call that left after the block is answered", async () => {
+  it("doubles the step on each further 429 up to ten minutes, and resets it once a whole turn that started after the block ends with none", async () => {
     const { pacer, advance } = clocked(60);
     const steps: number[] = [];
     for (let i = 0; i < 6; i++) {
@@ -359,7 +359,7 @@ describe("after a 429", () => {
     // A TURN THAT MADE NO CALL proves nothing: the step stands.
     granted(pacer.reserve(3)).release();
     expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_MAX_MS);
-    // A CALL THAT LEFT AFTER THE BLOCK, ANSWERED: Jupiter answers again, and the step is back to a minute.
+    // A WHOLE TURN AFTER THE BLOCK, ANSWERED AND ENDED WITH NO 429: Jupiter answers again, and the step is back to a minute.
     const clean = granted(pacer.reserve(3));
     await clean.beforeCall();
     clean.observe(200, headers());
@@ -390,13 +390,62 @@ describe("after a 429", () => {
     // AN ANSWER TO A CALL ALREADY IN FLIGHT WHEN THE 429 CAME says nothing about Jupiter after it.
     const c = granted(pacer.reserve(3));
     const d = granted(pacer.reserve(3));
-    const early = await d.beforeCall();
+    await d.beforeCall();
     await c.beforeCall();
     c.observe(429, headers());
-    d.observe(200, headers(), early);
+    d.observe(200, headers());
     c.release();
     d.release();
     expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_MAX_MS);
+  });
+
+  it("keeps doubling when the turn after the block is answered a few times and then refused again — the measured shape", async () => {
+    // THE 429 CAME ON CALL 6, AFTER FIVE ANSWERS (jupiter-turn-run2-apijup-unpaced.jsonl).
+    // Resetting the step on the first answer after the block put it back to a
+    // minute every round, and the turn's own 429 then blocked for a minute
+    // again: 60, 60, 60… against a limiter that was still refusing.
+    const { pacer, advance } = clocked(60);
+    const steps: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      const turn = granted(pacer.reserve(18));
+      for (let call = 0; call < 3; call++) {
+        await turn.beforeCall();
+        turn.observe(200, headers());
+      }
+      await turn.beforeCall();
+      turn.observe(429, headers());
+      turn.release();
+      const deferred = pacer.reserve(18);
+      if (deferred.granted) throw new Error("expected a backoff");
+      steps.push(deferred.retryInMs!);
+      advance(deferred.retryInMs!);
+    }
+    expect(steps).toEqual([60_000, 120_000, 240_000, 480_000, 600_000, 600_000]);
+  });
+
+  it("goes back to a minute through the per-turn API only when a turn that started after the block ends with no 429", async () => {
+    let status = 429;
+    vi.stubGlobal("fetch", async () => new Response("{}", { status }));
+    try {
+      const { pacer, advance } = clocked(60);
+      const access = { baseUrl: LITE_API, apiKey: null, pacer };
+      const first = granted(pacer.reserve(3));
+      await jupiterApiForTurn(access, first).fetch!(`${LITE_API}/quote`, {});
+      first.release();
+      advance(JUPITER_BACKOFF_BASE_MS);
+      expect(pacer.status().backoffMs).toBe(2 * JUPITER_BACKOFF_BASE_MS);
+      status = 200;
+      const clean = granted(pacer.reserve(3));
+      const api = jupiterApiForTurn(access, clean);
+      await api.fetch!(`${LITE_API}/quote`, {});
+      // ANSWERED, BUT THE TURN IS NOT OVER: a 429 may still come on its next call.
+      expect(pacer.status().backoffMs).toBe(2 * JUPITER_BACKOFF_BASE_MS);
+      await api.fetch!(`${LITE_API}/quote`, {});
+      clean.release();
+      expect(pacer.status().backoffMs).toBe(JUPITER_BACKOFF_BASE_MS);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("does not believe a reset absurdly far ahead, and ignores every status but 429", async () => {
