@@ -63,6 +63,8 @@ const DISPATCHER_MODULES = [
   "src/auto-arm.ts",
   // THE LOCAL SHADOW'S ARITHMETIC (plan P3b): only test-local/shadow/harness.ts and its test load it.
   "src/shadow-compare.ts",
+  // THE OWNER'S FLEET TOOL'S WORDS AND DECISIONS: only test-local/shadow/flota-prod.mts and its tests load it.
+  "src/owner-fleet.ts",
 ] as const;
 
 /**
