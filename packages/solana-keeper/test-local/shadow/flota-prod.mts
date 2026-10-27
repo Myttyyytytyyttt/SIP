@@ -9,7 +9,7 @@
 //   nuevos-a-la-cola           new vaults to the queue — refused unless the scheduler arms by itself
 //   nuevos-a-los-de-siempre    new vaults to the legacy keepers — refused unless they are reading
 //   marcar-ido <id>...         legacy processes whose deployments are gone, after the owner checked Railway
-//   marcar-idos-viejos         every receipt older than 15 min, after the same check (gone --stale)
+//   marcar-idos-viejos         the receipts older than 15 min it lists, after the same check (gone <their ids>)
 //   desaparcar <vault>         clear a parked vault (unpark)
 //
 //   PROD_DB=<the keepers' DATABASE_URL> node_modules/.bin/tsx test-local/shadow/flota-prod.mts <word> [args]
@@ -209,10 +209,29 @@ async function findVault(typed: string): Promise<{ readonly db: FleetDb; readonl
  * MOVE_TIMEOUT_MS at most. A call that gives no result at all is tolerated
  * CLI_FAILURES_TOLERATED times in a row (a database blip, the public RPC's 429).
  * `stranded` is where the wait leaves the vault — said when it gives up, by the
- * clock OR by the CLI not answering: either way the vault is still «pasando»,
- * and the owner must hear that nobody serves it and what to type.
+ * clock, by the CLI not answering, OR BY THE OWNER'S Ctrl-C (SIGINT, or a
+ * SIGTERM): every way, the vault is still «pasando», and the owner must hear
+ * that nobody serves it and what to type. The tool's own exit is 130 then, and
+ * a dispatch-handover child in flight gets the same signal from the terminal.
  */
 async function waitFor(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
+  const interrupted = (): void => {
+    say("");
+    say("     Parado a mitad.");
+    for (const line of stranded) say(`     ${line}`);
+    process.exit(130);
+  };
+  process.once("SIGINT", interrupted);
+  process.once("SIGTERM", interrupted);
+  try {
+    return await waitLoop(args, decide, stranded);
+  } finally {
+    process.off("SIGINT", interrupted);
+    process.off("SIGTERM", interrupted);
+  }
+}
+
+async function waitLoop(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
   const started = Date.now();
   let lastNote = "";
   let failures = 0;
@@ -235,7 +254,9 @@ async function waitFor(args: readonly string[], decide: (result: unknown) => Pro
         return false;
       }
       if (progress.note !== lastNote) {
-        say(`     … ${Math.round((Date.now() - started) / 1000)} s: ${progress.note}`);
+        // «marcar-ido» IS A SECOND COMMAND: typed here it would stop this wait with the vault «pasando».
+        const elsewhere = progress.note.includes("«marcar-ido") ? " (eso, en otra ventana: esta sigue esperando)" : "";
+        say(`     … ${Math.round((Date.now() - started) / 1000)} s: ${progress.note}${elsewhere}`);
         lastNote = progress.note;
       }
     }
@@ -284,6 +305,7 @@ async function moveOne(typed: string): Promise<boolean> {
   const moved = await waitFor(["arm", vault, ...(rehearsal ? ["--allow-dry"] : [])], armProgress, [
     "No he podido pasarlo. Sigue «pasando»: nadie lo cobra ni compra.",
     "Si un keeper no lo ha leído, mira en Railway si su despliegue aún existe; si no, «marcar-ido <id>».",
+    `Para terminarlo (cuando el keeper haya leído, o lo hayas marcado ido): «traspasar ${vault.slice(0, 8)}».`,
     `Para devolverlo a los keepers de siempre: «volver ${vault.slice(0, 8)}».`,
   ]);
   if (!moved) return false;
@@ -306,9 +328,14 @@ async function traspasarTodos(): Promise<number> {
     return 1;
   }
   const legacy = db.vaults.filter((entry) => entry.system === "legacy").map((entry) => entry.vault);
+  // A VAULT LEFT «pasando» BY A STOPPED traspasar is nobody's, and is not 'legacy': named, never passed over in silence.
+  const halfway = db.vaults.filter((entry) => entry.system === "draining" && !autoArmable(entry));
+  for (const entry of halfway) {
+    say(`OJO: ${short(entry.vault)} sigue «pasando» y nadie lo sirve: «traspasar ${entry.vault.slice(0, 8)}» para acabar, o «volver ${entry.vault.slice(0, 8)}».`);
+  }
   if (legacy.length === 0) {
-    say("No queda ningún vault con los keepers de siempre. Nada que hacer.");
-    return 0;
+    say(halfway.length === 0 ? "No queda ningún vault con los keepers de siempre. Nada que hacer." : "No queda ningún vault con los keepers de siempre.");
+    return halfway.length === 0 ? 0 : 1;
   }
   say(`Voy a pasar ${legacy.length} vault${legacy.length === 1 ? "" : "s"} al sistema nuevo, uno detrás de otro, cada uno entero antes del siguiente:`);
   for (const vault of legacy) say(`  ${short(vault)}`);
@@ -360,7 +387,8 @@ async function volver(typed: string): Promise<number> {
   say(`2/2  Esperando a que el trabajador lo suelte y a que caduque su último envío (hasta ~6 min)…`);
   const released = await waitFor(["release", vault], releaseProgress, [
     "No he podido devolverlo. Sigue «pasando»: nadie lo cobra ni compra.",
-    `Vuelve a probar «volver ${vault.slice(0, 8)}» en unos minutos; si sigue igual, dímelo.`,
+    `Para dejarlo otra vez en el sistema nuevo, servido: «traspasar ${vault.slice(0, 8)}».`,
+    `O vuelve a probar «volver ${vault.slice(0, 8)}» en unos minutos; si sigue igual, dímelo.`,
   ]);
   if (!released) return 1;
   say(`LISTO: ${short(vault)} vuelve a ser de los keepers de siempre (lo atienden desde su próxima vuelta, ~1 min).`);
@@ -462,7 +490,25 @@ async function marcarIdos(ids: readonly string[] | "viejos"): Promise<number> {
     say("No he tocado nada.");
     return 1;
   }
-  const run = await handover(ids === "viejos" ? ["gone", "--stale"] : ["gone", ...targets.map((target) => target.processId)]);
+  // ONLY WHAT HE CHECKED: the listed ids, never `gone --stale`, which marks whatever is stale at the moment of the
+  // write — a receipt that went stale while he was in Railway, which nobody looked at. And a listed one that read
+  // again meanwhile is alive: it is left out.
+  if (ids === "viejos") {
+    const now = await readDb();
+    if (now === null) return 1;
+    const stillStale = new Set(staleReceipts(now).map((entry) => entry.processId));
+    const readAgain = targets.filter((target) => !stillStale.has(target.processId));
+    if (readAgain.length > 0) {
+      const many = readAgain.length > 1;
+      say(`No marco ${readAgain.map((target) => target.processId).join(", ")}: ${many ? "han" : "ha"} vuelto a leer mientras contestabas, ${many ? "están vivos" : "está vivo"}.`);
+    }
+    targets = targets.filter((target) => stillStale.has(target.processId));
+    if (targets.length === 0) {
+      say("No he marcado nada.");
+      return 0;
+    }
+  }
+  const run = await handover(["gone", ...targets.map((target) => target.processId)]);
   const marked = (run.result as { marked?: unknown } | null)?.marked;
   if (run.ok !== true || !Array.isArray(marked)) {
     say("No se pudo:");
@@ -471,8 +517,6 @@ async function marcarIdos(ids: readonly string[] | "viejos"): Promise<number> {
   }
   const markedIds = marked.flatMap((entry) => (typeof entry === "object" && entry !== null && typeof (entry as { processId?: unknown }).processId === "string" ? [(entry as { processId: string }).processId] : []));
   say(`LISTO: marcado${markedIds.length === 1 ? "" : "s"} como ido${markedIds.length === 1 ? "" : "s"}: ${markedIds.length === 0 ? "ninguno (ya lo estaban, o volvieron a leer)" : markedIds.join(", ")}.`);
-  const extra = markedIds.filter((id) => !targets.some((target) => target.processId === id));
-  if (extra.length > 0) say(`OJO: también se marcaron ${extra.join(", ")} (dejaron de leer mientras contestabas). Si alguno vuelve a leer, se desmarca solo.`);
   say("Un keeper marcado que vuelve a leer se desmarca solo.");
   return 0;
 }

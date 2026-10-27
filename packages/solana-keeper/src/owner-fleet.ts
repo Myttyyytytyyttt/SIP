@@ -37,7 +37,17 @@
 
 import type { TurnInvest, TurnSettle } from "./doorbell.js";
 import { LEGACY_READ_FRESH_MS, RELEASE_JOB_CEILING_MINUTES } from "./handover.js";
-import { KEEPER_ROLES, MODE_FIXED_BYTE, MODE_PROFIT_BYTE, MODE_ROUNDUP_BYTE, MODE_VOLUME_BYTE, isKeeperRole, type KeeperRole } from "./role-registry.js";
+import {
+  KEEPER_ROLES,
+  MODE_FIXED_BYTE,
+  MODE_PROFIT_BYTE,
+  MODE_ROUNDUP_BYTE,
+  MODE_VOLUME_BYTE,
+  isKeeperRole,
+  keeperModeFor,
+  roleCarriesLosses,
+  type KeeperRole,
+} from "./role-registry.js";
 
 /** The owner's own vault (VOLUME, two linked wallets): marked on every list. */
 export const OWNER_VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
@@ -279,6 +289,8 @@ export interface ProcessEntry {
   readonly goneAt: string | null;
   /** Every vault it read as not its own at that read. */
   readonly notLegacy: Readonly<Record<string, string>>;
+  /** The vaults whose loss carry it held only in its memory at that read (arm refuses each); empty when the CLI did not say. */
+  readonly carryVaults: readonly string[];
   readonly carryStore: string | null;
 }
 
@@ -358,6 +370,7 @@ export function readFleetDb(result: unknown, allListed: boolean): FleetDb | null
       ageMs,
       goneAt: str(raw["goneAt"]),
       notLegacy,
+      carryVaults: Array.isArray(raw["carryVaults"]) ? (raw["carryVaults"] as unknown[]).filter((entry): entry is string => typeof entry === "string") : [],
       carryStore: str(raw["carryStore"]),
     });
   }
@@ -600,7 +613,11 @@ export function plainBlocker(blocker: string): string {
   }
   m = /^legacy process (\S+) \((\w+), .*? holds a loss carry for a link of this vault only in its memory/.exec(blocker);
   if (m !== null) {
-    return `${keeperWords(m[2]!)} (id ${m[1]}) guarda solo en su memoria una pérdida de este vault, que el sistema nuevo no vería: ponle SIP_SOLANA_CARRY_STORE=dual (o on) en Railway y espera su siguiente vuelta`;
+    return (
+      `${keeperWords(m[2]!)} (id ${m[1]}) guarda solo en su memoria una pérdida de este vault, que el sistema nuevo no vería. No le cambies ahora ` +
+      "SIP_SOLANA_CARRY_STORE: el redespliegue olvida esa pérdida. Devuélvelo con «volver» (allí la pérdida sigue en su memoria y se " +
+      `compensa); si su despliegue ya no existe en Railway, la pérdida ya se perdió: «marcar-ido ${m[1]}»`
+    );
   }
   m = /^no (ACTING )?(\w+) keeper has read this vault as not its own in the last (\d+) min/.exec(blocker);
   if (m !== null) {
@@ -690,7 +707,16 @@ function rolesReadingProblems(db: FleetDb, roles: readonly string[], withinMs: n
  *     lets the vault go;
  *   * no receipt that is not marked gone has stopped reading (older than
  *     FRESH_READ_MS) without having read THIS vault as foreign — an old
- *     container arm would wait on, which the owner marks gone after Railway.
+ *     container arm would wait on, which the owner marks gone after Railway;
+ *   * NO RECEIPT HOLDS A LOSS OF THIS VAULT ONLY IN ITS MEMORY (carryVaults):
+ *     arm refuses that until the carry nets out, which only a settle does, and
+ *     nobody settles a draining vault — so the vault would sit «pasando» the
+ *     whole wait, and the way out the owner would reach for (a carry store
+ *     change) is a redeploy that forgets the loss;
+ *   * for a vault that may carry losses (PROFIT, or a mode the CLI did not
+ *     say), every profit receipt not marked gone runs SIP_SOLANA_CARRY_STORE=on
+ *     (runbook 10.8 step 3): with the store off, a loss a worker carries for it
+ *     in the queue is one `volver` could never hand back (returnProblems).
  */
 export function moveProblems(db: FleetDb, vault: string, rehearsal: boolean, autoArmOn = false): string[] {
   const problems: string[] = [];
@@ -713,15 +739,64 @@ export function moveProblems(db: FleetDb, vault: string, rehearsal: boolean, aut
       );
     }
   }
+  for (const entry of db.processes) {
+    if (entry.goneAt === null && entry.carryVaults.includes(vault)) {
+      problems.push(
+        `${keeperWords(entry.role)} (id ${entry.processId}) guarda solo en su memoria una pérdida de este vault: el sistema nuevo cobraría de más su siguiente ganancia. ` +
+          "Déjalo con los keepers de siempre: la pérdida se compensa con su siguiente ganancia, y entonces se puede traspasar. No cambies " +
+          "SIP_SOLANA_CARRY_STORE para esto: un redespliegue olvida esa pérdida (10.8 paso 3: a on, cuando su /status diga pendingCarries vacío)",
+      );
+    }
+  }
+  if (mayCarryLosses(db, vault)) problems.push(...carryStoreProblems(db, "con este vault en el sistema nuevo, «volver» no podría devolverlo si un trabajador guarda una pérdida suya"));
   return problems;
 }
 
-/** Why `volver <vault>` may not start: a vault handed back to keepers that are not reading would be served by nobody. */
+/** Whether the vault may carry losses: a mode that does (PROFIT, role-registry), or one nobody said or nobody knows (an older CLI, a row with no mode yet). */
+function mayCarryLosses(db: FleetDb, vault: string): boolean {
+  const mode = db.vaults.find((entry) => entry.vault === vault)?.skimMode ?? null;
+  return mode === null || keeperModeFor(mode)?.carriesLosses !== false;
+}
+
+/** A receipt of a role whose keeper keeps loss carries (roleCarriesLosses: the profit keeper), not marked gone, not running the store `on`. */
+const carryStoreNotOn = (entry: ProcessEntry): boolean =>
+  entry.goneAt === null && isKeeperRole(entry.role) && roleCarriesLosses(entry.role) && entry.carryStore !== "on";
+
+/**
+ * Each profit receipt not marked gone that does not run SIP_SOLANA_CARRY_STORE=on,
+ * as one problem: release refuses a vault whose links hold a loss a worker
+ * carried while any of them is not `on` (handover.ts, #carryBlockers), and
+ * nothing this tool reads says whether such a loss exists — so it asks for `on`
+ * before the vault leaves the legacy keepers, and before it goes back.
+ */
+function carryStoreProblems(db: FleetDb, why: string): string[] {
+  const problems: string[] = [];
+  for (const entry of db.processes) {
+    if (!carryStoreNotOn(entry)) continue;
+    problems.push(
+      `${keeperWords(entry.role)} (id ${entry.processId}) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=${entry.carryStore ?? "off"}): ${why}. ` +
+        "Ponle SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío)" +
+        (receiptState(entry) === "viejo" ? `; si su despliegue (${entry.deployment ?? "?"}) ya no existe en Railway: «marcar-ido ${entry.processId}»` : ""),
+    );
+  }
+  return problems;
+}
+
+/**
+ * Why `volver <vault>` may not start, before the rollback takes it out of the
+ * queue: a vault handed back to keepers that are not reading would be served by
+ * nobody; and for a vault that may carry losses, a profit receipt not running
+ * the carry store `on` is one release refuses on whenever a worker carried a
+ * loss for it — after the rollback, so the vault would wait «pasando», served by
+ * nobody, until the variable changed. With every profit receipt `on` and one of
+ * them reading (the roles' check), release's carry rule holds.
+ */
 export function returnProblems(db: FleetDb, vault: string, rehearsal: boolean): string[] {
   const problems: string[] = [];
   const row = rowProblem(db, vault);
   if (row !== null) problems.push(row);
   problems.push(...rolesReadingProblems(db, KEEPER_ROLES, LEGACY_READ_FRESH_MS, rehearsal, "devuelto, nadie lo serviría; enciéndelo primero"));
+  if (mayCarryLosses(db, vault)) problems.push(...carryStoreProblems(db, "devuelto con una pérdida que guardó el sistema nuevo, cobraría de más; «volver» se quedaría esperando con el vault sin servir"));
   return problems;
 }
 
@@ -757,7 +832,45 @@ export function armProgress(result: unknown): Progress | null {
   if (step.system === "queue") return { kind: "done" };
   if (step.system === "legacy") return { kind: "stop", lines: ["El vault ha vuelto a los keepers de siempre mientras esperaba: ¿alguien ha hecho «volver»? No sigo."] };
   if (step.system === null) return { kind: "stop", lines: ["La base ya no tiene este vault apuntado. No sigo: dímelo."] };
-  return { kind: "wait", note: step.blockers.length === 0 ? "esperando bloques" : step.blockers.map(plainBlocker).join(" · ") };
+  return { kind: "wait", note: step.blockers.length === 0 ? "esperando bloques" : armNote(step.blockers) };
+}
+
+/** A receipt blocker of arm (`legacy process <id> (<role>, …, last read <n> <unit> ago[, acting]) has not yet read …`), read. */
+function unreadReceipt(blocker: string): { readonly role: string; readonly ageMs: number; readonly acting: boolean } | null {
+  const m = /^legacy process \S+ \((\w+), deployment .*?, last read (\d+) (s|min|h) ago(, acting)?\) has not yet read this vault as not its own/.exec(blocker);
+  if (m === null) return null;
+  const unit = m[3] === "s" ? 1_000 : m[3] === "min" ? 60_000 : 3_600_000;
+  return { role: m[1]!, ageMs: Number(m[2]) * unit, acting: m[4] !== undefined };
+}
+
+/**
+ * THE WAIT RIGHT AFTER THE DRAIN IS THE NORMAL ONE. No keeper has read the
+ * vault as foreign yet, so arm names every receipt ("has not yet read") and
+ * every role ("no ACTING … keeper has read … in the last 15 min"), and in the
+ * owner's words that read as a fault — «¿está encendido en Railway?», a
+ * «marcar-ido» for a live keeper — with an age that changed every poll, a new
+ * line each time. A receipt read within FRESH_READ_MS clears on its next sweep:
+ * it becomes one line with no age, and so does the role it will satisfy (an
+ * acting one, or any one in a rehearsal's dry variant). A receipt older than
+ * that, or a role with no such receipt, keeps its own words.
+ */
+function armNote(blockers: readonly string[]): string {
+  const soon = { acting: new Set<string>(), any: new Set<string>() };
+  const kept: string[] = [];
+  for (const blocker of blockers) {
+    const receipt = unreadReceipt(blocker);
+    if (receipt !== null && receipt.ageMs <= FRESH_READ_MS) {
+      soon.any.add(receipt.role);
+      if (receipt.acting) soon.acting.add(receipt.role);
+      continue;
+    }
+    const role = /^no (ACTING )?(\w+) keeper has read this vault as not its own/.exec(blocker);
+    if (role !== null && (role[1] === undefined ? soon.any : soon.acting).has(role[2]!)) continue;
+    kept.push(blocker);
+  }
+  const lines = kept.map(plainBlocker);
+  if (soon.any.size > 0) lines.unshift("esperando a que los keepers de siempre lean el cambio (su próxima vuelta, ~1 min)");
+  return lines.join(" · ");
 }
 
 /**
@@ -1042,7 +1155,9 @@ export function vaultLines(view: FlotaView): string[] {
 function newVaultsLine(db: FleetDb, scheduler: PageRead<SchedulerPageView>): string[] {
   if (db.newVaultSystem === "legacy") return ["Vaults nuevos: van a los keepers de siempre."];
   if (db.newVaultSystem === "queue") {
-    const autoArm = scheduler.answered ? scheduler.page.autoArm : null;
+    // UNKNOWN IS NOT "NO": a page that did not answer says nothing about the auto-arm.
+    if (!scheduler.answered) return ["Vaults nuevos: van al sistema nuevo; no sé si el scheduler se arma solo (su página no contesta)."];
+    const autoArm = scheduler.page.autoArm;
     if (autoArm?.enabled === true) return ["Vaults nuevos: van al sistema nuevo (entran «pasando» y el scheduler los pasa solo)."];
     return [
       "Vaults nuevos: van al sistema nuevo, PERO el scheduler no se arma solo: un vault nuevo se queda «pasando» sin que nadie lo sirva.",
@@ -1147,16 +1262,20 @@ export function nextSteps(view: FlotaView): string[] {
     if (!(autoArmOn && autoArmable(vault))) steps.push(`${short(vault.vault)} está a medio pasar y nadie lo sirve: «traspasar ${vault.vault.slice(0, 8)}» o «volver ${vault.vault.slice(0, 8)}».`);
   }
   if (stale.length > 0) steps.push("Hay keepers que llevan más de 15 min sin leer: comprueba en Railway que esos despliegues ya no existen y haz «marcar-idos-viejos».");
-  if (db.newVaultSystem === "queue" && !autoArmOn) steps.push("Los vaults nuevos van a la cola pero el scheduler no se arma solo: «nuevos-a-los-de-siempre».");
+  if (db.newVaultSystem === "queue" && page !== null && !autoArmOn) steps.push("Los vaults nuevos van a la cola pero el scheduler no se arma solo: «nuevos-a-los-de-siempre».");
   if (!db.allListed) {
     steps.push("Para ver todos los vaults hace falta la versión nueva de dispatch-handover (status --all).");
     return steps;
   }
   if (legacy.length > 0) {
+    // THE CARRY STORE FIRST (10.8 step 3): «traspasar» refuses a PROFIT vault while the profit keeper does not run it `on`.
+    const storeOff = db.processes.some(carryStoreNotOn);
     steps.push(
-      legacyReading
-        ? `Quedan ${legacy.length} con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>».`
-        : `Quedan ${legacy.length} con los keepers de siempre, y esos keepers no están leyendo: enciéndelos en Railway antes de traspasar.`,
+      !legacyReading
+        ? `Quedan ${legacy.length} con los keepers de siempre, y esos keepers no están leyendo: enciéndelos en Railway antes de traspasar.`
+        : storeOff && legacy.some((entry) => mayCarryLosses(db, entry.vault))
+          ? `Quedan ${legacy.length} con los keepers de siempre. Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío); luego «traspasar-todos».`
+          : `Quedan ${legacy.length} con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>».`,
     );
     return steps;
   }
@@ -1169,12 +1288,15 @@ export function nextSteps(view: FlotaView): string[] {
     );
     return steps;
   }
-  const waitsOn = page?.autoArm?.legacyRoles ?? null;
+  // AN UNREAD PAGE IS NOT "WAITS ON NOBODY": stopping the keepers while the scheduler still waits on their receipts leaves every new vault «pasando».
+  const waitsOn = page === null ? undefined : page.autoArm === null ? null : (page.autoArm.legacyRoles ?? undefined);
   if (legacyReading) {
     steps.push(
-      waitsOn !== null && waitsOn.length > 0
-        ? "Todo va al sistema nuevo. Antes de parar los keepers de siempre, el scheduler tiene que dejar de esperar sus recibos (ahora los espera): dímelo."
-        : "Todo va al sistema nuevo. Cuando quieras, para los keepers de siempre en Railway (no los borres) y luego «marcar-idos-viejos».",
+      waitsOn === undefined
+        ? "Todo va al sistema nuevo. No sé si el scheduler se arma solo ni qué recibos espera: su página no contesta; vuelve a probar «flota» antes de parar nada."
+        : waitsOn !== null && waitsOn.length > 0
+          ? "Todo va al sistema nuevo. Antes de parar los keepers de siempre, el scheduler tiene que dejar de esperar sus recibos (ahora los espera): dímelo."
+          : "Todo va al sistema nuevo. Cuando quieras, para los keepers de siempre en Railway (no los borres) y luego «marcar-idos-viejos».",
     );
   } else steps.push("Todo va al sistema nuevo.");
   return steps;

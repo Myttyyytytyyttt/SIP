@@ -224,7 +224,8 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
       expect(ran.out).toContain("cobro: sin operaciones nuevas (2 carteras) · compra: nada que comprar");
       expect(ran.out).toContain("OJO: lleva 3 compras rechazadas seguidas");
       expect(ran.out).toContain("su trabajo se cortó 5 veces seguidas sin terminar");
-      expect(ran.out).toContain("Quedan 3 con los keepers de siempre: «traspasar-todos»");
+      // THE OLD CONTAINER'S RECEIPT RUNS THE CARRY STORE dual, not on: step 3 of 10.8 first.
+      expect(ran.out).toContain("Quedan 3 con los keepers de siempre. Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper");
     } else {
       expect(ran.out).toContain("Vaults (2):");
       // AN OLDER CLI does not say a vault is parked: it is shown as the queue's, and not as parked.
@@ -258,6 +259,8 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
     expect(ran.code, ran.out).toBe(1);
     expect(ran.out).toContain(`con id ${OLD_PROCESS} no lee desde hace 60 min y no ha soltado este vault`);
     expect(ran.out).toContain(`«marcar-ido ${OLD_PROCESS}»`);
+    // ... AND ITS CARRY STORE IS dual: a PROFIT vault waits for every profit receipt on `on` (10.8 step 3).
+    expect(ran.out).toContain(`(id ${OLD_PROCESS}) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=dual)`);
     expect(ran.out).toContain("No he tocado nada.");
     expect(await system(LEGACY_A)).toBe("legacy");
   }, 30_000);
@@ -315,6 +318,64 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
       await db.query("UPDATE sip_solana.vault_work SET system = 'legacy' WHERE vault_addr = $1", [LEGACY_B]);
     }
   }, 30_000);
+
+  it("traspasar, stopped with Ctrl-C after the drain: says the vault is «pasando», and what to type to finish it or hand it back", async () => {
+    // A RECEIPT THAT READ 30 s AGO AND NEVER READS AGAIN: the pre-checks pass, and arm waits on it — the wait the owner interrupts.
+    await db.query(
+      `INSERT INTO sip_solana.legacy_process (process_id, role, dispatch, deployment, host, live, read_at, seen, absent_is, carry_store)
+       VALUES ('frozen-profit', 'profit', 'on', 'dep-frozen', 'box', true, clock_timestamp() - interval '30 seconds', '{}', 'legacy', 'on')`,
+    );
+    try {
+      const child = spawn("node_modules/.bin/tsx", [TOOL, "traspasar", LEGACY_B], {
+        cwd: KEEPER,
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: process.env["HOME"] ?? "",
+          PROD_DB: dbUrl,
+          SIP_FLOTA_TOOL_REHEARSAL: "1",
+          SIP_FLOTA_TOOL_PAGES: pagesBase,
+          SIP_FLOTA_TOOL_RPC: rpcUrl,
+          SIP_FLOTA_TOOL_POLL_MS: "150",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      const ended = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+      await new Promise<void>((waiting, failed) => {
+        const timer = setTimeout(() => failed(new Error(`no wait to interrupt:\n${out}`)), 40_000);
+        const watch = (chunk: Buffer): void => {
+          out += chunk.toString();
+          // THE FIRST NOTE OF THE WAIT: the drain is done and arm is being asked.
+          if (/… \d+ s: /.test(out)) {
+            clearTimeout(timer);
+            waiting();
+          }
+        };
+        child.stdout.on("data", watch);
+        child.stderr.on("data", watch);
+      });
+      expect(await system(LEGACY_B)).toBe("draining");
+      child.kill("SIGINT");
+      const code = await ended;
+      expect(code, out).toBe(130);
+      expect(out).toContain("esperando a que los keepers de siempre lean el cambio");
+      expect(out).toContain("Parado a mitad.");
+      expect(out).toContain("Sigue «pasando»: nadie lo cobra ni compra.");
+      expect(out).toContain(`«traspasar ${LEGACY_B.slice(0, 8)}»`);
+      expect(out).toContain(`«volver ${LEGACY_B.slice(0, 8)}»`);
+      expect(await system(LEGACY_B)).toBe("draining");
+      // traspasar-todos NAMES IT rather than pass it over: it is not 'legacy' any more, and nobody serves it.
+      await db.query("UPDATE sip_solana.vault_work SET system = 'queue' WHERE vault_addr = $1", [LEGACY_C]);
+      if (newCli) {
+        const all = await tool(["traspasar-todos"]);
+        expect(all.code, all.out).toBe(1);
+        expect(all.out).toContain(`OJO: ${short(LEGACY_B)} sigue «pasando» y nadie lo sirve`);
+      }
+    } finally {
+      await db.query("DELETE FROM sip_solana.legacy_process WHERE process_id = 'frozen-profit'");
+      await db.query("UPDATE sip_solana.vault_work SET system = 'legacy', system_at = NULL, handover_height = NULL WHERE vault_addr = ANY($1::text[])", [[LEGACY_B, LEGACY_C]]);
+    }
+  }, 90_000);
 
   it("flota, with a scheduler that arms by itself: only its own untouched enrolment is «the scheduler's»; one the owner left half way is nobody's", async () => {
     setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: 1, lastArmedAt: null, lastResults: [], lastError: null });

@@ -101,7 +101,8 @@ const receipt = (processId: string, role: string, over: Partial<ProcessEntry> = 
   ageMs: 20_000,
   goneAt: null,
   notLegacy: {},
-  carryStore: "dual",
+  carryVaults: [],
+  carryStore: "on",
   ...over,
 });
 
@@ -241,7 +242,12 @@ describe("dispatch-handover status, read", () => {
     expect(db.allListed).toBe(false);
     expect(db.webhookOwner).toBeNull();
     expect(db.vaults[0]).toMatchObject({ vault: OWNER_VAULT, system: "queue", handoverHeight: "380000000", extended: false, lastOutcome: null, parkedReason: null, skimMode: null, attempts: null });
-    expect(db.processes[0]).toMatchObject({ processId: "5a3d0308", role: "profit", live: true, ageMs: 4000, notLegacy: { [OWNER_VAULT]: "queue" }, carryStore: "dual" });
+    expect(db.processes[0]).toMatchObject({ processId: "5a3d0308", role: "profit", live: true, ageMs: 4000, notLegacy: { [OWNER_VAULT]: "queue" }, carryVaults: [], carryStore: "dual" });
+    // THE CARRIES HELD ONLY IN MEMORY, read; a CLI that does not report them is none, never a guess.
+    const withCarry = readFleetDb({ ...OLD, processes: [{ ...OLD.processes[0], carryVaults: [LEGACY_A, 7] }] }, false)!;
+    expect(withCarry.processes[0]!.carryVaults).toEqual([LEGACY_A]);
+    const { carryVaults: _dropped, ...older } = OLD.processes[0]!;
+    expect(readFleetDb({ ...OLD, processes: [older] }, false)!.processes[0]!.carryVaults).toEqual([]);
   });
 
   it("reads the `status --all` contract: every vault_work row with its job's fields, and the webhook owner", () => {
@@ -488,6 +494,10 @@ describe("the CLI's blockers, in Spanish", () => {
       "el keeper de beneficios (id p-old) todavía no lo ha leído como ajeno (leyó por última vez hace 60 min); espera a su siguiente vuelta. Si su despliegue ya no existe en Railway: «marcar-ido p-old»",
     );
     expect(plain[1]).toContain("el keeper de beneficios (id p-carry) guarda solo en su memoria una pérdida");
+    // NOT A REDEPLOY MID-HANDOVER, which forgets the loss: back to the keepers that hold it.
+    expect(plain[1]).toContain("No le cambies ahora SIP_SOLANA_CARRY_STORE");
+    expect(plain[1]).toContain("«volver»");
+    expect(plain[1]).not.toContain("dual");
     expect(plain[2]).toBe("ningún keeper de volumen encendido y actuando lo ha leído como ajeno en los últimos 15 min: ¿está encendido en Railway, con SIP_SOLANA_DISPATCH=on?");
     expect(plain[3]).toBe("ningún keeper de volumen lo ha leído como ajeno en los últimos 15 min: ¿está encendido en Railway, con SIP_SOLANA_DISPATCH=on?");
     expect(plain[4]).toBe("los keepers de siempre ya lo han soltado; esperando a que pasen los bloques (faltan 181 bloques)");
@@ -568,6 +578,35 @@ describe("traspasar: what it refuses before touching anything", () => {
     const marked = fleet({ processes: [...fleet().processes, receipt("p-old", "profit", { ageMs: 3_600_000, goneAt: "2026-10-27T07:00:00Z" })] });
     expect(moveProblems(marked, LEGACY_A, false)).toEqual([]);
   });
+
+  it("refuses a vault whose loss a receipt holds only in memory — arm would wait the whole fifteen minutes — and says not to redeploy for it", () => {
+    const holding = fleet({ processes: [receipt("p-profit", "profit", { carryVaults: [LEGACY_A] }), receipt("p-volume", "volume")] });
+    const problems = moveProblems(holding, LEGACY_A, false);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("el keeper de beneficios (id p-profit) guarda solo en su memoria una pérdida de este vault");
+    expect(problems[0]).toContain("Déjalo con los keepers de siempre");
+    expect(problems[0]).toContain("un redespliegue olvida esa pérdida");
+    // ANOTHER VAULT is not held up by it; a receipt marked gone holds nothing.
+    expect(moveProblems(holding, LEGACY_B, false)).toEqual([]);
+    const gone = fleet({ processes: [...fleet().processes, receipt("p-old", "profit", { carryVaults: [LEGACY_A], ageMs: 3_600_000, goneAt: "x" })] });
+    expect(moveProblems(gone, LEGACY_A, false)).toEqual([]);
+  });
+
+  it("refuses a vault that may carry losses while the profit keeper does not run the carry store on (10.8 step 3), and not a VOLUME one", () => {
+    const off = fleet({ processes: [receipt("p-profit", "profit", { carryStore: "off" }), receipt("p-volume", "volume", { carryStore: null })] });
+    const problems = moveProblems(off, LEGACY_A, false);
+    expect(problems).toEqual([
+      "el keeper de beneficios (id p-profit) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=off): con este vault en el sistema nuevo, «volver» no podría devolverlo si un trabajador guarda una pérdida suya. Ponle SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío)",
+    ]);
+    // A VOLUME VAULT carries no losses; a mode nobody said is treated as one that may.
+    const volume = fleet({ ...off, vaults: [...off.vaults, vault(DRAINING, "legacy", { skimMode: 1 })] });
+    expect(moveProblems(volume, DRAINING, false)).toEqual([]);
+    const unknown = fleet({ ...off, vaults: [...off.vaults, vault(DRAINING, "legacy", { skimMode: null })] });
+    expect(moveProblems(unknown, DRAINING, false)).toHaveLength(1);
+    // THE CONTAINER STEP 3 REPLACED, not yet marked: named, with what to type once Railway no longer shows it.
+    const replaced = fleet({ processes: [...fleet().processes, receipt("p-before", "profit", { carryStore: "off", ageMs: 20 * 60_000, notLegacy: { [LEGACY_A]: "draining" } })] });
+    expect(moveProblems(replaced, LEGACY_A, false)).toEqual([expect.stringContaining("«marcar-ido p-before»")]);
+  });
 });
 
 describe("volver and the new-vault flag: never to nobody", () => {
@@ -578,6 +617,22 @@ describe("volver and the new-vault flag: never to nobody", () => {
       "el keeper de volumen no ha leído la base en los últimos 15 min estando encendido y actuando: devuelto, nadie lo serviría; enciéndelo primero. ¿Está encendido en Railway, con SIP_SOLANA_DISPATCH=on?",
     ]);
     expect(returnProblems(noVolume, "Unknown1111111111111111111111111111111111111", false)).toHaveLength(2);
+  });
+
+  it("volver refuses, before the rollback, a vault that may carry losses while a profit receipt does not run the carry store on", () => {
+    // FRESH AND OFF: release would refuse on it with the vault already out of the queue.
+    const off = fleet({ processes: [receipt("p-profit", "profit", { carryStore: "off" }), receipt("p-volume", "volume")] });
+    expect(returnProblems(off, LEGACY_A, false)).toEqual([
+      "el keeper de beneficios (id p-profit) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=off): devuelto con una pérdida que guardó el sistema nuevo, cobraría de más; «volver» se quedaría esperando con el vault sin servir. Ponle SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío)",
+    ]);
+    // STALE AND UNMARKED, beside a fresh one that is on: the old one still blocks release, and the owner hears what to type.
+    const stale = fleet({ processes: [...fleet().processes, receipt("p-old", "profit", { carryStore: null, ageMs: 3_600_000 })] });
+    const problems = returnProblems(stale, LEGACY_A, false);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain("(SIP_SOLANA_CARRY_STORE=off)");
+    expect(problems[0]).toContain("«marcar-ido p-old»");
+    // A VOLUME VAULT (the owner's) carries no losses: it may go back.
+    expect(returnProblems(off, OWNER_VAULT, false)).toEqual([]);
   });
 
   it("nuevos-a-los-de-siempre refuses while a legacy role is not reading", () => {
@@ -600,6 +655,29 @@ describe("waiting on arm and release", () => {
     expect(armProgress({ vault: "V", system: null, moved: false, blockers: [] })).toMatchObject({ kind: "stop" });
     expect(armProgress(null)).toBeNull();
     expect(armProgress({ unexpected: true })).toBeNull();
+  });
+
+  it("arm, right after the drain: fresh keepers that have not read yet are one calm line, with no age and no «marcar-ido»", async () => {
+    const draining = { system: "draining", handover_height: null, holder: null, lease_until: null, holder_dead: false };
+    // THE REAL Handover's answer seconds after the drain: both receipts fresh, neither has read the vault yet.
+    const justDrained = await new Handover(
+      scriptedPool({ vault: draining, receipts: [legacyRow("p-profit", "profit", { saw: false, age_ms: "35000" }), legacyRow("p-volume", "volume", { saw: false, age_ms: "80000" })] }),
+    ).arm("V", heights);
+    expect(justDrained.blockers).toHaveLength(4);
+    expect(armProgress(justDrained)).toEqual({ kind: "wait", note: "esperando a que los keepers de siempre lean el cambio (su próxima vuelta, ~1 min)" });
+    // A RECEIPT PAST FRESH_READ_MS keeps its own words, the «marcar-ido» included; its role's line stays too.
+    const oneOld = await new Handover(
+      scriptedPool({ vault: draining, receipts: [legacyRow("p-profit", "profit", { saw: false, age_ms: "35000" }), legacyRow("p-volume", "volume", { saw: false, age_ms: "600000" })] }),
+    ).arm("V", heights);
+    const note = (armProgress(oneOld) as { readonly note: string }).note;
+    expect(note.startsWith("esperando a que los keepers de siempre lean el cambio")).toBe(true);
+    expect(note).toContain("el keeper de volumen (id p-volume) todavía no lo ha leído como ajeno (leyó por última vez hace 10 min)");
+    expect(note).toContain("«marcar-ido p-volume»");
+    expect(note).toContain("ningún keeper de volumen encendido y actuando lo ha leído como ajeno");
+    expect(note).not.toContain("ningún keeper de beneficios");
+    // A FRESH RECEIPT THAT IS NOT ACTING will not satisfy the acting role: that line stays.
+    const dry = await new Handover(scriptedPool({ vault: draining, receipts: [legacyRow("p-profit", "profit", { saw: false, live: false }), legacyRow("p-volume", "volume")] })).arm("V", heights);
+    expect((armProgress(dry) as { readonly note: string }).note).toContain("ningún keeper de beneficios encendido y actuando");
   });
 
   it("release: legacy or no row is done; back in the queue stops and says who did it", () => {
@@ -840,9 +918,9 @@ describe("flota: the screen", () => {
         vault(LEGACY_B, "legacy", { skimMode: 0 }),
       ],
       processes: [
-        receipt("p-profit", "profit", { notLegacy: { [OWNER_VAULT]: "queue" } }),
+        receipt("p-profit", "profit", { notLegacy: { [OWNER_VAULT]: "queue" }, carryStore: "off" }),
         receipt("p-volume", "volume", { ageMs: 12_000, carryStore: null }),
-        receipt("p-old", "profit", { ageMs: 7_200_000 }),
+        receipt("p-old", "profit", { ageMs: 7_200_000, carryStore: "off" }),
         receipt("p-gone", "volume", { goneAt: "2026-10-27T05:00:00Z" }),
       ],
     });
@@ -857,9 +935,9 @@ describe("flota: the screen", () => {
       "Timbre de Helius: lo lleva el keeper de beneficios.",
       "",
       "Keepers de siempre (sus recibos en la base):",
-      "  keeper de beneficios: vivo · leyó hace 20 s · actuando · pérdidas en la base: dual · id p-profit",
+      "  keeper de beneficios: vivo · leyó hace 20 s · actuando · pérdidas en la base: off · id p-profit",
       "  keeper de volumen: vivo · leyó hace 12 s · actuando · id p-volume",
-      "  keeper de beneficios: viejo · leyó hace 2 h · actuando · pérdidas en la base: dual · id p-old",
+      "  keeper de beneficios: viejo · leyó hace 2 h · actuando · pérdidas en la base: off · id p-old",
       "    si su despliegue (dep-p-old) ya no existe en Railway: «marcar-ido p-old»",
       "  idos (marcados): 1",
       "Sus páginas:",
@@ -873,8 +951,11 @@ describe("flota: the screen", () => {
       "",
       "Siguiente:",
       "  - Hay keepers que llevan más de 15 min sin leer: comprueba en Railway que esos despliegues ya no existen y haz «marcar-idos-viejos».",
-      "  - Quedan 2 con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>».",
+      "  - Quedan 2 con los keepers de siempre. Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío); luego «traspasar-todos».",
     ]);
+    // STEP 3 DONE AND THE OLD CONTAINER MARKED: the next step is the move itself.
+    const afterStep3 = { ...db, processes: [receipt("p-profit", "profit"), receipt("p-volume", "volume")] };
+    expect(nextSteps(view(afterStep3))).toEqual(["Quedan 2 con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>»."]);
   });
 
   it("marks what needs looking at on a queue vault: the outcome, its detail, a streak, attempts, a park", () => {
@@ -958,6 +1039,16 @@ describe("flota: the screen", () => {
       "Todo va al sistema nuevo. Antes de parar los keepers de siempre, el scheduler tiene que dejar de esperar sus recibos (ahora los espera): dímelo.",
     ]);
     expect(nextSteps(view(everything, armedFree))).toEqual(["Todo va al sistema nuevo. Cuando quieras, para los keepers de siempre en Railway (no los borres) y luego «marcar-idos-viejos»."]);
+    // THE SCHEDULER'S PAGE DID NOT ANSWER (a blip, a redeploy): unknown is not "arms by itself and waits on nobody".
+    const silent: PageRead<SchedulerPageView> = { answered: false, why: "no contesta" };
+    expect(nextSteps(view(everything, silent))).toEqual([
+      "Todo va al sistema nuevo. No sé si el scheduler se arma solo ni qué recibos espera: su página no contesta; vuelve a probar «flota» antes de parar nada.",
+    ]);
+    const silentLines = flotaLines(view(everything, silent));
+    expect(silentLines).toContain("Vaults nuevos: van al sistema nuevo; no sé si el scheduler se arma solo (su página no contesta).");
+    expect(silentLines.join("\n")).not.toContain("no se arma solo");
+    expect(silentLines.join("\n")).not.toContain("para los keepers de siempre");
+    expect(silentLines.join("\n")).not.toContain("nuevos-a-los-de-siempre");
     const stopped = { ...everything, processes: [receipt("p-profit", "profit", { ageMs: 3_600_000, goneAt: "x" })] };
     expect(nextSteps(view(stopped, armedFree, { keepers: { profit: { answered: false, why: "no contesta" }, volume: { answered: false, why: "no contesta" } } }))).toEqual([
       "Todo va al sistema nuevo.",
