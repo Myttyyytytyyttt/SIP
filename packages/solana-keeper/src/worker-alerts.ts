@@ -9,6 +9,10 @@
 // handover, so the worker's first alert for a wallet is sent, and its clears
 // resolve only what the worker itself raised.
 //
+// ONE RULE IS THE WORKER'S OWN: invest-refused, the same key and the same warn,
+// turns critical on the third REFUSED job in a row (investRefusedAlert says
+// why). The legacy keeper's stays a warn.
+//
 // WHAT IS COUNTED WHERE. The legacy keeper keeps its streaks in process memory,
 // sweep after sweep. A worker keeps them in vault_work.streaks (completionFor),
 // because the next job on the vault may run in another process; this reads the
@@ -42,9 +46,54 @@ export interface JobAlertRules {
 /** The settle-key check's own alert, the legacy keeper's key (bin/keeper.mts: settle-key-mismatch). */
 export const SETTLE_KEY_ALERT_KEY = "settle-key-mismatch";
 
-/** The per-vault invest-refused alert, in the legacy keeper's exact shape (bin/keeper.mts). */
-export function investRefusedAlert(vault: string, detail: string): Alert {
-  return { key: `invest-refused:${vault}`, severity: "warn", title: "A basket cannot be bought", detail, context: { vault } };
+/**
+ * The REFUSED job, in a row, at which a vault's invest-refused alert turns
+ * critical: the third, as invest-failed's (INVEST_FAILED_CRITICAL_STREAK).
+ */
+export const INVEST_REFUSED_CRITICAL_STREAK = 3;
+
+/**
+ * The per-vault invest-refused alert: the legacy keeper's exact shape
+ * (bin/keeper.mts) while the refusal is new, critical once it persists.
+ *
+ * A WARN THAT NEVER PAGES IS A REFUSAL NOBODY HEARS OF. The alert destination
+ * takes critical and above unless SIP_SOLANA_ALERT_MIN_SEVERITY says warn
+ * (critical is its default, src/config.ts), so a basket the worker cannot buy —
+ * a venue drained under a leg, a basket over this worker's Jupiter share, a
+ * Jupiter that keeps answering 4xx — was a log line every REFUSED job, for as
+ * long as it lasted: money that should be buying and is not, and nobody woken.
+ * One refusal is often the moment (a pool thin for a minute); the third in a
+ * row is a vault that has stopped buying.
+ *
+ * HOW SOON THE THIRD COMES IS THE SCHEDULER'S, NOT THIS FILE'S. A REFUSED job
+ * asks to come back after REFUSED_DUE_SECONDS, doubling (five minutes, then
+ * ten: about a quarter of an hour to the third). But a due time only ever moves
+ * earlier (src/scheduler-pg.ts), and a full pass makes every queue vault that
+ * did not rest due at once. While the scheduler holds no doorbell secret EVERY
+ * tick is a full pass (production on 2026-10-27), so a refused vault is turned
+ * every tick and the third refusal lands about two ticks — two minutes — after
+ * the first. Only a trusted doorbell leaves a busy vault to its own backoff.
+ *
+ * THE ALERTER'S OWN RULES DO THE REST (alerts.ts): the first warn is logged, the
+ * second is a repeat inside its window and stays quiet, and the critical
+ * ESCALATES through the dedup on the third. It repeats no sooner than 30
+ * minutes later, at the first refused job after that: every 30 minutes while a
+ * full pass turns the vault every tick, hourly once a trusted doorbell lets the
+ * backoff reach REFUSED_DUE_MAX_SECONDS. A turn that bought or failed clears it
+ * (jobAlerts), and the next refusal starts at a warn again. The legacy keeper's
+ * copy (bin/keeper.mts) is unchanged and stays a warn.
+ */
+export function investRefusedAlert(vault: string, detail: string, streak = 1): Alert {
+  if (streak < INVEST_REFUSED_CRITICAL_STREAK) {
+    return { key: `invest-refused:${vault}`, severity: "warn", title: "A basket cannot be bought", detail, context: { vault } };
+  }
+  return {
+    key: `invest-refused:${vault}`,
+    severity: "critical",
+    title: "A vault's basket keeps being refused",
+    detail: `${streak} refused turns in a row, nothing bought: ${detail}`,
+    context: { vault },
+  };
 }
 
 export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: ReadonlySet<string> } = {}): JobAlertRules {
@@ -86,7 +135,10 @@ export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: Readonl
   const invest = report.invest;
   if (invest !== null) {
     // AS THE LEGACY SWEEP DOES: only a turn that bought or failed resolves a refusal; a throw, a deferral or a rest does not.
-    if (invest.outcome === "REFUSED") fire.push(investRefusedAlert(vault, invest.detail));
+    // CRITICAL FROM THE THIRD REFUSED JOB IN A ROW (the streak the row is about to
+    // hold, so whichever worker ran the first two), with no clear before it: the
+    // escalation breaks the warn's dedup on its own, as invest-failed's below.
+    if (invest.outcome === "REFUSED") fire.push(investRefusedAlert(vault, invest.detail, Math.max(1, streaks.investRefused)));
     else if (invest.outcome === "INVESTED" || invest.outcome === "FAILED") clear.push(`invest-refused:${vault}`);
 
     // A THROW IN THE INVEST HALF IS A FAILED TURN, as the legacy keeper folds it.

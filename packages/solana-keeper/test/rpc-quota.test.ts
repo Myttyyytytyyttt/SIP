@@ -6,6 +6,8 @@
 // THE ROW'S STORE IS NOT HERE: a WorkerQuotaSource is whatever the test hands
 // in, as the store track's will be.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { JupiterPacer, buyingTurnJupiterCalls } from "../src/jupiter-pacer.js";
 import { RpcBudget } from "../src/rpc-budget.js";
@@ -243,5 +245,99 @@ describe("the P2 Jupiter pacer, retuned to a worker's share", () => {
     expect(pacer.status().overdrawn).toBe(0);
     expect(pacer.status().calls).toBe(18);
     expect(pacer.reserve(1).granted).toBe(false);
+  });
+});
+
+describe("bin/worker.mts: the pacer built at the organisation's minute, held at the floor until a hand-out", () => {
+  const worker = readFileSync(fileURLToPath(new URL("../bin/worker.mts", import.meta.url)), "utf8");
+
+  it("builds ONE pacer with the whole minute as its ceiling and hands the follower the floor, with nothing awaited in between", () => {
+    expect(worker.match(/new JupiterPacer\(/g)).toHaveLength(1);
+    expect(worker).toContain("pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),");
+    expect(worker).toContain("const jupiterFloorPerMinute = Math.max(1, floor.floorJupiterPerMinute ?? config.jupiterCallsPerMinute);");
+    expect(worker).toContain("floorJupiterPerMinute: jupiter === null ? null : jupiterFloorPerMinute,");
+    // THE FOLLOWER'S CONSTRUCTOR IS WHAT PUTS THE PACER ON THE FLOOR: built in the
+    // same synchronous run as the pacer, and before the loop that runs the jobs.
+    const pacerAt = worker.indexOf("new JupiterPacer(");
+    const followerAt = worker.indexOf("const follower = new QuotaFollower({");
+    expect(pacerAt).toBeGreaterThan(-1);
+    expect(followerAt).toBeGreaterThan(pacerAt);
+    expect(worker.slice(pacerAt, followerAt)).not.toMatch(/\bawait\b/);
+    expect(followerAt).toBeLessThan(worker.indexOf("await loop.start();"));
+  });
+
+  /** The worker's construction, as bin/worker.mts writes it, for a fleet of `maxWorkers` on the organisation's `minute`. */
+  function booted(maxWorkers: number, minute: number) {
+    const clock = manualClock();
+    const floor = fleetQuotas({ liveWorkers: 0, maxWorkers, jupiterPerMinute: minute });
+    const budget = new RpcBudget({ ratePerSecond: floor.floorRps, defaultLane: "hot", now: clock.now, setTimer: clock.setTimer });
+    const pacer = new JupiterPacer({ perMinute: minute, now: clock.now, sleep: async () => undefined });
+    const ceiling = pacer.perMinute;
+    const follower = new QuotaFollower({
+      budget,
+      pacer,
+      floorRps: floor.floorRps,
+      floorJupiterPerMinute: Math.max(1, floor.floorJupiterPerMinute ?? minute),
+      maxRps: floor.fleetRps,
+      now: clock.now,
+    });
+    /** The scheduler's hand-out with `live` workers alive, as handOutQuotas computes it, just written. */
+    const handOut = (live: number) => {
+      const q = fleetQuotas({ liveWorkers: live, maxWorkers: Math.max(maxWorkers, live), jupiterPerMinute: minute });
+      return follower.apply({ rpsQuota: q.perWorkerRps, jupQuotaPerMinute: q.perWorkerJupiterPerMinute, ageMs: 0 });
+    };
+    return { clock, pacer, follower, ceiling, handOut };
+  }
+
+  it("runs at the floor from boot, rises to a lone worker's whole minute, and is back on the floor two minutes after the scheduler goes quiet", async () => {
+    // TWO WORKERS AT MOST ON THE FREE KEY'S 50 A MINUTE: a floor of 25.
+    const { clock, pacer, follower, ceiling, handOut } = booted(2, 50);
+    expect(ceiling).toBe(50);
+    expect(pacer.ceilingPerMinute).toBe(50);
+    expect(pacer.perMinute).toBe(25);
+    expect(follower.status()).toMatchObject({ state: "floor", jupiterPerMinute: 25 });
+    // ON THE FLOOR a three-leg basket (24 calls) fits and a four-leg one (30) is refused as this worker's share, not as the plan's.
+    const fourLegs = buyingTurnJupiterCalls(4, true);
+    expect(fourLegs).toBe(30);
+    const threeLegs = pacer.reserve(buyingTurnJupiterCalls(3, true));
+    expect(threeLegs.granted).toBe(true);
+    if (threeLegs.granted) threeLegs.reservation.release();
+    const atFloor = pacer.reserve(fourLegs);
+    expect(!atFloor.granted && atFloor.reason).toBe("share-too-small");
+    // ALONE IN THE FLEET, the scheduler hands it the whole minute — and it gets it.
+    expect(handOut(1)).toMatchObject({ state: "row", jupiterPerMinute: 50 });
+    expect(pacer.perMinute).toBe(50);
+    const alone = pacer.reserve(fourLegs);
+    expect(alone.granted).toBe(true);
+    if (alone.granted) alone.reservation.release();
+    // THE OLD BUILD — the pacer's ceiling at the floor — kept 25 whatever the row said, and called the same basket never-fits.
+    const old = new JupiterPacer({ perMinute: 25, now: clock.now, sleep: async () => undefined });
+    expect(old.retune(50)).toBe(true);
+    expect(old.perMinute).toBe(25);
+    const oldAnswer = old.reserve(fourLegs);
+    expect(!oldAnswer.granted && oldAnswer.reason).toBe("never-fits");
+    // THE SCHEDULER GOES QUIET: two minutes after it last wrote, the floor again.
+    await clock.advance(QUOTA_STALE_MS + 1);
+    expect(follower.apply(null).state).toBe("floor");
+    expect(pacer.perMinute).toBe(25);
+  });
+
+  it("comes down to a deploy's overlap share at the first beat that hears it, and never above the minute", () => {
+    // PRODUCTION'S SHAPE: WORKERS_MAX = 1, 50 a minute. Its floor is the whole minute.
+    const { pacer, handOut } = booted(1, 50);
+    expect(pacer.perMinute).toBe(50);
+    // THE OUTGOING REPLICA IS STILL ALIVE: the scheduler divides among both.
+    expect(handOut(2)).toMatchObject({ state: "row", jupiterPerMinute: 25 });
+    expect(pacer.perMinute).toBe(25);
+    expect(handOut(1).jupiterPerMinute).toBe(50);
+    // A ROW ABOVE THE MINUTE is held to the ceiling.
+    expect(pacer.retune(600)).toBe(true);
+    expect(pacer.perMinute).toBe(50);
+  });
+
+  it("takes a floor of zero — a minute smaller than WORKERS_MAX — as one call, never leaving the pacer at its ceiling", () => {
+    expect(fleetQuotas({ liveWorkers: 0, maxWorkers: 4, jupiterPerMinute: 3 }).floorJupiterPerMinute).toBe(0);
+    const { pacer } = booted(4, 3);
+    expect(pacer.perMinute).toBe(1);
   });
 });

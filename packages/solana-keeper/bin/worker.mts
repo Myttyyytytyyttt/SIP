@@ -210,18 +210,49 @@ const floor = fleetQuotas({
 });
 const budget = new RpcBudget({ ratePerSecond: floor.floorRps, defaultLane: "hot", usage: collector });
 const transport = poolFetch(config.rpcUrls, (message, extra) => log.warn(message, fields(extra)), undefined, undefined, undefined, budget);
+// THE PACER IS BUILT AT THE ORGANISATION'S WHOLE MINUTE, AND RUNS AT THE FLOOR.
+// The minute a JupiterPacer is built with is its CEILING: the never-fits bound,
+// and the most retune (src/jupiter-pacer.ts) will ever grant. Built at the floor
+// — the minute over SIP_SOLANA_WORKERS_MAX — it clamped every hand-out to the
+// floor: one worker alive of a fleet of two was handed the whole minute by the
+// scheduler and spent half of it for as long as it ran, and refused any basket
+// over that half as never-fits ("raise SIP_SOLANA_JUPITER_CALLS_PER_MINUTE")
+// while its row said it could buy it.
+//
+// THE FLOOR STILL APPLIES UNTIL THE FIRST HAND-OUT. The follower below retunes
+// the pacer to the floor in its own constructor — the next statement, with
+// nothing awaited between, before the loop starts and so before any job can
+// reserve a call — and again whenever the quota it last heard was written more
+// than QUOTA_STALE_MS ago (src/rpc-quota.ts). Only a row the scheduler wrote in
+// the last two minutes lifts it, and the scheduler divides the minute among
+// EVERY worker alive (handOutQuotas), a deploy's outgoing replica included. So a
+// replica that boots beside the one it replaces runs at the floor, exactly as
+// before, and both come down to the overlap's share at the first beat that
+// hears it. What the floor itself allows is unchanged: at WORKERS_MAX=1 it is
+// the whole minute, so the two replicas of an overlap can each run at it until
+// their beats hear the scheduler's next hand-out — up to one of its ticks and
+// one beat — and the pacer's backoff after a 429 is what covers that window,
+// as it did before this ceiling moved. ABOVE WORKERS_MAX=1 THAT WINDOW IS NEW:
+// an outgoing replica that was the only worker alive keeps the whole minute it
+// was handed, not the floor, so for that one tick and beat the overlap can
+// spend the minute plus the new replica's floor, where before this change no
+// replica ever ran above the floor. The same 429 backoff covers it. A floor of
+// zero — a minute smaller than WORKERS_MAX — is taken as one call: retune
+// refuses anything under one, and a refused retune would leave the pacer at its
+// ceiling.
+const jupiterFloorPerMinute = Math.max(1, floor.floorJupiterPerMinute ?? config.jupiterCallsPerMinute);
 const jupiter: JupiterAccess | null = jupiterKey
   ? {
       baseUrl: config.jupiterApiKey === null ? LITE_API : KEYED_API,
       apiKey: config.jupiterApiKey,
-      pacer: new JupiterPacer({ perMinute: Math.max(1, floor.floorJupiterPerMinute ?? config.jupiterCallsPerMinute) }),
+      pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),
     }
   : null;
 const follower = new QuotaFollower({
   budget,
   pacer: jupiter?.pacer ?? null,
   floorRps: floor.floorRps,
-  floorJupiterPerMinute: jupiter === null ? null : floor.floorJupiterPerMinute,
+  floorJupiterPerMinute: jupiter === null ? null : jupiterFloorPerMinute,
   maxRps: floor.fleetRps,
 });
 const usageFeed = new PgRpcUsageFeed(pool);

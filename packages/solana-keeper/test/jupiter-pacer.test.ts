@@ -28,6 +28,7 @@ import {
 import { KEYED_API, LITE_API } from "../src/program-scripts.js";
 import { JUPITER_KEYLESS_CALLS_PER_MINUTE, createJupiterCallCounter } from "../src/sweep-cost.js";
 import { Secret } from "@sip/solana-log";
+import { manualClock } from "./manual-clock.js";
 
 /** A pacer on a clock the test owns: `sleep` advances it, and nothing waits for real. */
 function clocked(perMinute: number, start = 1_000_000) {
@@ -160,6 +161,124 @@ describe("the spacing", () => {
     for (const t of times) expect(times.filter((u) => u > t - 10_000 && u <= t).length).toBeLessThanOrEqual(5);
     // The run3 measurement took 36 s paced at 2.1 s; this pacer's 18 calls span 34 s.
     expect(times[17]! - times[0]!).toBe(34_000);
+  });
+});
+
+/**
+ * A pacer whose sleeps are TIMERS on a clock the test advances, so two turns
+ * really wait side by side — `clocked` above adds each sleep to one shared
+ * clock, which is only honest for one turn at a time. `late` delays the wake of
+ * the sleep it names (by order of asking): an event loop blocked by the other
+ * slot's transaction building, which fires a due timer late.
+ */
+function timed(perMinute: number, late: Readonly<Record<number, number>> = {}) {
+  const clock = manualClock();
+  let sleeps = 0;
+  const pacer = new JupiterPacer({
+    perMinute,
+    now: clock.now,
+    sleep: (ms) => new Promise<void>((resolve) => clock.setTimer(resolve, ms + (late[sleeps++] ?? 0))),
+  });
+  return { pacer, clock };
+}
+
+/** Each turn spends its reservation as fast as the pacer lets it; every call's turn and instant, in the order they left. */
+async function race(clock: ReturnType<typeof manualClock>, turns: Readonly<Record<string, JupiterReservation>>, calls: number, horizonMs: number) {
+  const left: { turn: string; at: number }[] = [];
+  const all = Promise.all(
+    Object.entries(turns).map(async ([name, turn]) => {
+      for (let i = 0; i < calls; i++) {
+        await turn.beforeCall();
+        left.push({ turn: name, at: clock.now() });
+      }
+    }),
+  );
+  await clock.advance(horizonMs);
+  await all;
+  return left;
+}
+
+const gapsOf = (left: readonly { at: number }[]): number[] => {
+  const at = left.map((call) => call.at).sort((x, y) => x - y);
+  return at.slice(1).map((t, i) => t - at[i]!);
+};
+
+describe("two buying turns in one process — a worker's two slots", () => {
+  it("never lets their calls leave closer than the gap: each claims its slot before it sleeps", async () => {
+    const { pacer, clock } = timed(60);
+    const a = granted(pacer.reserve(12));
+    const b = granted(pacer.reserve(12));
+    const left = await race(clock, { a, b }, 12, 60_000);
+    expect(left).toHaveLength(24);
+    // BEFORE THE FIX both read the same next-call time, neither slept, and the
+    // first two calls left at the same instant: a gap of 0.
+    expect(Math.min(...gapsOf(left))).toBe(1_000);
+    // ONE SECOND APART, TURN BY TURN: neither starves the other, and together they
+    // take exactly the time 24 calls at the plan's rate take.
+    expect(left.slice(0, 4).map((call) => call.turn)).toEqual(["a", "b", "a", "b"]);
+    expect(left[23]!.at - left[0]!.at).toBe(23_000);
+    expect(pacer.status()).toMatchObject({ calls: 24, overdrawn: 0, reservedOutstanding: 0 });
+  });
+
+  it("holds the gap when one turn's wake comes late, and queues the late call behind what is queued rather than behind the whole other basket", async () => {
+    // A's first call leaves at once; B's first call claims the slot at +1 s and
+    // its sleep — the first anyone asks for — wakes 1.5 s late, at +2.5 s. By
+    // then A's second call has left on ITS slot, at +2 s. Leaving on its stale
+    // slot, B would follow A's call by 0.5 s (what slot-claiming alone measured);
+    // it takes the next free slot instead, +4 s, behind A's third call only, and
+    // the two turns alternate again from there.
+    const { pacer, clock } = timed(60, { 0: 1_500 });
+    const a = granted(pacer.reserve(4));
+    const b = granted(pacer.reserve(4));
+    const start = clock.now();
+    const left = await race(clock, { a, b }, 4, 60_000);
+    expect(Math.min(...gapsOf(left))).toBe(1_000);
+    expect(left.map((call) => [call.turn, call.at - start])).toEqual([
+      ["a", 0],
+      ["a", 2_000],
+      ["a", 3_000],
+      ["b", 4_000],
+      ["a", 5_000],
+      ["b", 6_000],
+      ["b", 7_000],
+      ["b", 8_000],
+    ]);
+    expect(pacer.status()).toMatchObject({ calls: 8, overdrawn: 0 });
+  });
+
+  it("sleeps out the rest of its slot when a wake comes early, and never leaves inside a gap", async () => {
+    const clock = manualClock();
+    // EVERY SLEEP WAKES A MILLISECOND EARLY, as Node's timers can against Date.now
+    // (one runs on the monotonic clock, the other on the wall) — never sooner than 1 ms.
+    const pacer = new JupiterPacer({ perMinute: 60, now: clock.now, sleep: (ms) => new Promise<void>((resolve) => clock.setTimer(resolve, Math.max(1, ms - 1))) });
+    const a = granted(pacer.reserve(5));
+    const b = granted(pacer.reserve(5));
+    const start = clock.now();
+    const left = await race(clock, { a, b }, 5, 60_000);
+    expect(Math.min(...gapsOf(left))).toBe(1_000);
+    expect(left.map((call) => call.at - start)).toEqual([0, 1_000, 2_000, 3_000, 4_000, 5_000, 6_000, 7_000, 8_000, 9_000]);
+  });
+
+  it("spaces one turn exactly as before: the first call at once, each next one a gap after the last", async () => {
+    const { pacer, clock } = timed(30);
+    const only = granted(pacer.reserve(6));
+    const start = clock.now();
+    const left = await race(clock, { only }, 6, 60_000);
+    expect(left.map((call) => call.at - start)).toEqual([0, 2_000, 4_000, 6_000, 8_000, 10_000]);
+  });
+
+  it("sends nothing for a slot it claimed and then met a 429 on: the call throws, and the next turn is not held for it", async () => {
+    const { pacer, clock } = timed(60);
+    const a = granted(pacer.reserve(3));
+    const b = granted(pacer.reserve(3));
+    await a.beforeCall();
+    // B claims the next slot and sleeps; a 429 lands before it wakes.
+    const waiting = b.beforeCall();
+    a.observe(429, headers());
+    const outcome = waiting.then(() => "sent", (error: unknown) => (error instanceof JupiterBackoffError ? "backed off" : String(error)));
+    await clock.advance(1_000);
+    expect(await outcome).toBe("backed off");
+    expect(pacer.status()).toMatchObject({ calls: 1, http429: 1 });
   });
 });
 
