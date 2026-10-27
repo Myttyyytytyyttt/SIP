@@ -149,15 +149,24 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
     await sweep();
     keepers = setInterval(() => void sweep(), 200);
 
-    // THE CHAIN'S HEIGHTS: every read a hundred blocks on, so 150 blocks pass within two arms.
+    // THE CHAIN'S HEIGHTS: every PROCESSED read a hundred blocks on, so 150 blocks pass within two arms;
+    // a FINALIZED read answers the last processed one less 32, as a chain does — never above it (the
+    // newer dispatch-handover refuses a processed height below the finalized one: two endpoints out of step).
     rpc = createServer((request, response) => {
       let body = "";
       request.on("data", (chunk: Buffer) => void (body += chunk.toString()));
       request.on("end", () => {
-        const call = JSON.parse(body) as { id: unknown; method: string };
-        height += 100;
+        const call = JSON.parse(body) as { id: unknown; method: string; params?: readonly { commitment?: string }[] };
+        const commitment = call.params?.[0]?.commitment;
+        if (commitment !== "finalized") height += 100;
         response.setHeader("content-type", "application/json");
-        response.end(JSON.stringify(call.method === "getBlockHeight" ? { jsonrpc: "2.0", id: call.id, result: height } : { jsonrpc: "2.0", id: call.id, error: { code: -32601, message: "only heights here" } }));
+        response.end(
+          JSON.stringify(
+            call.method === "getBlockHeight"
+              ? { jsonrpc: "2.0", id: call.id, result: commitment === "finalized" ? height - 32 : height }
+              : { jsonrpc: "2.0", id: call.id, error: { code: -32601, message: "only heights here" } },
+          ),
+        );
       });
     });
     pages = createServer((request, response) => {
@@ -304,6 +313,33 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
       expect(await system(LEGACY_C)).toBe("legacy");
     } finally {
       await db.query("UPDATE sip_solana.vault_work SET system = 'legacy' WHERE vault_addr = $1", [LEGACY_B]);
+    }
+  }, 30_000);
+
+  it("flota, with a scheduler that arms by itself: only its own untouched enrolment is «the scheduler's»; one the owner left half way is nobody's", async () => {
+    setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: 1, lastArmedAt: null, lastResults: [], lastError: null });
+    // LEGACY_B AS THE SCHEDULER ENROLS A NEW VAULT (draining, system_at NULL, fence 0); LEGACY_C AS A «traspasar» THAT STOPPED HALF WAY (drain stamps system_at).
+    await db.query("UPDATE sip_solana.vault_work SET system = 'draining', system_at = NULL WHERE vault_addr = $1", [LEGACY_B]);
+    await db.query("UPDATE sip_solana.vault_work SET system = 'draining', system_at = clock_timestamp() WHERE vault_addr = $1", [LEGACY_C]);
+    // NEW VAULTS TO THE QUEUE, as production will run once the scheduler arms by itself.
+    await db.query("UPDATE sip_solana.fleet SET new_vault_system = 'queue' WHERE id");
+    try {
+      const ran = await tool(["flota"]);
+      expect(ran.code, ran.out).toBe(0);
+      expect(ran.out).toContain(`nadie lo cobra ni compra hasta que termine: «traspasar ${LEGACY_C.slice(0, 8)}» para acabar`);
+      expect(ran.out).toContain(`${short(LEGACY_C)} está a medio pasar y nadie lo sirve: «traspasar ${LEGACY_C.slice(0, 8)}» o «volver ${LEGACY_C.slice(0, 8)}».`);
+      if (newCli) {
+        // THE NEWER CLI REPORTS system_at AND THE FENCE: the scheduler's own enrolment is told apart.
+        expect(ran.out).toContain("el scheduler lo pasa solo (unos minutos)");
+        expect(ran.out).not.toContain(`${short(LEGACY_B)} está a medio pasar y nadie lo sirve`);
+      } else {
+        // AN OLDER CLI DOES NOT: unknown is not the scheduler's, and both are said to be nobody's.
+        expect(ran.out).toContain(`${short(LEGACY_B)} está a medio pasar y nadie lo sirve`);
+      }
+    } finally {
+      await db.query("UPDATE sip_solana.vault_work SET system = 'legacy', system_at = NULL WHERE vault_addr = ANY($1::text[])", [[LEGACY_B, LEGACY_C]]);
+      await db.query("UPDATE sip_solana.fleet SET new_vault_system = 'legacy' WHERE id");
+      setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: [], lastArmedAt: null, lastResults: [], lastError: null });
     }
   }, 30_000);
 
