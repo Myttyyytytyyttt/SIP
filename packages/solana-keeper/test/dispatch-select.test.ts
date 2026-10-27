@@ -422,7 +422,14 @@ describe("dispatch-handover: the command line", () => {
       ["unpark", `${vault}x`],
       ["unpark", vault, vault],
       ["unpark", vault, "--all"],
+      // A SWITCH TAKES NO VALUE: never read as the switch left off.
+      ["status", "--all=yes"],
+      ["status", "--all="],
+      ["arm", vault, "--allow-dry=no"],
+      ["arm", "--all=1"],
+      ["gone", "--stale=true"],
     ];
     for (const argv of refused) expect(() => parseHandoverArgs(argv), argv.join(" ")).toThrow();
+    expect(() => parseHandoverArgs(["status", "--all=yes"])).toThrow(/a switch takes no value: --all$/);
   });
 });

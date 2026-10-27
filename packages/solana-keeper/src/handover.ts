@@ -642,7 +642,10 @@ export class Handover {
    * A parked vault back in the queue's hands (UNPARK_SQL): only a parked row is
    * changed. The scheduler sent its vault-parked page once, when it parked the
    * vault, and this does not touch that process's alerter; a vault whose claims
-   * lapse PARK_AFTER_ATTEMPTS times in a row again is parked, and paged, again.
+   * lapse PARK_AFTER_ATTEMPTS times in a row again is parked again, but paged
+   * again only once that alerter's repeat window (30 minutes, src/alerts.ts)
+   * has passed since its last page for the vault — nothing clears
+   * vault-parked:<vault> — or by a replica that has not paged it yet.
    */
   async unpark(vault: string): Promise<Unparked> {
     return this.#tx(async (client) => {

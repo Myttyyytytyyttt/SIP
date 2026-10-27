@@ -64,6 +64,11 @@ export function parseHandoverArgs(argv: readonly string[]): HandoverCommand {
   const only = (allowed: readonly string[]): void => {
     const unknown = flags.filter((flag) => !allowed.includes(flag.split("=")[0]!));
     if (unknown.length > 0) throw new Error(`unknown flag for ${command}: ${unknown.join(", ")}`);
+    // A SWITCH TAKES NO VALUE: `status --all=yes` is refused, never read as a
+    // plain `status`, and `--allow-dry=no` never as the switch left off. Only
+    // --roles= carries one.
+    const valued = flags.filter((flag) => flag.includes("=") && flag.split("=")[0] !== "--roles");
+    if (valued.length > 0) throw new Error(`a switch takes no value: ${valued.map((flag) => flag.split("=")[0]).join(", ")}`);
   };
   const atMost = (count: number): void => {
     if (args.length > count) throw new Error(`${command} takes at most ${count} argument${count === 1 ? "" : "s"}`);

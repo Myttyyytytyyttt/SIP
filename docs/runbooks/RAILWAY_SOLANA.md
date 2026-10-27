@@ -870,7 +870,19 @@ olvida.
 
 **Vaults nuevos.** `H new-vaults queue` (paso P3d) hace que un vault descubierto a partir de entonces sea de la cola: los
 vigilantes de siempre lo dejan en paz desde su siguiente lectura y el scheduler lo dará de alta en `draining`
-(`ENROL_VAULTS_SQL`, `src/handover.ts`), de modo que también llega a la cola por `arm` (`H arm --all`). `H new-vaults legacy` lo deshace para los vaults que aún no tengan fila.
+(`ENSURE_VAULTS_SQL`, `src/scheduler-pg.ts`), de modo que también llega a la cola por `arm`: el de `H arm --all`, o el
+del propio scheduler con `SIP_SOLANA_AUTO_ARM=on` en `sip-solana-scheduler` (`src/auto-arm.ts`), que arma solo las filas
+que él dio de alta y nadie ha tocado (un vault que drenaste, devolviste o soltaste a mano lo terminas tú), con los mismos
+recibos y 150 bloques; lo que hace está en `scheduler.autoArm` de su `/status`, y un vault nuevo sin servir 15 min avisa
+(`auto-arm-stalled`, 60 min despierta). `SIP_SOLANA_LEGACY_ROLES` dice qué vigilantes deben tener un recibo «acting»
+(sin poner, los dos); con los vigilantes de siempre parados es `none`, y aun así toda fila suya no marcada `gone` tiene
+que haber leído el vault, así que márcalas cuando hayas comprobado en Railway que sus contenedores ya no existen
+(`H gone --stale`, pasados 15 min sin leer). `H new-vaults legacy` lo deshace para los vaults que aún no tengan fila.
+
+**Ver y desaparcar.** `H status --all` lista todas las filas de `vault_work`, también las `legacy`, con su último
+resultado, `parked_reason` y `webhookOwner`. Un vault que el scheduler aparcó (`vault-parked`: 5 reclamaciones seguidas
+sin terminar) no lo toma ningún worker hasta `H unpark <vault>`: borra `parked_reason`, pone `attempts` a 0 y lo deja
+vencido ya. Solo actúa si está aparcado; úsalo después de arreglar la causa.
 
 ### 10.6 Si salta `credit-burn` con el despachador
 

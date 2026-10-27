@@ -45,8 +45,9 @@
 // is a new user nobody serves, so the alert (AUTO_ARM_ALERT_KEY) is on how long
 // that has lasted — the step failing, or the oldest enrolled vault still
 // waiting, whichever is longer: warn at 15 minutes, page at 60. The normal wait
-// is one legacy sweep (SIP_SOLANA_SWEEP_MS, at most five minutes) and 150
-// blocks (about a minute), plus a tick.
+// is one legacy sweep (SIP_SOLANA_SWEEP_MS, 60 s unless set; it has no upper
+// bound, but a receipt older than LEGACY_READ_FRESH_MS — 15 minutes — never
+// counts for a required role) and 150 blocks (about a minute), plus a tick or two.
 //
 // FREE WHEN THERE IS NOTHING TO ARM. A tick with no such row reads one
 // statement and asks the chain nothing; the two heights are read only when a
@@ -71,7 +72,7 @@ export const AUTO_ARM_BATCH = 20;
 export const AUTO_ARM_RESULTS_KEPT = 5;
 /** The alert's key: one for the fleet, raised by the lock holder. */
 export const AUTO_ARM_ALERT_KEY = "auto-arm-stalled";
-/** How long a new vault may go unserved before it warns: twice the normal wait at the longest sweep (the header). */
+/** How long a new vault may go unserved before it warns: LEGACY_READ_FRESH_MS, many times the normal wait at the default sweep (the header). */
 export const AUTO_ARM_WARN_MS = 15 * 60_000;
 /** ... and before it pages. */
 export const AUTO_ARM_CRITICAL_MS = 60 * 60_000;
