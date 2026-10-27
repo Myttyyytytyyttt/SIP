@@ -128,7 +128,10 @@ respuesta que no sea 2xx se registra como `alert webhook failed; the alert above
 
 El vigilante sirve, en el mismo puerto que `/health` y `/status`, un tercer camino: `/leaderboard`. Es la clasificación
 — «Ahorro» y «Volumen», por temporada semanal y por histórico — calculada a partir de `sip_solana.settlement_event`,
-que es lo que este servicio ya escribía. La web no toca la base de datos: lee esta URL y la cachea.
+que es lo que este servicio ya escribía. Solo la calcula el de beneficio; el de volumen contesta que no la calcula. El
+scheduler del despachador (sección 10) sirve el mismo `/leaderboard`, con el mismo cálculo (`src/scheduler-board.ts`),
+y sigue ahí cuando los vigilantes de siempre se paran: **la web lee el del scheduler** (punto 3). La web no toca la base
+de datos: lee esa URL y la cachea.
 
 **El orden importa, y es de un solo sentido:**
 
@@ -149,12 +152,14 @@ que es lo que este servicio ya escribía. La web no toca la base de datos: lee e
    solo las tablas: si falta, el log y `/status` dicen
    `BROKEN — sip_solana.settlement_event is missing volume_raw` y el comando que lo arregla.
 
-3. **Y en Vercel**, `SIP_SOLANA_KEEPER_URL` con la URL pública de este servicio (ver `VERCEL_WEB.md`).
+3. **Y en Vercel**, `SIP_SOLANA_KEEPER_URL` con la URL pública del **scheduler**,
+   `https://sip-solana-scheduler-production.up.railway.app` (el nombre de la variable no cambia; ver `VERCEL_WEB.md` y
+   10.8, paso 2). La de este servicio solo vale mientras esté encendido, y deja de valer cuando se pare (10.8, paso 8).
 
-**Comprobarlo:**
+**Comprobarlo** (el mismo `curl` contra `sip-solana-keeper-production` contesta igual mientras este siga encendido):
 
 ```bash
-curl -s https://sip-solana-keeper-production.up.railway.app/leaderboard | head -c 300
+curl -s https://sip-solana-scheduler-production.up.railway.app/leaderboard | head -c 300
 ```
 
 - **200** con `computedAt`, `rules`, `coverage` y `boards`: está calculado.
@@ -164,7 +169,8 @@ curl -s https://sip-solana-keeper-production.up.railway.app/leaderboard | head -
 
 Se recalcula cada dos minutos y, además, justo después de cada cobro registrado — así quien acaba de ahorrar y va a
 mirar no encuentra una clasificación que no sabe nada de él. Nunca se calcula dentro del barrido: una consulta lenta no
-puede retrasar un cobro.
+puede retrasar un cobro. El del scheduler, cada réplica el suyo: cada dos minutos y, tras el cobro de un worker, como
+mucho una vez cada 15 s.
 
 **Si al historial le faltan filas** — un parpadeo de la base, un despliegue adelantado a su migración, o un cobro cuya
 firma no volvió — se reconstruye desde la cadena, que es la verdad:
@@ -707,40 +713,47 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   la vez); el de volumen, 2 y 4. Antes de encenderlo, comprueba que la suma de los dos servicios durante un despliegue
   (6 + 4 = 10) más todo lo demás que use esa base queda al menos 5 por debajo del límite del pooler de sesión de Supabase.
 
-## 10. El despachador (`scheduler` y `worker`) y el traspaso de vaults — **TODAVÍA NO ESTÁ DESPLEGADO**
+## 10. El despachador (`scheduler` y `worker`) y el traspaso de vaults
 
-> **Nada de esta sección está en `main` ni en Railway.** Vive en la rama `scale-dispatcher`, que nunca se ha subido.
-> Llega a producción solo cuando tú decidas el merge (decisión O4 del plan `PLAN_DISPATCHER_FIRST.md`), con todas las
-> variables nuevas apagadas. Hasta entonces, **no crees estos servicios ni pongas estas variables**: se describen aquí
-> para que el día que toque estén escritos de antemano. Desde el 13-oct la rama tiene los dos puntos de entrada
-> (`bin/scheduler.mts`, `bin/worker.mts`), a oscuras: el `CMD` del Dockerfile sigue siendo `bin/keeper.mts`, y con
-> `SIP_SOLANA_DISPATCH` sin poner (u `off`) cualquiera de los dos lo dice y sale con 0 sin abrir una conexión. El ciclo
-> entero en sombra (los dos servicios, el traspaso, un worker muerto a mitad de trabajo y otro que lo releva) lo prueba
-> `test/dispatcher-e2e.test.ts` contra el stub de cadena del bench y un Postgres desechable. Diseño: ADR del dispatcher,
-> §2.4, §3.8–§3.12 y §6.
+> **Está en producción.** El código está en `main` desde el 24-oct (f0a2ea1). En Railway corren `sip-solana-scheduler`
+> (2 réplicas) y `sip-solana-worker` (1 réplica con 2 huecos), con `SIP_SOLANA_DISPATCH=on` y la base de producción. El
+> vault del dueño, `EFXK995P…`, está en la cola desde el 27-oct: el primer cobro de un worker salió a las 06:03Z y la
+> primera compra a las 06:23Z, después de poner una clave gratuita de Jupiter (en el worker `SIP_SOLANA_CUTS=jupiter-key`,
+> `SIP_SOLANA_JUPITER_API_KEY` y `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`; en el scheduler, solo los 50). Los demás
+> vaults siguen con los vigilantes de siempre hasta que hagas **10.8**, el paso a paso para llevarlo todo al sistema
+> nuevo; lo que puede avisar después, y qué hacer, está en **10.9**. La herramienta para mirar y mover la flota es
+> `flota-prod` (10.4). El `CMD` del Dockerfile sigue siendo `bin/keeper.mts`: los dos servicios nuevos arrancan por su
+> comando de arranque (abajo), y con `SIP_SOLANA_DISPATCH` sin poner (u `off`) cualquiera de los dos lo dice y sale con
+> 0 sin abrir una conexión. El ciclo entero en sombra (los dos servicios, el traspaso, un worker muerto a mitad de
+> trabajo y otro que lo releva) lo prueba `test/dispatcher-e2e.test.ts` contra el stub de cadena del bench y un Postgres
+> desechable. Diseño: ADR del dispatcher, §2.4, §3.8–§3.12 y §6.
 
 ### 10.1 Los dos servicios nuevos
 
 | servicio | réplicas | público | lleva | no lleva |
 |---|---|---|---|---|
-| `keeper-scheduler` | 2 (una tiene el candado `sip-solana-scheduler`, la otra espera) | sí: `/hooks/helius`, `/status`, `/leaderboard`, `/health` | `DATABASE_URL`, las URL de RPC, la clave de Helius, el secreto del timbre, el Telegram | la llave de cobro, nada de Privy |
-| `keeper-worker` | `r` réplicas (empezar con 2) × 2 huecos | no | `DATABASE_URL`, las URL de RPC, la llave de cobro, la app, la authorization key, **`SIP_SOLANA_PRIVY_SIGNER_ID` y `SIP_SOLANA_PRIVY_POLICY_ID`** de Privy (en `on` sin estas dos **no arranca**), la clave de Jupiter, el Telegram | el secreto del timbre (no recibe a Helius) |
+| `sip-solana-scheduler` | 2 (una tiene el candado `sip-solana-scheduler`, la otra espera; su `/status` dice cuál contestó en `scheduler.role`: `acting` o `standby`) | sí: `/hooks/helius`, `/status`, `/leaderboard`, `/health` | `DATABASE_URL`, las URL de RPC, la clave de Helius, el secreto del timbre (hoy no: 10.3), el Telegram | la llave de cobro, nada de Privy |
+| `sip-solana-worker` | hoy 1 × 2 huecos | no | `DATABASE_URL`, las URL de RPC, la llave de cobro, la app, la authorization key, **`SIP_SOLANA_PRIVY_SIGNER_ID` y `SIP_SOLANA_PRIVY_POLICY_ID`** de Privy (en `on` sin estas dos **no arranca**), la clave de Jupiter, el Telegram | el secreto del timbre (no recibe a Helius) |
+
+**Las variables del worker son referencias de Railway a las de `sip-solana-keeper`**: por eso ese servicio **nunca se
+borra**, ni siquiera cuando se pare (10.8, paso 8).
 
 - **Cada servicio se configura a mano**, como los de las secciones 1 y 6: el Dockerfile de la raíz construye la imagen
   del vigilante (que copia `packages/solana-keeper` entero, así que los archivos nuevos van dentro), *Restart On
   Failure*, y **`RAILWAY_DEPLOYMENT_DRAINING_SECONDS=30` en todos** (decisión 6: sin eso Railway mata el contenedor al
   instante de avisarle y cada despliegue es una toma de control con espera, ADR §3.11).
 - **El comando de arranque** (*Settings → Deploy → Custom Start Command*; la imagen arranca en
-  `packages/solana-keeper`): `node_modules/.bin/tsx bin/scheduler.mts` en `keeper-scheduler` y
-  `node_modules/.bin/tsx bin/worker.mts` en `keeper-worker`. Sin él, la imagen arranca el vigilante de siempre.
-- **`keeper-worker` no abre ningún puerto** (ni `/status` ni `/health`): no le pongas *Healthcheck Path*. Su estado lo
-  enseña el `/status` de la flota, que sirve el scheduler desde Postgres. **Manda sus propias alertas** (desde 34816a1)
-  al mismo `SIP_SOLANA_ALERT_WEBHOOK` que los vigilantes, con «[worker] » delante: la misma escalera por wallet y por
-  vault que el vigilante de siempre (cobro fallido, reintentos, sin firmante, compra fallida o rechazada, wrap corto,
-  comisión de una pata), `settle-key-mismatch` si la llave de cobro no es la que nombra la cadena, `seat-unbounded`,
-  la authorization key de Privy (al arrancar y cada 30 min), el almacén de pérdidas y `job-failing:<vault>` para un
-  vault cuyos trabajos revientan o pasan el techo una y otra vez. Las de la flota (lease, fence, cola, scheduler,
-  Postgres) siguen siendo del scheduler.
+  `packages/solana-keeper`): `node_modules/.bin/tsx bin/scheduler.mts` en `sip-solana-scheduler` y
+  `node_modules/.bin/tsx bin/worker.mts` en `sip-solana-worker`. Sin él, la imagen arranca el vigilante de siempre.
+- **`sip-solana-worker` no abre ningún puerto** (ni `/status` ni `/health`): no le pongas *Healthcheck Path*. Su estado
+  lo enseña el `/status` de la flota, que sirve el scheduler desde Postgres (`fleet.workers`, y cada vault con su último
+  trabajo en `fleet.vaults`). **Manda sus propias alertas** (desde 34816a1) al mismo `SIP_SOLANA_ALERT_WEBHOOK` que los
+  vigilantes, con «[worker] » delante: la misma escalera por wallet y por vault que el vigilante de siempre (cobro
+  fallido, reintentos, sin firmante, compra fallida o rechazada, wrap corto, comisión de una pata),
+  `settle-key-mismatch` si la llave de cobro no es la que nombra la cadena, `seat-unbounded`, la authorization key de
+  Privy (al arrancar y cada 30 min), el almacén de pérdidas y `job-failing:<vault>` para un vault cuyos trabajos
+  revientan o pasan el techo una y otra vez. Las de la flota (lease, fence, cola, Postgres, vaults sin servir) siguen
+  siendo del scheduler, «[scheduler] » delante; `scheduler-stale` la mandan los dos (10.9).
 - **Sus variables**, además de las compartidas (`DATABASE_URL`, `SIP_SOLANA_RPC_URLS`, `SIP_SOLANA_PROGRAM_ID` y, en el
   scheduler, el Telegram). Todas estrictas: un valor que no sea exactamente uno de los aceptados **no arranca**.
 
@@ -756,6 +769,8 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   | `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` | scheduler, y el worker con `jupiter-key` | las llamadas a Jupiter por minuto de la organización, que el scheduler reparte | 30 (sin clave) |
   | `SIP_SOLANA_CUTS` | los dos | los que actúan en el scheduler: `gpa-v2`, `lamports-filter`; en el worker: `rest-skip`, `invest-batch`, `jupiter-key` | ninguno |
   | `SIP_SOLANA_PRICE_TAPE` | scheduler | `off` u `on`: apunta el precio SOL/USD de Pyth una vez por tick en `sol_price_tape` (10.7) | `off` |
+  | `SIP_SOLANA_AUTO_ARM` | scheduler | `off` u `on`: con `on`, y solo con `SIP_SOLANA_DISPATCH=on`, la réplica con el candado pasa a la cola los vaults nuevos que ella misma apuntó como `draining` (10.5, «Vaults nuevos»); lo que hace sale en `scheduler.autoArm` de su `/status` | `off` |
+  | `SIP_SOLANA_LEGACY_ROLES` | scheduler | `profit`, `volume`, los dos separados por coma, o `none`: de qué vigilantes de siempre exige el auto-arm un recibo «acting». `none` es «están parados» (10.8, paso 8), y es también lo que lee el aviso `legacy-orphaned` (10.9) | los dos |
   | `SIP_SOLANA_EXTRA_MODES` | worker | `roundup`, `fixed` o los dos: los modos por operación que cobra (10.7) | ninguno |
   | `SIP_SOLANA_EXTRA_MODES_VAULTS` | worker, **obligatoria** con la anterior | las direcciones de vault, separadas por comas, o `*` | — |
   | `SIP_SOLANA_EXTRA_MODES_LIVE` | worker | `0` o `1`: con `0` esos vaults se miden en seco aunque el worker esté en `on` | `0` |
@@ -809,8 +824,11 @@ en el de volumen dejaría una compra doble (RT-4).
 - **En `/status`**: el bloque `dispatch` (`consecutiveFailures`, `lastReadAt`, `notLegacy` con cuántos vaults están
   `draining` y `queue`, `leftAlone` con las wallets que la última barrida dejó en paz y por qué, y `carryOnlyInMemory`);
   y cada wallet dejada en paz dice `"settle":"LEFT_ALONE","invest":"LEFT_ALONE"` con el motivo en `detail`.
-- **El timbre de Helius se queda en el vigilante de beneficio** hasta que el último vault pase a la cola (P3d): sigue
-  vigilando también las direcciones de los vaults de la cola.
+- **El timbre de Helius se queda en el vigilante de beneficio** mientras corra: su webhook (el que acaba en `7eecdd`)
+  vigila también las direcciones de los vaults de la cola. Pasarlo al scheduler se ha dejado para más adelante: con 50
+  enlaces o menos no ahorra nada, porque la ronda de seguridad gira al menos 50 en cada tick (`SAFETY_MIN_PER_SWEEP`,
+  `src/scheduler-select.ts`). Sin secreto del timbre, el scheduler hace una pasada completa en cada tick. Cuando pares
+  este vigilante (10.8, paso 8) ese webhook se borra a mano en Helius.
 - **Nunca quites `SIP_SOLANA_DISPATCH` de un vigilante de siempre mientras algún vault no sea `legacy`**
   (`dispatch-handover status` lo dice): volvería a cobrar e invertir vaults de la cola. Primero devuélvelos todos (10.5).
 
@@ -823,11 +841,33 @@ memoria no la vería la cola y cobraría de más el siguiente trade ganador, y e
 `dual`, también mientras una escritura de esa pérdida en Postgres haya fallado: el aviso `carry-store`). Para volver
 atrás un vault de beneficio hará falta `on` (10.5).
 
-El comando, desde **Terminal.app** (es SQL de producción: lo corres tú). Pide la `DATABASE_URL` y una URL de RPC sin
-enseñarlas; la de RPC solo se usa para **leer** la altura de bloque, no envía nada:
+**Desde qué carpeta.** Las dos herramientas de abajo corren desde un checkout en `origin/main` con `node_modules`: hoy
+`~/ProyectosCT/SIP-dispatch`. **No las corras desde `~/ProyectosCT/SIP`**: puede estar en un commit viejo (el 27-oct
+estaba en a0938f0, que no tiene `bin/dispatch-handover.mts`). `flota-prod` llega a `main` con el push que trae esta
+sección: después de ese push, pon `~/ProyectosCT/SIP-dispatch` en `origin/main`.
+
+**Usa `flota-prod`.** Hace estos mismos pasos con palabras (`flota`, `traspasar`, `traspasar-todos`, `volver`,
+`nuevos-a-la-cola`, `nuevos-a-los-de-siempre`, `marcar-ido`, `marcar-idos-viejos`, `desaparcar`), un vault cada vez, y
+antes de tocar nada se niega, diciendo por qué, a lo que se quedaría atascado. Desde **Terminal.app** (es SQL de
+producción: lo corres tú):
 
 ```bash
-cd ~/ProyectosCT/SIP/packages/solana-keeper && printf 'DATABASE_URL (puerto 5432): ' && read -rs DB && echo && printf 'URL de RPC: ' && read -rs RPC && echo
+F=~/ProyectosCT/SIP-dispatch/packages/solana-keeper/test-local/shadow/flota-prod.sh
+"$F" flota
+```
+
+Cada vez pide la `DATABASE_URL` de `sip-solana-keeper` (Railway → Variables) sin enseñarla y no la guarda; solo acepta
+una de Supabase en el puerto 5432. Para esperar los bloques lee la altura en el RPC público de Solana, y lee las tres
+páginas `/status`; no envía nada a la cadena. `flota` no toca nada: enseña cada vault y quién lo sirve (sistema nuevo,
+keepers de siempre, pasando o aparcado), adónde van los vaults nuevos, los recibos de los vigilantes de siempre con su
+id, la salud del scheduler y del worker, y una lista «Siguiente:» con lo que toca hacer. Un `<vault>` es su dirección
+o sus primeras letras, como las enseña `flota`.
+
+**A mano, con `H`** (lo mismo, sin las comprobaciones previas de `flota-prod`). Pide la `DATABASE_URL` y una URL de RPC
+sin enseñarlas; la de RPC solo se usa para **leer** la altura de bloque, no envía nada:
+
+```bash
+cd ~/ProyectosCT/SIP-dispatch/packages/solana-keeper && printf 'DATABASE_URL (puerto 5432): ' && read -rs DB && echo && printf 'URL de RPC: ' && read -rs RPC && echo
 H() { DATABASE_URL="$DB" SIP_SOLANA_RPC_URLS="$RPC" PATH="$HOME/.nvm/versions/node/v22.14.0/bin:$PATH" node_modules/.bin/tsx bin/dispatch-handover.mts "$@"; }
 ```
 
@@ -843,13 +883,18 @@ Después, con `H` y la dirección del vault (`V=EFXK995P…`, la entera):
 4. **Espera ≥ 150 bloques** (≈ 1–1,5 min: lo que tarda en caducar cualquier transacción que un vigilante pudiera haber
    firmado antes) y repite **`H arm $V`** hasta que diga `moved: true` y `system: queue`. Si mientras tanto aparece un
    proceso que no lo ha leído como ajeno, `arm` lo nombra y la espera vuelve a empezar sola.
-5. **Solo entonces** se arma el worker para ese vault (claves por referencia, `SIP_SOLANA_DISPATCH=on`; plan P3c).
+5. **Ya está en la cola**: el worker lo toma cuando le toca (el scheduler lo marca). No hay nada que armar por vault:
+   el worker ya está armado y toma cualquier vault de la cola que no esté aparcado.
 
 Si ningún vigilante está armado (un ensayo), `arm` necesita `--allow-dry`. `--roles=profit` (o `none`) solo si ese
 servicio **no existe**: con `none` el comando no comprueba que cada rol haya leído el vault, y solo vale para una base de
 datos que no usa ningún vigilante de siempre (el ensayo en sombra).
 
 ### 10.5 Volver atrás: de la cola a los vigilantes de siempre
+
+Con `flota-prod` es una palabra: **`"$F" volver <vault>`** hace los dos pasos de abajo y espera (hasta 15 min) a que
+el vault vuelva a ser de los vigilantes de siempre. Se niega antes de tocar nada si alguno de los dos vigilantes no ha
+leído la base, encendido y actuando, en los últimos 15 min: devuelto, nadie lo serviría. A mano:
 
 1. **`H rollback $V`** — `queue` → `draining`: ningún worker lo vuelve a coger; el que lo tenga termina su trabajo.
 2. **`H release $V`** — se niega mientras un worker lo tenga (como mucho 6 minutos desde que lo cogió) o mientras una
@@ -866,7 +911,8 @@ datos que no usa ningún vigilante de siempre (el ensayo en sombra).
 Para apagar el despachador del todo: devuelve así **todos** los vaults (`H status` sin vault no debe listar ninguno), y
 solo después quita `SIP_SOLANA_DISPATCH` de los dos vigilantes de siempre. **Deja `SIP_SOLANA_CARRY_STORE=on` en el de
 beneficio**: las pérdidas que arrastraron los workers solo están en Postgres, y un vigilante que vuelva a `off` las
-olvida.
+olvida. Antes de parar el scheduler, la web tiene que volver a leer el `/leaderboard` del vigilante de beneficio
+(10.8, paso 9).
 
 **Vaults nuevos.** `H new-vaults queue` (paso P3d) hace que un vault descubierto a partir de entonces sea de la cola: los
 vigilantes de siempre lo dejan en paz desde su siguiente lectura y el scheduler lo dará de alta en `draining`
@@ -881,13 +927,16 @@ que haber leído el vault, así que márcalas cuando hayas comprobado en Railway
 Si queda un vault `legacy` con un enlace vivo, o `fleet.new_vault_system` sigue en `legacy`, mientras los vigilantes de
 siempre están retirados (`SIP_SOLANA_LEGACY_ROLES=none`) o ninguno ha leído en 15 min, el scheduler avisa al momento y a
 los 30 min despierta (`legacy-orphaned`; lo que ve está en `fleet.legacy` de su `/status`): sin los vigilantes de
-siempre, nadie liquida ni compra para esos usuarios. Termina el traspaso con `flota-prod traspasar-todos` y `flota-prod nuevos-a-la-cola`, o vuelve a arrancar
-los vigilantes (y quita `none`).
+siempre, nadie liquida ni compra para esos usuarios. Termina el traspaso con `flota-prod traspasar-todos` y
+`flota-prod nuevos-a-la-cola`, o vuelve a arrancar los vigilantes (y quita `none`). Con `flota-prod`, `new-vaults` es
+`nuevos-a-la-cola` (se niega si el scheduler no se arma solo) y `nuevos-a-los-de-siempre` (se niega si los dos
+vigilantes de siempre no están leyendo).
 
 **Ver y desaparcar.** `H status --all` lista todas las filas de `vault_work`, también las `legacy`, con su último
 resultado, `parked_reason` y `webhookOwner`. Un vault que el scheduler aparcó (`vault-parked`: 5 reclamaciones seguidas
 sin terminar) no lo toma ningún worker hasta `H unpark <vault>`: borra `parked_reason`, pone `attempts` a 0 y lo deja
-vencido ya. Solo actúa si está aparcado; úsalo después de arreglar la causa.
+vencido ya. Solo actúa si está aparcado; úsalo después de arreglar la causa. Con `flota-prod`: `flota` y
+`desaparcar <vault>`.
 
 ### 10.6 Si salta `credit-burn` con el despachador
 
@@ -923,6 +972,219 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
   sí tiene se cobran igual.
 - **Volver atrás**: quitar `SIP_SOLANA_EXTRA_MODES` (o poner `LIVE=0`). El vault queda en reposo y nada se pierde.
 
+### 10.8 Todo al sistema nuevo
+
+El orden para llevarlo todo al despachador: la web, los vaults que quedan, los vaults nuevos, una prueba, un día de
+rodaje, y al final parar (no borrar) los dos vigilantes de siempre. **Un paso cada vez, en este orden**; cada uno dice cómo comprobarlo y cómo
+deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flota-prod`, desde
+`~/ProyectosCT/SIP-dispatch` (10.4). **Ningún push mientras un vault esté «pasando»** (10.4).
+
+1. **Después del push: mira la flota y marca los contenedores que ya no existen.** Un push que toca
+   `packages/solana-keeper` redespliega los servicios del vigilante (sus *Watch Paths*, sección 1), y cada contenedor
+   nuevo de un vigilante de siempre escribe su propio recibo. El del contenedor viejo deja de leer, y un traspaso
+   esperaría por él.
+   - `"$F" flota`. En «Keepers de siempre» cada recibo dice `vivo` o `viejo` y su id; en «Sus páginas», los dos
+     vigilantes contestan y están «actuando».
+   - Pasados 15 min desde el despliegue, mira en Railway (cada vigilante → *Deployments*) que solo quede activo el
+     nuevo, y `"$F" marcar-idos-viejos`: marca todos los recibos que llevan más de 15 min sin leer, y antes te pregunta
+     si lo has comprobado. Uno solo: `"$F" marcar-ido <id>` (no marca uno que haya leído hace menos de 2 min y medio).
+   - **Comprobar**: `flota` ya no enseña ningún recibo `viejo`, y su lista «Siguiente:» no pide `marcar-idos-viejos`.
+   - **Deshacer**: no hace falta: un recibo marcado como ido que vuelve a leer se desmarca solo.
+
+2. **La web lee el `/leaderboard` del scheduler.** En Vercel, `SIP_SOLANA_KEEPER_URL` =
+   `https://sip-solana-scheduler-production.up.railway.app` (sin barra final), en **Production y Preview**, y
+   **Redeploy** ([VERCEL_WEB.md](VERCEL_WEB.md)). El nombre de la variable no cambia.
+   - **Comprobar**: `curl -s https://sip-solana-scheduler-production.up.railway.app/leaderboard | head -c 300` da 200
+     con `boards` (1.2); en la web, `/leaderboard` enseña la clasificación y `/dashboard` sus cifras, sin
+     *«The rankings are unavailable»*.
+   - **Deshacer**: el valor de antes, `https://sip-solana-keeper-production.up.railway.app`, y Redeploy. Solo sirve
+     mientras `sip-solana-keeper` esté encendido; el de volumen no calcula la clasificación.
+
+3. **`SIP_SOLANA_CARRY_STORE=on` en `sip-solana-keeper`.** Los dos vaults que quedan son de beneficio. Hoy este
+   vigilante corre sin la variable (`off`: su `/status` no tiene bloque `carryStore`), así que una pérdida arrastrada
+   vive solo en su memoria, y `arm` se niega a pasar un vault mientras tenga una así (10.4). En la cola, los workers
+   guardan cada pérdida en `sip_solana.loss_carry`, y solo `on` la lee en cada turno: sin `on`, `volver` no devuelve un
+   vault de beneficio en el que un worker guardó una pérdida (10.5). Por eso se va directo a `on`, sin los 14 días de
+   `dual` de la sección 9: tras el paso 4 los vaults de beneficio los cobran los workers, y `on` es lo que pide la vuelta
+   atrás. La tabla ya está en la base de producción.
+   - **Antes**: en su `/status`, `pendingCarries` es lo que un redespliegue olvida (sección 9), como cualquier
+     despliegue; el 27-oct a las 08:17Z estaba vacío.
+   - Railway → `sip-solana-keeper` → Variables → `SIP_SOLANA_CARRY_STORE` = `on`. Es un redespliegue, y suma una conexión
+     a Supabase (10.2).
+   - **Comprobar**: su `/status` → `carryStore.mode` = `on`, `carryStore.notReady` = `null`, y sigue `mode` = `live`
+     con `missingLiveCondition` = `null`. En `flota`, su recibo nuevo dice «pérdidas en la base: on». Marca el del
+     contenedor que sustituyó cuando Railway ya no lo enseñe: `"$F" marcar-ido <id>` (o, pasados 15 min,
+     `marcar-idos-viejos`).
+   - **Deshacer**: antes del paso 4, quitar la variable (otro redespliegue). Después, no: **nunca vuelvas a `off`** con
+     vaults de beneficio en la cola o recién devueltos (10.5).
+
+4. **Los vaults que quedan, a la cola: `"$F" traspasar-todos`.** El 27-oct eran dos, de beneficio: `D5J5o2gS…` y
+   `4J3En7ug…`. Antes de tocar cada vault, la herramienta comprueba que los dos vigilantes han leído hace menos de 2 min
+   y medio, encendidos y actuando, que ningún recibo sin marcar ha dejado de leer sin soltar ese vault y que ningún
+   otro vault está «pasando»; si no, se niega y dice qué hacer. Luego los pasa uno detrás de otro, cada uno entero antes del siguiente (2–4 min cada uno: los recibos de
+   los dos vigilantes y 150 bloques), y para en el primero que no pueda. Mientras un vault está «pasando», nadie lo
+   cobra ni compra; los que aún no ha tocado siguen servidos por los vigilantes de siempre.
+   - **Comprobar**: termina con «LISTO: todos los vaults están en el sistema nuevo.»; en `flota` todos dicen «sistema
+     nuevo» y, al rato, su último trabajo; en el `/status` del scheduler, `fleet.queue.bySystem` ya no tiene `legacy`.
+   - **Si para a medias**: el vault que se quedó «pasando» no lo sirve nadie. Termínalo con `"$F" traspasar <vault>` o
+     devuélvelo con `"$F" volver <vault>`.
+   - **Deshacer**: `"$F" volver <vault>`, de uno en uno (10.5).
+
+5. **Los vaults nuevos, también a la cola.**
+   1. Railway → `sip-solana-scheduler` → Variables → `SIP_SOLANA_AUTO_ARM` = `on` (exactamente `on`: otro valor no
+      arranca). Es un redespliegue de las dos réplicas. Sola no mueve nada: el scheduler solo arma los vaults que él
+      mismo apuntó como «pasando», y mientras los vaults nuevos vayan a los vigilantes de siempre los apunta para ellos.
+   2. Abre `https://sip-solana-scheduler-production.up.railway.app/status` varias veces, hasta haber visto las dos
+      réplicas (`scheduler.role` = `acting` y `standby`): las dos con `scheduler.autoArm.enabled` = `true`.
+   3. `"$F" nuevos-a-la-cola`. Lee esa página tres veces y se niega si alguna respuesta no dice que se arma solo, si la
+      réplica con el candado no ha dado una vuelta en 3 min, si un vigilante de los que el scheduler espera
+      (`scheduler.autoArm.legacyRoles`: hoy los dos) no ha leído en 15 min, o si queda algún recibo `viejo` (entonces
+      `marcar-idos-viejos` primero).
+   - **Comprobar**: `flota` dice «Vaults nuevos: van al sistema nuevo (entran «pasando» y el scheduler los pasa solo).»
+   - **Deshacer**: `"$F" nuevos-a-los-de-siempre` (se niega si los dos vigilantes de siempre no están leyendo) y, si
+     quieres, quita después `SIP_SOLANA_AUTO_ARM`. En ese orden: con los nuevos yendo a la cola y el auto-arm apagado, un
+     vault nuevo se queda «pasando» sin que nadie lo sirva. Si `nuevos-a-los-de-siempre` nombra un vault que sigue
+     «pasando», termínalo con `traspasar` o `volver`.
+
+6. **Pruébalo con un vault nuevo de verdad, desde OTRA cuenta.** Cada wallet de login tiene exactamente un vault (su
+   dirección sale de `["vault", dueño]`), así que con la tuya no se puede crear otro. Entra en la web con otra wallet de
+   login, crea el vault y enlaza una cartera de trading, como un usuario nuevo: el scheduler apunta un vault cuando
+   descubre su enlace.
+   - **Comprobar**: en `flota`, el vault nuevo sale primero «pasando», con «el scheduler lo pasa solo», y después
+     «sistema nuevo» con su primer trabajo. En el `/status` de la réplica `acting`, `scheduler.autoArm.lastResults` lo
+     lista con `moved: true`. Lo normal son unos minutos: una barrida de cada vigilante de siempre (≈ 1 min), 150
+     bloques (≈ 1 min) y uno o dos ticks. A los 15 min sin pasar avisan `auto-arm-stalled` y `vault-unserved:<vault>`
+     (10.9).
+   - **Deshacer**: no hace falta: es un vault como cualquier otro, ya en la cola. Si no pasa: 10.9, y
+     `nuevos-a-los-de-siempre` hasta entender por qué.
+
+7. **Rodaje: al menos 24 h con los vigilantes de siempre encendidos.** Ya no sirven ningún vault, pero sus recibos son
+   los que dejan armar los vaults nuevos (el scheduler los espera mientras `SIP_SOLANA_LEGACY_ROLES` no sea `none`), y
+   son la vuelta atrás. Mira `flota` por la mañana y por la noche: todos los vaults en «sistema nuevo» y sin «OJO»,
+   «Trabajadores: 1 vivo», y ninguna crítica «[scheduler]» o «[worker]» en Telegram sin explicar. Mientras tanto,
+   «Siguiente:» dice que el scheduler aún espera sus recibos: es lo que arregla el paso 8.
+   - **Deshacer**: paso 9.
+
+8. **Parar los vigilantes de siempre, sin borrarlos.**
+   1. Railway → `sip-solana-scheduler` → Variables → `SIP_SOLANA_LEGACY_ROLES` = `none` (un redespliegue). Primero
+      esto, con los vigilantes aún encendidos, como pide `flota`: no les cambia nada, porque cada recibo suyo sin
+      marcar como ido sigue teniendo que leer un vault nuevo antes de que se arme, y lo leen en su siguiente barrida.
+      **Comprobar**: en las dos réplicas, `scheduler.autoArm.legacyRoles` = `[]`; `flota` dice «se arma solo: sí», con
+      «espera recibos de: nadie», y en «Siguiente:» que ya puedes parar los vigilantes. **Deshacer**: quitar la variable.
+   2. Railway → `sip-solana-volume-keeper`: *Deployments* → el despliegue activo → **Remove**; y *Settings → Source* →
+      **Disconnect**, para que un push no lo vuelva a desplegar. **No borres el servicio ni sus variables**: son las que
+      necesita para volver (paso 9).
+   3. Lo mismo con `sip-solana-keeper`. **Nunca lo borres**: las variables del worker son referencias a las suyas, y
+      `flota-prod` pide su `DATABASE_URL`. Deja también sus variables (`SIP_SOLANA_DISPATCH`,
+      `SIP_SOLANA_CARRY_STORE=on`).
+      **Comprobar** (2 y 3): sus `/status` dejan de contestar; en `flota`, «Sus páginas» dice de cada uno «no contesta
+      … — ¿parado en Railway?»; la web sigue enseñando `/leaderboard` (paso 2).
+   4. `"$F" marcar-idos-viejos` cuando sus recibos lleven 15 min sin leer (o `"$F" marcar-ido <id>` de cada uno en
+      cuanto lleve 2 min y medio). Hasta entonces un vault nuevo espera: su `arm` necesita que cada recibo sin marcar lo
+      haya leído. **Comprobar**: `flota` → «ninguno sin marcar como ido».
+   5. En el panel de Helius, borra a mano el webhook cuyo id acaba en `7eecdd`: lo creó `sip-solana-keeper` (su
+      `/status` lo enseñaba en `doorbell.webhook.idSuffix`), ya nadie lo atiende y cada evento gasta créditos
+      (sección 5, «Apagarlo»).
+   - **Comprobar todo**: `flota` → «Siguiente: Todo va al sistema nuevo.», sin `legacy-orphaned` ni `auto-arm-stalled`.
+   - **Deshacer**: paso 9.
+
+9. **Volver atrás, desde cualquier paso.**
+   - **Lo que tiene que estar antes**: `volver` y `nuevos-a-los-de-siempre` se niegan si los dos vigilantes de siempre
+     no han leído la base, encendidos y actuando, en los últimos 15 min; y sin `SIP_SOLANA_DISPATCH` no la leen (10.3).
+     Y un vault de beneficio en el que un worker guardó una pérdida solo vuelve con `sip-solana-keeper` en
+     `SIP_SOLANA_CARRY_STORE=on` (10.5). Del paso 3 al 8, los dos están así.
+   - **Si ya los paraste (paso 8)**: vuelve a encenderlos. En cada uno, comprueba en Variables que siguen
+     `SIP_SOLANA_DISPATCH=on` y, en el de beneficio, `SIP_SOLANA_CARRY_STORE=on`; vuelve a conectar su fuente (el mismo
+     repositorio) y despliega. En `flota`, los dos contestan «actuando» y sus recibos nuevos están `vivo`. Quita
+     `SIP_SOLANA_LEGACY_ROLES` del scheduler: con `none`, un vault que vuelva a ellos hace saltar `legacy-orphaned`. Si
+     ya borraste el webhook de Helius, el de beneficio lo vuelve a crear él solo si lleva `SIP_SOLANA_DOORBELL_SECRET`
+     (sección 5).
+   - **Luego, en este orden**: `"$F" nuevos-a-los-de-siempre`; `"$F" volver <vault>` de cada vault, uno a uno; y, si
+     quieres, quita `SIP_SOLANA_AUTO_ARM`.
+   - **La web**: `SIP_SOLANA_KEEPER_URL` otra vez a `https://sip-solana-keeper-production.up.railway.app` y Redeploy,
+     con `sip-solana-keeper` encendido (paso 2). **Antes de parar el scheduler, la web tiene que apuntar de nuevo al
+     vigilante de beneficio**: hasta entonces es el scheduler el que le sirve `/leaderboard` y `/dashboard`.
+   - **Apagar el despachador del todo** (10.5): con `flota` sin ningún vault en «sistema nuevo» ni «pasando», los nuevos
+     yendo a los vigilantes de siempre y la web en el de beneficio, para primero `sip-solana-worker` y después
+     `sip-solana-scheduler` (con el scheduler parado, un worker avisa `scheduler-stale` a los 10 min). Deja
+     `SIP_SOLANA_DISPATCH` en los vigilantes mientras quede alguna fila que no sea `legacy` (10.3), y
+     `SIP_SOLANA_CARRY_STORE=on` siempre (10.5).
+
+### 10.9 Si algo falla con el sistema nuevo
+
+Llegan al mismo Telegram que los vigilantes, con «[scheduler] » o «[worker] » delante. Las críticas salen siempre; los
+avisos solo si ese servicio lleva `SIP_SOLANA_ALERT_MIN_SEVERITY=warn` (1.1), y si no, se quedan en su log. Una alerta
+repetida se calla 30 min. **Lo primero, casi siempre, es `"$F" flota`**: cada vault con quién lo sirve, su último
+trabajo y, si algo va mal, su «detalle»; la salud del scheduler y del worker; y «Siguiente:». El `/status` del scheduler
+lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.workers` y `scheduler.autoArm`.
+
+- **`queue-lag`** («[scheduler]», crítica): un vault al que ya le toca trabajar lleva más de dos ticks (2 min con el
+  tick por defecto) sin que ningún worker lo tome; sus cobros y compras van con retraso. **Primero**: en `flota`,
+  «Trabajadores». Si dice 0 vivos, Railway → `sip-solana-worker`: ¿está corriendo? Mira sus *Deploy Logs* y
+  redespliégalo. Se apaga cuando la espera baja de un tick.
+- **`scheduler-stale`** («[scheduler]» y también «[worker]», crítica): la réplica con el candado lleva más de 10 min sin
+  dar una vuelta. Nadie descubre enlaces ni marca vaults para trabajar: el worker termina lo que tenía y se queda
+  quieto. Una réplica colgada sale sola y la otra coge el candado; si el aviso sigue, no lo hizo. Si solo llega la de
+  «[worker]», ninguna réplica lo está diciendo: lo normal es que el servicio entero esté caído. **Primero**: Railway →
+  `sip-solana-scheduler` → *Deployments* y *Deploy Logs*; si no corre, redespliégalo.
+- **`vault-parked:<vault>`** («[scheduler]», crítica): el scheduler aparcó el vault porque su trabajo se cortó 5 veces
+  seguidas sin terminar. Ningún worker lo toma hasta que lo desaparques. **Primero**: `flota` (su línea dice por qué);
+  pásame el aviso y el detalle, y cuando la causa esté arreglada, `"$F" desaparcar <vault>`. Si se vuelve a aparcar,
+  dímelo.
+- **`vault-unserved:<vault>`** («[scheduler]», aviso a los 15 min, crítica a los 60): el vault lleva ese tiempo
+  «pasando»; los vigilantes de siempre lo dejan en paz y ningún worker lo toma, así que nadie lo cobra ni compra.
+  **Primero**: `flota`. Si es un vault nuevo que el scheduler pasa solo, mira `auto-arm-stalled` aquí debajo. Si no,
+  termínalo con `"$F" traspasar <vault>` o devuélvelo con `"$F" volver <vault>`.
+- **`auto-arm-stalled`** («[scheduler]», aviso a los 15 min, crítica a los 60): un vault nuevo que el scheduler apuntó
+  sigue sin llegar a la cola, o el paso que los arma lleva ese tiempo fallando. **Primero**: `flota`, y en el `/status`
+  de la réplica `acting`, `scheduler.autoArm.lastError` y el primer obstáculo de cada vault en
+  `scheduler.autoArm.lastResults`. Lo habitual: un recibo de un vigilante cuyo contenedor ya no existe (`"$F"
+  marcar-ido <id>` o `marcar-idos-viejos`), los vigilantes parados sin `SIP_SOLANA_LEGACY_ROLES=none` (paso 8), o la
+  cadena sin contestar (lo dice `lastError`).
+- **`legacy-orphaned`** («[scheduler]», aviso al momento, crítica a los 30 min): queda algún vault de los vigilantes de
+  siempre con un enlace vivo, o los vaults nuevos siguen yendo a ellos, y esos vigilantes están retirados
+  (`SIP_SOLANA_LEGACY_ROLES=none`) o ninguno ha leído la base en 15 min: nadie cobra ni compra para esos usuarios. Lo
+  que ve está en `fleet.legacy`. **Primero**: `flota`. Si los paraste a propósito, termina el traspaso:
+  `"$F" nuevos-a-la-cola` y `"$F" traspasar-todos`; `traspasar` necesita a los dos vigilantes encendidos, así que
+  enciéndelos para eso (paso 9) y vuelve a pararlos después (paso 8). Si no querías pararlos, vuelve a arrancar
+  `sip-solana-keeper` y `sip-solana-volume-keeper` (y quita `none`).
+- **`job-failing:<vault>`** («[worker]», aviso el primero, crítica al tercero seguido): los trabajos del worker en ese
+  vault revientan antes de terminar o pasan su techo de 6 min; mientras dure, nadie cobra ni compra para ese vault. Se
+  apaga con el primer trabajo que termine. **Primero**: la línea del vault en `flota` y los *Deploy Logs* de
+  `sip-solana-worker` a esa hora; pásame el vault y la hora.
+- **`invest-refused:<vault>`** («[worker]», aviso la primera y la segunda vez, crítica a la tercera compra rechazada
+  seguida): la cesta de ese vault no se puede comprar y no se compra nada. Puede ser un mercado sin liquidez, una
+  cesta que no cabe en la cuota de Jupiter del worker, o Jupiter rechazando las llamadas. Sin timbre en el scheduler,
+  la tercera llega unos 2 min después de la primera; mientras siga, se repite cada 30 min. Se apaga con un turno que
+  compre o que falle. **Primero**: lee el detalle (en el aviso y en `flota`). Si lleva `Jupiter answered HTTP …`, mira
+  la entrada siguiente; si no, pásamelo con la hora.
+- **Jupiter, con su código HTTP**: el detalle de una compra que Jupiter rechazó lleva `Jupiter answered HTTP <código>`
+  (en el aviso, en `flota` y en `fleet.vaults` del `/status` del scheduler). **429**: demasiadas llamadas; **401**:
+  Jupiter no acepta la clave; **400**: rechaza ese par; **5xx**: Jupiter está caído. Con `jupiter-key`, tras un 429 el
+  worker no llama a Jupiter durante 1 min, y si se repite, 2, 4… hasta 10. **Primero**, con 429 o 401: Railway →
+  `sip-solana-worker` → Variables: `SIP_SOLANA_CUTS` incluye `jupiter-key`, `SIP_SOLANA_JUPITER_API_KEY` es la clave y
+  `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`; en `sip-solana-scheduler`, también `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE=50`
+  (el scheduler reparte el minuto: lo que le da al worker sale en `fleet.workers[].jupQuota`). La clave gratuita da 60
+  por minuto; 50 deja margen. Con 5xx, esperar; con 400, pásamelo.
+- **`settle-key-mismatch`** («[worker]», crítica; aviso si solo no la puede comprobar): la llave de cobro del worker no
+  es la que nombra la cadena, y no se cobra ni se compra nada en ningún vault de la cola hasta arreglarlo.
+  **Primero**: Railway → `sip-solana-worker` → Variables → `SIP_SOLANA_SETTLE_KEY` tiene que ser la de
+  `sip-solana-keeper` (es una referencia a ella). No lo arregles cambiando el programa.
+- **`seat-unbounded:<wallet>`** («[worker]», crítica): esa cartera de trading tiene sentado el firmante del vigilante
+  sin la política que lo limita, y el worker no firma nada por ella. **Primero**: que se vuelva a sentar desde la web
+  (**Re-seat keeper** en su fila de carteras) y comprobarlo con `privy-policy verify`
+  ([PRIVY_SOLANA.md](PRIVY_SOLANA.md), sección 6).
+- **`crank-low`** («[scheduler]», aviso por debajo de 0,02 SOL, crítica por debajo de 0,005): la wallet de crank (el
+  `keeper` de la configuración del programa, que es tu wallet de cobro: sección 1, fase B) se queda sin SOL, y cuando
+  se vacía se paran los wraps, conversiones y compras de los workers. **Primero**: mándale SOL.
+- **`credit-burn`**: la manda solo un vigilante de siempre (`bin/keeper.mts`), y solo con `SIP_SOLANA_CREDIT_BUDGET_DAY`
+  puesta: aviso al 80 % de su presupuesto diario de Helius, crítica al 100 %. Con los vigilantes parados ya no llega;
+  la del despachador es `credit-governor`, del scheduler: aviso si el mes va por encima del 90 % del plan, crítica por
+  encima del 100 %. **Primero**, con cualquiera de las dos: 10.6.
+- **Cualquier otra** (por ejemplo `lease-expired`, `fence-reject`, `pg-saturated`, `scheduler-tick-failed`,
+  `discovery-stale` o `watchdog-exit` del scheduler; del worker, la escalera por wallet y por vault del vigilante de
+  siempre, `carry-store` o la authorization key de Privy): `flota`, y pásame el aviso entero con la hora.
+
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
@@ -931,3 +1193,4 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
   en el programa. No lo arregles cambiando el programa: revisa qué archivo pegaste.
 - **Un secreto se pega en el sitio equivocado** (en la web, en un chat, en un log): se rota, como dice
   [SECRETS.md](SECRETS.md).
+- **Un aviso «[scheduler]» o «[worker]»**: es del despachador; está en 10.9.
