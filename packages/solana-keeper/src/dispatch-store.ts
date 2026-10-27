@@ -443,10 +443,16 @@ ON CONFLICT (worker_id) DO UPDATE SET heartbeat_at = clock_timestamp(), stopped_
  * WORKER_STATS_KEYS only; NULL keeps what is there). Answers the quotas the
  * scheduler last wrote for it and HOW LONG AGO, by the database's clock alone:
  * NULL until the first hand-out.
+ *
+ * AND HOW OLD THE SCHEDULER'S TICK IS (fleet.tick_at), on the same clock and in
+ * the same round trip: what a worker pages scheduler-stale on when both
+ * scheduler replicas are gone (SchedulerStaleWatch, src/fleet-alerts.ts). NULL
+ * when no tick was ever written, or the fleet row is missing.
  */
 export const WORKER_BEAT_SQL = `UPDATE ${WORKER} SET heartbeat_at = clock_timestamp(), busy = $2, stats = COALESCE($3::jsonb, stats)
  WHERE worker_id = $1
-RETURNING rps_quota, jup_quota, round(extract(epoch FROM clock_timestamp() - quota_at) * 1000) AS quota_age_ms`;
+RETURNING rps_quota, jup_quota, round(extract(epoch FROM clock_timestamp() - quota_at) * 1000) AS quota_age_ms,
+          (SELECT round(extract(epoch FROM clock_timestamp() - f.tick_at) * 1000) FROM ${FLEET} f WHERE f.id) AS tick_age_ms`;
 export const WORKER_STOPPED_SQL = `UPDATE ${WORKER} SET stopped_at = clock_timestamp(), busy = 0 WHERE worker_id = $1`;
 
 /** The workers a hand-out divides among: kind 'worker', not stopped, heard within $1 seconds. */
@@ -874,23 +880,45 @@ export class DispatchStore {
    * clock (null before the first hand-out) — or null when the row is gone.
    */
   async beatProcess(busy: number, stats?: WorkerStatsWrite): Promise<WorkerQuotaRow | null> {
+    return (await this.#beat(busy, stats))?.quota ?? null;
+  }
+
+  /** The beat's one statement: the quotas as QuotaFollower reads them, and the scheduler tick's age; null when the row is gone. */
+  async #beat(busy: number, stats?: WorkerStatsWrite): Promise<{ readonly quota: WorkerQuotaRow; readonly tickAgeMs: number | null } | null> {
     const rows = await this.#one(WORKER_BEAT_SQL, [this.holder, busy, workerStatsJson(stats)]);
     const row = rows[0];
     if (row === undefined) return null;
     const quota = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
-    return { rpsQuota: quota(row["rps_quota"]), jupQuotaPerMinute: quota(row["jup_quota"]), ageMs: quota(row["quota_age_ms"]) };
+    return {
+      quota: { rpsQuota: quota(row["rps_quota"]), jupQuotaPerMinute: quota(row["jup_quota"]), ageMs: quota(row["quota_age_ms"]) },
+      tickAgeMs: quota(row["tick_age_ms"]),
+    };
   }
 
   /**
    * The beat as QuotaFollower's source (src/rpc-quota.ts): every read IS the
    * 10 s beat, so following the quota costs no statement of its own. `beat`
-   * says what this beat reports.
+   * says what this beat reports. `onTick`, when given, is told the scheduler
+   * tick's age from every beat that ANSWERED with this process's row (null: no
+   * tick was ever written) — a beat that failed or found no row tells it
+   * nothing, because it knows nothing.
    */
-  quotaSource(beat: () => { readonly busy: number; readonly stats?: WorkerStatsWrite }): WorkerQuotaSource {
+  quotaSource(
+    beat: () => { readonly busy: number; readonly stats?: WorkerStatsWrite },
+    onTick?: (tickAgeMs: number | null) => void,
+  ): WorkerQuotaSource {
     return {
-      readQuota: () => {
+      readQuota: async () => {
         const now = beat();
-        return this.beatProcess(now.busy, now.stats);
+        const read = await this.#beat(now.busy, now.stats);
+        if (read !== null && onTick !== undefined) {
+          try {
+            onTick(read.tickAgeMs);
+          } catch {
+            // An alert that cannot be raised never costs the beat its quotas.
+          }
+        }
+        return read?.quota ?? null;
       },
     };
   }

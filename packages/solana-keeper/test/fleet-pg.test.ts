@@ -15,15 +15,26 @@
 // with the ADR's DDL stood in for Q1's tables; it is gone, so a statement here
 // that Q1's tables refuse fails this file.)
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Alert } from "../src/alerts.js";
-import { FleetAlerts, LEASE_EXPIRED_ALERT_KEY, QUEUE_LAG_ALERT_KEY, SCHEDULER_STALE_ALERT_KEY } from "../src/fleet-alerts.js";
-import { FLEET_COLUMNS, FLEET_SNAPSHOT_SQL, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns } from "../src/fleet-pg.js";
+import { DispatchStore } from "../src/dispatch-store.js";
+import {
+  FleetAlerts,
+  LEASE_EXPIRED_ALERT_KEY,
+  QUEUE_LAG_ALERT_KEY,
+  SCHEDULER_STALE_ALERT_KEY,
+  SchedulerStaleWatch,
+  vaultUnservedKey,
+} from "../src/fleet-alerts.js";
+import { FLEET_COLUMNS, FLEET_SNAPSHOT_SQL, PgFleetStore, TAKE_FULL_PASS_SQL, missingFleetColumns, parseFleetSnapshot } from "../src/fleet-pg.js";
 import { BELL_DELAY_MS, FleetReceiver, readDelivery, type FleetBellStore } from "../src/fleet-receiver.js";
-import { FleetStatusReader, samplePool } from "../src/fleet-status.js";
+import { FleetStatusReader, VAULTS_LISTED, VAULT_DETAIL_CHARS, VAULT_DETAIL_READ_CHARS, samplePool } from "../src/fleet-status.js";
+import { DRAIN_SQL } from "../src/handover.js";
+import { PgSchedulerStore } from "../src/scheduler-pg.js";
 
 const URL_RAW = process.env["KEEPER_TEST_PG_URL"];
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
@@ -398,7 +409,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(snapshot.carries.pending).toBe(1);
     });
 
-    it("pages what the snapshot shows, as the acting replica: three lapsed leases, a queue past two windows, a scheduler 11 minutes quiet", async () => {
+    it("pages what the snapshot shows, as the acting replica: three lapsed leases, a queue past two windows, a scheduler 11 minutes quiet, a vault draining an hour", async () => {
       const fired: Alert[] = [];
       const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: () => undefined }, windowMs: 60_000 });
       const reader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => alerts.observeSnapshot(snapshot, { acting: true }) });
@@ -408,6 +419,7 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         `${LEASE_EXPIRED_ALERT_KEY}:critical`,
         `${QUEUE_LAG_ALERT_KEY}:critical`,
         `${SCHEDULER_STALE_ALERT_KEY}:critical`,
+        `${vaultUnservedKey("D1-draining")}:critical`,
       ]);
       expect(alerts.status().pg?.saturatedStreak).toBe(0);
     });
@@ -433,13 +445,155 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
         await client.query("BEGIN");
         // Scans are only ever a choice on ten rows; forbidden, the plan shows whether an index path exists at all.
         await client.query("SET LOCAL enable_seqscan = off");
-        const plan = (await client.query<{ "QUERY PLAN": string }>(`EXPLAIN ${FLEET_SNAPSHOT_SQL}`, [360, 50, 300])).rows.map((row) => row["QUERY PLAN"]).join("\n");
+        const plan = (await client.query<{ "QUERY PLAN": string }>(`EXPLAIN ${FLEET_SNAPSHOT_SQL}`, [360, 50, 300, VAULTS_LISTED, VAULT_DETAIL_READ_CHARS])).rows.map((row) => row["QUERY PLAN"]).join("\n");
         expect(plan).toMatch(/Index (Only )?Scan using send_intent_(open|created)|Bitmap Index Scan on send_intent_(open|created)/);
         expect(plan).not.toMatch(/Seq Scan on send_intent/);
         await client.query("ROLLBACK");
       } finally {
         client.release();
       }
+    });
+
+    it("lists every vault_work row — the unserved first, then by address — with its detail scrubbed before it is cut, and its streaks", async () => {
+      await db.query(
+        `UPDATE sip_solana.vault_work SET skim_mode = 0, last_detail = repeat('d', 300), last_done_at = clock_timestamp() - interval '1 minute',
+                streaks = '{"settleRetries": {"9QX53J3Kbs8ogQirZq5iN11rucZAvgF4EKWw98QAkUSe": 2}, "investRefused": 1, "secret": "never served"}'
+          WHERE vault_addr = 'Q1-bell'`,
+      );
+      // A KEY THAT STRADDLES THE 200TH CHARACTER, as a raw exception message could store it: read whole, masked, then cut.
+      const straddling = createHash("sha256").update("a key across the cut").digest("hex");
+      await db.query("UPDATE sip_solana.vault_work SET last_detail = repeat('y', 190) || $1 || ' and the rest' WHERE vault_addr = 'Q2-safety'", [straddling]);
+      const snapshot = await new PgFleetStore(db).read();
+      const safety = snapshot.vaults.find((row) => row.vault === "Q2-safety")!.lastDetail!;
+      expect(safety).toHaveLength(VAULT_DETAIL_CHARS);
+      expect(safety).not.toContain(straddling.slice(0, 10));
+      expect(safety.slice(190)).toBe("<redacted:".slice(0, 10));
+      expect(snapshot.vaults.map((row) => [row.vault, row.system])).toEqual([
+        ["D1-draining", "draining"],
+        ["Q6-parked", "queue"],
+        ["L1-legacy", "legacy"],
+        ["Q1-bell", "queue"],
+        ["Q2-safety", "queue"],
+        ["Q3-held", "queue"],
+        ["Q4-lapsed", "queue"],
+        ["Q5-takeover", "queue"],
+      ]);
+      expect(snapshot.vaultsTruncated).toBe(0);
+      const bell = snapshot.vaults.find((row) => row.vault === "Q1-bell")!;
+      expect(bell).toMatchObject({ skimMode: 0, lane: "bell", lastOutcome: "SETTLED", attempts: 0, parkedReason: null });
+      expect(bell.lastDetail).toBe("d".repeat(VAULT_DETAIL_CHARS));
+      expect(Date.parse(bell.lastDoneAt!)).toBeLessThan(Date.now());
+      expect(Date.parse(bell.dueAt!)).toBeLessThan(Date.now());
+      expect(bell.streaks).toEqual({ settleRetries: { "9QX53J3Kbs8ogQirZq5iN11rucZAvgF4EKWw98QAkUSe": 2 }, investFailed: 0, investRefused: 1, wrapShort: 0 });
+      expect(JSON.stringify(snapshot.vaults)).not.toContain("never served");
+      expect(snapshot.vaults.find((row) => row.vault === "Q6-parked")!.parkedReason).toBe("5 lapsed leases in a row");
+      // THE UNSERVED VIEW: the scheduler-enrolled draining row measured from its due_at, the parked queue row counted.
+      expect(snapshot.unserved.draining).toBe(1);
+      expect(snapshot.unserved.parked).toBe(1);
+      expect(snapshot.unserved.vaults.map((row) => [row.vault, row.system, row.from, row.parkedReason])).toEqual([
+        ["D1-draining", "draining", "due_at", null],
+        ["Q6-parked", "queue", null, "5 lapsed leases in a row"],
+      ]);
+      expect(Math.abs(snapshot.unserved.vaults[0]!.forMs! - 3_600_000)).toBeLessThan(5_000);
+      expect(snapshot.unserved.vaults[1]!.forMs).toBeNull();
+    });
+
+    it("measures a vault the scheduler enrolled from its due_at — which no bell and no mark moves — and one a handover drained from system_at, and pages each past its threshold", async () => {
+      const store = new PgFleetStore(db);
+      const scheduler = new PgSchedulerStore(db);
+      await db.query("UPDATE sip_solana.fleet SET new_vault_system = 'queue' WHERE id");
+      // THE ENROLMENT, AS THE SCHEDULER'S TICK DOES IT; then made twenty minutes old.
+      expect(await scheduler.ensureVaults(["N1-new"])).toEqual([{ vault: "N1-new", system: "draining" }]);
+      await db.query("UPDATE sip_solana.vault_work SET due_at = due_at - interval '20 minutes' WHERE vault_addr = 'N1-new'");
+      const dueBefore = (await db.query<{ due: string }>("SELECT due_at::text AS due FROM sip_solana.vault_work WHERE vault_addr = 'N1-new'")).rows[0]!.due;
+      // A BELL ON IT AND A MARK OF IT: neither moves a draining row's due_at.
+      await db.query(
+        `INSERT INTO sip_solana.keeper_link (link_addr, wallet_addr, vault_addr, epoch, settlement_nonce, frontier_slot, seen_slot)
+         VALUES ('LN1', 'WalletOfN1', 'N1-new', 0, 1, 1, 1)`,
+      );
+      expect((await store.ring({ addresses: ["WalletOfN1"], signatures: [], bellDelayMs: BELL_DELAY_MS })).vaults).toBe(1);
+      expect(await scheduler.markDue([{ vault: "N1-new", lane: "new" }], BELL_DELAY_MS)).toEqual([]);
+      const dueAfter = (await db.query<{ due: string; system_at: string | null }>("SELECT due_at::text AS due, system_at FROM sip_solana.vault_work WHERE vault_addr = 'N1-new'")).rows[0]!;
+      expect(dueAfter).toEqual({ due: dueBefore, system_at: null });
+      // THE HANDOVER'S DRAIN WRITES system_at; made seventy minutes old.
+      expect((await db.query(DRAIN_SQL, ["L1-legacy"])).rows).toEqual([{ system: "draining" }]);
+      await db.query("UPDATE sip_solana.vault_work SET system_at = system_at - interval '70 minutes' WHERE vault_addr = 'L1-legacy'");
+
+      const snapshot = await store.read();
+      const byVault = new Map(snapshot.unserved.vaults.map((row) => [row.vault, row]));
+      expect(snapshot.unserved.draining).toBe(3);
+      expect(byVault.get("N1-new")!.from).toBe("due_at");
+      expect(Math.abs(byVault.get("N1-new")!.forMs! - 20 * 60_000)).toBeLessThan(5_000);
+      expect(byVault.get("L1-legacy")!.from).toBe("system_at");
+      expect(Math.abs(byVault.get("L1-legacy")!.forMs! - 70 * 60_000)).toBeLessThan(5_000);
+      // LONGEST FIRST.
+      expect(snapshot.unserved.vaults.map((row) => row.vault)).toEqual(["L1-legacy", "D1-draining", "N1-new", "Q6-parked"]);
+
+      const fired: Alert[] = [];
+      const cleared: string[] = [];
+      const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: (key) => cleared.push(key) }, windowMs: 60_000 });
+      alerts.observeSnapshot(snapshot, { acting: true });
+      const unservedPages = fired.filter((alert) => alert.key.startsWith("vault-unserved")).map((alert) => `${alert.key}:${alert.severity}`);
+      expect(unservedPages.sort()).toEqual(
+        [`${vaultUnservedKey("L1-legacy")}:critical`, `${vaultUnservedKey("D1-draining")}:critical`, `${vaultUnservedKey("N1-new")}:warn`].sort(),
+      );
+      // ARM'S MOVE (system = 'queue', system_at = now): the vault leaves the view, and its page ends.
+      await db.query("UPDATE sip_solana.vault_work SET system = 'queue', system_at = clock_timestamp() WHERE vault_addr = 'N1-new'");
+      alerts.observeSnapshot(await store.read(), { acting: true });
+      expect(cleared).toContain(vaultUnservedKey("N1-new"));
+      expect(alerts.status().firing.filter((key) => key.startsWith("vault-unserved")).sort()).toEqual([vaultUnservedKey("D1-draining"), vaultUnservedKey("L1-legacy")].sort());
+    });
+
+    it("keeps the page whole over a draining row whose time is infinite, and over one whose time is still to come", async () => {
+      await db.query(
+        `INSERT INTO sip_solana.vault_work (vault_addr, system, due_at) VALUES
+           ('D2-infinite', 'draining', 'infinity'), ('D3-future', 'draining', clock_timestamp() + interval '1 hour')`,
+      );
+      const snapshot = await new PgFleetStore(db).read();
+      const byVault = new Map(snapshot.unserved.vaults.map((row) => [row.vault, row]));
+      expect(byVault.get("D2-infinite")!.forMs).toBeNull();
+      expect(byVault.get("D3-future")!.forMs).toBe(0);
+      expect(snapshot.vaults.find((row) => row.vault === "D2-infinite")!.dueAt).toBe("infinity");
+    });
+
+    it("caps both lists at the statement's limit, the unserved first, and counts every row the cap left out", async () => {
+      await db.query(
+        `INSERT INTO sip_solana.vault_work (vault_addr, system, due_at)
+         SELECT 'Bulk-' || lpad(i::text, 4, '0'), 'legacy', clock_timestamp() FROM generate_series(1, 600) AS i`,
+      );
+      const full = await new PgFleetStore(db).read();
+      expect(full.vaults).toHaveLength(VAULTS_LISTED);
+      expect(full.vaultsTruncated).toBe(608 - VAULTS_LISTED);
+      expect(full.vaults.slice(0, 2).map((row) => row.vault)).toEqual(["D1-draining", "Q6-parked"]);
+      const raw = (await db.query<{ snapshot: unknown }>(FLEET_SNAPSHOT_SQL, [360, 50, 300, 1, VAULT_DETAIL_READ_CHARS])).rows[0]!.snapshot;
+      const one = parseFleetSnapshot(raw);
+      expect(one.vaults.map((row) => row.vault)).toEqual(["D1-draining"]);
+      expect(one.vaultsTruncated).toBe(607);
+      expect(one.unserved).toMatchObject({ draining: 1, parked: 1 });
+      expect(one.unserved.vaults.map((row) => row.vault)).toEqual(["D1-draining"]);
+    });
+
+    it("hands a worker's beat the scheduler tick's age, and the worker's watch pages it 11 minutes old and clears it once the tick moves", async () => {
+      const fired: Alert[] = [];
+      const cleared: string[] = [];
+      const watch = new SchedulerStaleWatch({ alerter: { fire: (alert) => fired.push(alert), clear: (key) => cleared.push(key) } });
+      const worker = new DispatchStore(db, "w-alive");
+      const source = worker.quotaSource(
+        () => ({ busy: 1 }),
+        (age) => void watch.observe(age),
+      );
+      expect(await source.readQuota()).toEqual({ rpsQuota: null, jupQuotaPerMinute: null, ageMs: null });
+      expect(fired.map((alert) => `${alert.key}:${alert.severity}`)).toEqual([`${SCHEDULER_STALE_ALERT_KEY}:critical`]);
+      expect(Math.abs(watch.status().tickAgeMs! - 11 * 60_000)).toBeLessThan(5_000);
+      await db.query("UPDATE sip_solana.fleet SET tick_at = clock_timestamp() WHERE id");
+      await source.readQuota();
+      expect(cleared).toEqual([SCHEDULER_STALE_ALERT_KEY]);
+      expect(watch.status().firing).toBe(false);
+      // A FLEET ROW THAT WAS NEVER TICKED: null, judged by the worker's uptime (a moment), so nothing.
+      await db.query("UPDATE sip_solana.fleet SET tick_at = NULL WHERE id");
+      await source.readQuota();
+      expect(watch.status().tickAgeMs).toBeNull();
+      expect(fired).toHaveLength(1);
     });
 
     it("is a read failure that says what to run over a database without the dispatcher's tables", async () => {

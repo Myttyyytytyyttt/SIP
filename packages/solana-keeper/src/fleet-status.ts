@@ -92,6 +92,136 @@ export const JOB_CEILING_MS = 6 * 60_000;
 export const PARKED_LISTED = 50;
 
 /**
+ * The most vault_work rows listed one by one on the page (`fleet.vaults`), and
+ * the most rows of the unserved view (`fleet.unserved.vaults`); what is left
+ * out is counted (`vaultsTruncated`, and the view's own whole counts).
+ *
+ * WHY A TABLE PER VAULT AT ALL. Until the cut-over the legacy keepers' /status
+ * pages were the ones that named each wallet and what its last turn did; the
+ * dispatcher's page only counted outcomes. With those keepers stopped, "why did
+ * this user's vault not buy" would have no answer short of Postgres. What a row
+ * names is public on chain already (a vault address, its mode byte, a wallet in
+ * its streaks); its detail is scrubbed twice on its way out
+ * (VAULT_DETAIL_CHARS), the rest of the page once, by renderFleetStatus.
+ *
+ * WHY A CAP. A row is a few hundred bytes (its detail alone up to 200
+ * characters), so 500 rows is a few hundred kilobytes read every
+ * FLEET_STATUS_REFRESH_MS on each scheduler replica and served on every GET —
+ * far above today's three vaults, and a bound on what a public route hands out.
+ * The unserved rows are listed FIRST, so a truncated page still shows the
+ * vaults nobody serves.
+ */
+export const VAULTS_LISTED = 500;
+
+/**
+ * How much of a vault's last_detail the page carries: its first 200 characters.
+ * The text is a worker's: most of its error paths pass summarizeUpstreamError
+ * with the worker's own redactor before COMPLETE writes them, but some write an
+ * exception's message as it came (src/settle-tick.ts's FAILED), and the
+ * scheduler serving it does not hold the worker's secrets (no Privy key, no
+ * Jupiter key, no signing key: src/scheduler-config.ts refuses them). So each
+ * detail is ALSO passed through scrubbedForExport here — this process's
+ * redactor plus the byte-run net that catches a key nobody registered — and one
+ * that does not pass is replaced by a fixed marker, rather than withholding the
+ * whole page at renderFleetStatus's tripwire.
+ *
+ * SCRUBBED FIRST, CUT AFTER. Both nets match a secret only WHOLE: a 64-hex key
+ * that starts at character 180 and is cut at 200 is twenty hex characters the
+ * mask no longer recognises, and a registered URL cut mid-key is no longer the
+ * needle. So the statement reads VAULT_DETAIL_READ_CHARS, the text is scrubbed
+ * at that length, and only the scrubbed text is cut to 200 — never the reverse.
+ */
+export const VAULT_DETAIL_CHARS = 200;
+
+/**
+ * How much of a last_detail the statement reads before the scrub: more than any
+ * writer stores (a worker's job keeps 500 characters plus its soft-deadline
+ * note, src/worker-job.ts completionFor; the scheduler's own completion a fixed
+ * line), so a secret is never cut in two before the redactor sees it, and still
+ * a bound on what one row can cost the read.
+ */
+export const VAULT_DETAIL_READ_CHARS = 1_000;
+
+/** What a detail that did not pass the redactor is served as. */
+export const VAULT_DETAIL_WITHHELD = "<detail withheld: it did not pass the redactor>";
+
+/**
+ * The streaks a worker's job keeps in vault_work.streaks (src/worker-job.ts,
+ * JobStreaks, written by completionFor): the settle's RETRY run per wallet and
+ * the invest's three runs per vault. The column is free jsonb, so only these
+ * four keys are read and served, and a settle retry only under a key that is a
+ * base58 address (test/fleet-status.test.ts holds the four equal to what
+ * completionFor writes).
+ */
+export interface VaultStreaks {
+  readonly settleRetries: Readonly<Record<string, number>>;
+  readonly investFailed: number;
+  readonly investRefused: number;
+  readonly wrapShort: number;
+}
+
+/** The keys of VaultStreaks as they are spelled in the jsonb. */
+export const VAULT_STREAKS_KEYS = ["settleRetries", "investFailed", "investRefused", "wrapShort"] as const;
+
+/** One vault_work row, as the page serves it (`fleet.vaults`). Times are ISO text as Postgres wrote them. */
+export interface FleetVaultRow {
+  /** The vault's address in full: a public account. */
+  readonly vault: string;
+  /** Who acts on it (ADR §3.12): legacy, draining or queue. */
+  readonly system: string;
+  /** The last mode byte read (PROFIT, VOLUME, …), or null before a job read one. */
+  readonly skimMode: number | null;
+  readonly lane: string;
+  /** The last job's outcome ("settle SETTLED,IDLE · invest INVESTED", "IDLE", "THREW", …), or null before the first. */
+  readonly lastOutcome: string | null;
+  /** Its detail: the first VAULT_DETAIL_CHARS characters, scrubbed, or VAULT_DETAIL_WITHHELD. */
+  readonly lastDetail: string | null;
+  readonly lastDoneAt: string | null;
+  /** When it is due next; "infinity" for a queue row no live link names (RETIRE_UNLINKED_SQL). */
+  readonly dueAt: string | null;
+  readonly parkedReason: string | null;
+  /** Consecutive claims that did not complete. */
+  readonly attempts: number;
+  readonly streaks: VaultStreaks;
+}
+
+/** One vault nobody serves: draining (neither side acts on it), or parked on the queue (CLAIM skips it). */
+export interface UnservedVault {
+  readonly vault: string;
+  readonly system: string;
+  /**
+   * How long it has been draining, by the database's clock; null for a parked
+   * queue row (no column records when the reap parked it) and for a draining row
+   * whose time is not a finite one.
+   */
+  readonly forMs: number | null;
+  /**
+   * The column forMs is measured from: `system_at` for a row a handover drained
+   * or rolled back (DRAIN_SQL, ROLLBACK_SQL write it); `due_at` for a row the
+   * scheduler enrolled as draining under new_vault_system = 'queue'
+   * (ENSURE_VAULTS_SQL), which writes no system_at — see FLEET_SNAPSHOT_SQL for
+   * why due_at is that row's enrolment time. Null for a parked row.
+   */
+  readonly from: "system_at" | "due_at" | null;
+  readonly parkedReason: string | null;
+}
+
+/**
+ * THE VAULTS NOBODY SERVES, counted whole and listed longest first: what
+ * `vault-unserved` reads (src/fleet-alerts.ts). A parked queue row is counted and
+ * listed here too, but pages only as `vault-parked`, which the scheduler raises
+ * when its reap parks it (src/scheduler.ts) — never a second time from here.
+ */
+export interface FleetUnserved {
+  /** Rows with system = 'draining': the legacy keepers leave them, and no worker claims them. */
+  readonly draining: number;
+  /** Queue rows with a parked_reason: CLAIM skips them until an operator clears it. */
+  readonly parked: number;
+  /** The draining rows longest first, then the parked ones; at most VAULTS_LISTED. */
+  readonly vaults: readonly UnservedVault[];
+}
+
+/**
  * What a worker reports about itself in `worker.stats` (jsonb), the contract
  * between the worker (Q3, which writes it on its heartbeat) and this page.
  * COUNTERS SINCE THAT WORKER'S BOOT, and two over a window of its own. Only
@@ -230,6 +360,16 @@ export interface FleetSnapshot {
   readonly carries: { readonly pending: number };
   /** Lapsed leases visible now: held and lapsed, and the claims a takeover's attempts count says did not complete. */
   readonly expiries: readonly LeaseExpiry[];
+  /**
+   * EVERY vault_work row, one by one, up to VAULTS_LISTED: the per-user view the
+   * legacy profit keeper's /status used to give. The unserved rows first, then
+   * by address.
+   */
+  readonly vaults: readonly FleetVaultRow[];
+  /** Rows of vault_work not listed in `vaults` because of the cap. */
+  readonly vaultsTruncated: number;
+  /** The vaults nobody serves: draining, or parked on the queue. */
+  readonly unserved: FleetUnserved;
 }
 
 /**
