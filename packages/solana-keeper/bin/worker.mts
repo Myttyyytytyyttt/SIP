@@ -226,9 +226,14 @@ const transport = poolFetch(config.rpcUrls, (message, extra) => log.warn(message
 // the whole minute, so the two replicas of an overlap can each run at it until
 // their beats hear the scheduler's next hand-out — up to one of its ticks and
 // one beat — and the pacer's backoff after a 429 is what covers that window,
-// as it did before this ceiling moved. A floor of zero — a minute smaller than
-// WORKERS_MAX — is taken as one call: retune refuses anything under one, and a
-// refused retune would leave the pacer at its ceiling.
+// as it did before this ceiling moved. ABOVE WORKERS_MAX=1 THAT WINDOW IS NEW:
+// an outgoing replica that was the only worker alive keeps the whole minute it
+// was handed, not the floor, so for that one tick and beat the overlap can
+// spend the minute plus the new replica's floor, where before this change no
+// replica ever ran above the floor. The same 429 backoff covers it. A floor of
+// zero — a minute smaller than WORKERS_MAX — is taken as one call: retune
+// refuses anything under one, and a refused retune would leave the pacer at its
+// ceiling.
 const jupiterFloorPerMinute = Math.max(1, floor.floorJupiterPerMinute ?? config.jupiterCallsPerMinute);
 const jupiter: JupiterAccess | null = jupiterKey
   ? {

@@ -63,17 +63,25 @@ export const INVEST_REFUSED_CRITICAL_STREAK = 3;
  * Jupiter that keeps answering 4xx — was a log line every REFUSED job, for as
  * long as it lasted: money that should be buying and is not, and nobody woken.
  * One refusal is often the moment (a pool thin for a minute); the third in a
- * row, at the job's own backoff between them (REFUSED_DUE_SECONDS, doubling:
- * five minutes, then ten), is about a quarter of an hour of it, and a vault
- * that has stopped buying.
+ * row is a vault that has stopped buying.
+ *
+ * HOW SOON THE THIRD COMES IS THE SCHEDULER'S, NOT THIS FILE'S. A REFUSED job
+ * asks to come back after REFUSED_DUE_SECONDS, doubling (five minutes, then
+ * ten: about a quarter of an hour to the third). But a due time only ever moves
+ * earlier (src/scheduler-pg.ts), and a full pass makes every queue vault that
+ * did not rest due at once. While the scheduler holds no doorbell secret EVERY
+ * tick is a full pass (production on 2026-10-27), so a refused vault is turned
+ * every tick and the third refusal lands about two ticks — two minutes — after
+ * the first. Only a trusted doorbell leaves a busy vault to its own backoff.
  *
  * THE ALERTER'S OWN RULES DO THE REST (alerts.ts): the first warn is logged, the
  * second is a repeat inside its window and stays quiet, and the critical
  * ESCALATES through the dedup on the third. It repeats no sooner than 30
- * minutes later, and only when a refused job comes round again — hourly once
- * the backoff is at REFUSED_DUE_MAX_SECONDS. A turn that bought or failed
- * clears it (jobAlerts), and the next refusal starts at a warn again. The
- * legacy keeper's copy (bin/keeper.mts) is unchanged and stays a warn.
+ * minutes later, at the first refused job after that: every 30 minutes while a
+ * full pass turns the vault every tick, hourly once a trusted doorbell lets the
+ * backoff reach REFUSED_DUE_MAX_SECONDS. A turn that bought or failed clears it
+ * (jobAlerts), and the next refusal starts at a warn again. The legacy keeper's
+ * copy (bin/keeper.mts) is unchanged and stays a warn.
  */
 export function investRefusedAlert(vault: string, detail: string, streak = 1): Alert {
   if (streak < INVEST_REFUSED_CRITICAL_STREAK) {

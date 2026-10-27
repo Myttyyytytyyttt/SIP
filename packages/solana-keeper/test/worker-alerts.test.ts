@@ -170,6 +170,35 @@ describe("the vault's invest, once a job", () => {
     expect(posted.map((body) => [body.key, body.severity])).toEqual([[`invest-refused:${VAULT}`, "critical"]]);
   });
 
+  it("pages two minutes in, and every 30 minutes after, when a full pass turns the refused vault every tick (production's scheduler today)", () => {
+    // NO DOORBELL SECRET: every 60 s tick is a full pass, which makes a vault that
+    // did not rest due at once, whatever REFUSED_DUE_SECONDS asked for — so the
+    // streak climbs once a minute, not at 5 and then 10 minutes.
+    let now = 0;
+    const posted: { at: number; severity: AlertSeverity }[] = [];
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://hooks.example.test/T000/B000/WebhookTokenNeverLogged", "alertWebhook"),
+      minSeverity: "critical",
+      now: () => now,
+      post: async (_url, body) => void posted.push({ at: now, severity: (JSON.parse(body) as { severity: AlertSeverity }).severity }),
+      log: () => undefined,
+    });
+    let previous = NONE;
+    for (let minute = 0; minute <= 62; minute++) {
+      now = minute * 60_000;
+      const end = done({ settles: [], invest: { outcome: "REFUSED", detail: "a leg is too thin" }, previous });
+      const rules = jobAlerts(end);
+      for (const key of rules.clear) alerter.clear(key);
+      for (const alert of rules.fire) alerter.fire(alert);
+      previous = readStreaks(end.kind === "complete" ? end.completion.streaks : {});
+    }
+    expect(posted.map((page) => [page.at / 60_000, page.severity])).toEqual([
+      [2, "critical"],
+      [32, "critical"],
+      [62, "critical"],
+    ]);
+  });
+
   it("tells a crank that stays short of the vault on the third short turn, from the turn's own wrap report", () => {
     const wrap = { free: 5_000_000n, allowance: 1_000_000n, wrapped: 1_000_000n, short: true } as unknown as NonNullable<NonNullable<JobReport["investFacts"]>["wrap"]>;
     const third = done({ settles: [], invest: { outcome: "INVESTED", detail: "" }, wrapShort: true, investFacts: { wrap }, previous: readStreaks({ wrapShort: WRAP_SHORT_ALERT_STREAK - 1 }) });
