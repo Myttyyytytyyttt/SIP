@@ -365,8 +365,8 @@ export const GRANT_COPY = {
     "Privy's reply to adding the keeper's signer failed, but its record now shows a signer on this wallet, so the " +
     "seat was most likely added.",
   addedUnconfirmedNext:
-    "Do not press Grant SaverFi permission: confirm the seat first with the privy-policy verify line under Advanced on this row, or " +
-    "on the keeper's /status after its next sweep.",
+    "Do not press Grant SaverFi permission: confirm the seat first with the privy-policy verify line under Advanced on this row. " +
+    "Reload the page in a minute; the wallet should then no longer say Needs permission.",
   addedRecordLags:
     "Privy accepted the keeper's signer with its policy, but its record has not shown it on this wallet after every " +
     "wait. Do not press Grant SaverFi permission: it would add the signer a second time. Reload the page in a minute; " +
@@ -595,7 +595,7 @@ export const RESEAT_COPY = {
     `wallet should no longer say Needs permission. Then confirm the seat: ${verify}.`,
   idDroppedRecordLags: "Its record has not shown the seat yet either: do not press Grant SaverFi permission.",
   addedUnconfirmedNext: (verify: string): string =>
-    `Do not press Grant SaverFi permission. Confirm the seat before anything else: ${verify}, or the keeper's /status after its next sweep.`,
+    `Do not press Grant SaverFi permission. Confirm the seat before anything else: ${verify}. Reload the page in a minute; the wallet should then no longer say Needs permission.`,
   signerReappeared:
     "Privy's record showed no signer on this wallet, then a signer this page did not add, so the keeper's seat was " +
     "not added. Press Re-seat keeper again, under Advanced on this row.",

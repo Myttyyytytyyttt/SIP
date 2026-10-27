@@ -184,6 +184,10 @@ describe("what the live page does with what it could not read", () => {
     expect(html).not.toContain("Put aside so far");
     expect(html).not.toMatch(/keeper/i);
     expect(html).not.toContain("SIP_SOLANA");
+    // The operator's sentence itself, whatever it names: leaderboard.ts now says
+    // "the rankings service", which /keeper/ alone would let through.
+    expect(html).not.toContain(feed.detail);
+    expect(html).not.toMatch(/rankings service/i);
   });
 });
 

@@ -289,6 +289,9 @@ describe("grantKeeperSeat", () => {
     expect(message).toContain(GRANT_COPY.addedUnconfirmed);
     expect(message).toContain("Could not refresh user");
     expect(message).toContain("Do not press Grant SaverFi permission");
+    // Advice that stays true when no keeper serves a /status: the row itself, after a reload.
+    expect(message).toContain("Reload the page in a minute; the wallet should then no longer say Needs permission.");
+    expect(message).not.toContain("/status");
     expect(addSigners).toHaveBeenCalledTimes(1);
     expect(wait).not.toHaveBeenCalled();
   });
@@ -562,6 +565,8 @@ describe("reseatKeeperSeat", () => {
     expect(message).toContain("Could not refresh user");
     expect(message).toContain(`privy-policy verify --wallet ${teeWalletId(seated, TRADING_0) ?? ""} --policy ${POLICY}`);
     expect(message).toContain("Do not press Grant SaverFi permission");
+    expect(message).toContain("Reload the page in a minute; the wallet should then no longer say Needs permission.");
+    expect(message).not.toContain("/status");
     expect(message).not.toContain(RESEAT_COPY.removedNotAdded);
     expect(message).not.toContain(RESEAT_COPY.done);
     expect(addSigners).toHaveBeenCalledTimes(1);
