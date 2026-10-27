@@ -59,6 +59,8 @@ const DISPATCHER_MODULES = [
   // runs nothing unless SIP_SOLANA_DISPATCH is set (test/dispatch-select.test.ts).
   "src/handover.ts",
   "src/handover-cli.ts",
+  // THE OWNER'S FLEET TOOL'S WORDS AND DECISIONS: only test-local/shadow/flota-prod.mts and its tests load it.
+  "src/owner-fleet.ts",
   // THE LOCAL SHADOW'S ARITHMETIC (plan P3b): only test-local/shadow/harness.ts and its test load it.
   "src/shadow-compare.ts",
 ] as const;
