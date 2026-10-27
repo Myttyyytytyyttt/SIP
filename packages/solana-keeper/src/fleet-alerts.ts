@@ -1,24 +1,44 @@
 // The dispatcher's five alerts (Q5): lease-expired, fence-reject, queue-lag,
 // scheduler-stale and pg-saturated (dispatcher ADR §6.3 rows "leases (L4+)" and
-// "Postgres (L4+)", §4.9 rows 1-7 and 15, §3.11 "Health"; plan §3.3.1 Q5).
+// "Postgres (L4+)", §4.9 rows 1-7 and 15, §3.11 "Health"; plan §3.3.1 Q5) —
+// and a sixth the cut-over needs, vault-unserved, one key per vault.
 //
 // THE ADR'S SEVERITIES AND NOTHING LOUDER. Only `critical` leaves the box
 // (src/alerts.ts), so the severity IS the decision to wake somebody:
 //
-//   | key             | warn                         | critical (pages)                       |
-//   |-----------------|------------------------------|----------------------------------------|
-//   | lease-expired   | 1-2 lapsed leases in an hour | ≥ 3 in an hour                         |
-//   | fence-reject    | —                            | any, within the hour                   |
-//   | queue-lag       | —                            | a due vault unclaimed > 2 windows      |
-//   | scheduler-stale | —                            | fleet.tick_at older than 10 minutes    |
-//   | pg-saturated    | —                            | queries waiting for a connection on    |
-//   |                 |                              | 3 ticks in a row                       |
+//   | key                    | warn                         | critical (pages)                       |
+//   |------------------------|------------------------------|----------------------------------------|
+//   | lease-expired          | 1-2 lapsed leases in an hour | ≥ 3 in an hour                         |
+//   | fence-reject           | —                            | any, within the hour                   |
+//   | queue-lag              | —                            | a due vault unclaimed > 2 windows      |
+//   | scheduler-stale        | —                            | fleet.tick_at older than 10 minutes    |
+//   | pg-saturated           | —                            | queries waiting for a connection on    |
+//   |                        |                              | 3 ticks in a row                       |
+//   | vault-unserved:<vault> | draining > 15 minutes        | draining > 60 minutes                  |
 //
 // Where the ADR names only the page, there is no warn: a lower rung nobody
 // asked for is a new behaviour, and on this branch a new behaviour is off until
 // named (plan §2 rule 1). Each rule clears on the condition's end, so the next
 // occurrence pages again; queue-lag clears only once the wait is back under ONE
 // window, so a lag that hovers at the threshold pages once, not once a refresh.
+//
+// vault-unserved IS NOT THE ADR'S, it is the cut-over's (2026-10-27): once
+// fleet.new_vault_system is 'queue' the scheduler enrols every new vault as
+// 'draining' (ENSURE_VAULTS_SQL), the legacy keepers leave a draining vault
+// alone, no worker claims one, and only `dispatch-handover arm` moves it on. A
+// new user's vault then waits on an operator, and nothing said so. Its warn is
+// a named rung: a handover carried through goes from drain to queue in about
+// two minutes (rehearsed, test-local/shadow/handover-prod.mts), so a quarter of
+// an hour is one that stalled — arm waiting on receipts from legacy keepers
+// that are stopped, say — and an hour is a user with no settle and no buy. A
+// PARKED queue row is unserved as well and is counted in
+// the same view (fleet.unserved), but it already pages as vault-parked when the
+// reap parks it (src/scheduler.ts), so nothing here pages it again.
+//
+// scheduler-stale IS ALSO A WORKER'S (ADR §3.11). The scheduler's two replicas
+// page it about each other; when both are gone, nobody would. So a worker reads
+// fleet.tick_at on its own beat and applies the same rule through
+// SchedulerStaleWatch below, titled "[worker] " by its alerter.
 //
 // PURE RULES, ONE STATEFUL EVALUATOR. Each rule is a function over numbers
 // returning what to raise and whether to clear (AlertDecision,
@@ -30,7 +50,7 @@
 // WHO EVALUATES WHAT. Two scheduler replicas read the same snapshot; if both
 // paged, every condition would page twice. So only the replica that holds the
 // scheduler lock (`acting`) raises the fleet's conditions — lease-expired,
-// fence-reject, queue-lag. scheduler-stale is evaluated by EVERY reader, the
+// fence-reject, queue-lag, vault-unserved. scheduler-stale is evaluated by EVERY reader, the
 // standby above all: a hung lock holder is exactly the process that will not
 // page about itself (ADR §4.9 row 15), and the ADR has workers page it too
 // (§3.11). pg-saturated is about this process's own pools, so each process
@@ -40,7 +60,7 @@
 // only who is woken.
 
 import type { Alerter } from "./alerts.js";
-import type { FleetSnapshot, PoolSample } from "./fleet-status.js";
+import type { FleetSnapshot, PoolSample, UnservedVault } from "./fleet-status.js";
 import type { AlertDecision } from "./usage-alerts.js";
 
 const nothing: AlertDecision = { fire: null, clear: false };
@@ -244,6 +264,122 @@ export function pgSaturatedAlert(input: { readonly streak: number; readonly wait
   };
 }
 
+// --- vault-unserved ----------------------------------------------------------
+
+/** The prefix of each vault's key: `vault-unserved:<vault>`. */
+export const VAULT_UNSERVED_ALERT_PREFIX = "vault-unserved";
+/** Draining longer than this warns: 15 minutes. */
+export const VAULT_UNSERVED_WARN_MS = 15 * 60_000;
+/** Draining longer than this pages: an hour. */
+export const VAULT_UNSERVED_CRITICAL_MS = 60 * 60_000;
+
+export const vaultUnservedKey = (vault: string): string => `${VAULT_UNSERVED_ALERT_PREFIX}:${vault}`;
+
+/**
+ * One draining vault, by how long it has drained (fleet.unserved, read by
+ * FLEET_SNAPSHOT_SQL from system_at, or from due_at for a row the scheduler
+ * enrolled). `forMs` null — not draining, or a time that could not be measured —
+ * is no evidence and clears.
+ *
+ * WHAT TO DO IS IN THE DETAIL, because the person paged is the one who runs it:
+ * `dispatch-handover arm` (twice, 150 blocks apart) moves it to the queue, and
+ * stalls while a legacy role it requires has no fresh receipt — with the legacy
+ * keepers stopped, every arm does; `release` gives it back to them.
+ */
+export function vaultUnservedAlert(input: { readonly vault: string; readonly forMs: number | null; readonly from: "system_at" | "due_at" | null }): AlertDecision {
+  const { vault, forMs, from } = input;
+  if (forMs === null || !(forMs > VAULT_UNSERVED_WARN_MS)) return cleared;
+  const critical = forMs > VAULT_UNSERVED_CRITICAL_MS;
+  const since = from === "due_at" ? "since the scheduler enrolled it (fleet.new_vault_system is 'queue')" : "since a handover drained it";
+  return {
+    fire: {
+      key: vaultUnservedKey(vault),
+      severity: critical ? "critical" : "warn",
+      title: critical ? "A vault has had nobody settling or buying for it for over an hour" : "A vault is waiting between the legacy keepers and the queue",
+      detail:
+        `Vault ${vault} has been draining for ${minutes(forMs)} min, ${since}. The legacy keepers leave a draining vault alone and ` +
+        "no worker claims one, so nothing is settled or bought for it. `dispatch-handover arm` moves it to the queue (twice, 150 " +
+        "blocks apart); arm waits for a fresh receipt from every legacy role it requires, which stopped keepers never write. " +
+        "`dispatch-handover release` gives it back to the legacy keepers instead. Read fleet.unserved on /status.",
+      context: { vault, forMs, from },
+    },
+    clear: false,
+  };
+}
+
+// --- scheduler-stale, from a worker ------------------------------------------
+
+/** What a worker's watch shows of the scheduler's tick. */
+export interface SchedulerStaleWatchStatus {
+  /** fleet.tick_at's age at the last read that answered, by the database's clock; null when that read found no tick. */
+  readonly tickAgeMs: number | null;
+  /** When that read was, on this process's clock; null before the first. */
+  readonly readAt: string | null;
+  readonly firing: boolean;
+}
+
+/**
+ * scheduler-stale as a WORKER raises it (the ADR has workers page it too,
+ * §3.11): schedulerStaleAlert, the scheduler replicas' own rule and threshold,
+ * over the tick age the worker's beat reads with its quotas (WORKER_BEAT_SQL,
+ * src/dispatch-store.ts) — no statement of its own.
+ *
+ * THE FAILURE IT IS FOR: both scheduler replicas gone (a crash loop, a bad
+ * deploy, the service stopped). Then no replica's FleetAlerts runs, nothing
+ * makes a vault due — workers drain what was due and idle — and each worker's
+ * quota falls to its floor two minutes after the last hand-out; the only
+ * dispatcher processes still up are workers, and without this none of them
+ * would say so. While a replica lives it pages the same condition itself, so
+ * then it pages from both sides, told apart by "[scheduler] " and "[worker] ".
+ *
+ * THE SAME TEN MINUTES as the replicas (SCHEDULER_STALE_AFTER_MS): the holder
+ * writes tick_at once a tick (SIP_SOLANA_SWEEP_MS, 60 s by default) and exits on
+ * its own after max(3 ticks, 10 min) without progress, so at the default a tick
+ * older than ten minutes is past the point where a hung holder should have
+ * exited and the standby taken the lock.
+ *
+ * ONLY A READ THAT ANSWERED IS EVIDENCE. A beat that failed, timed out or found
+ * no row of its own is not handed here (observe is not called): a worker cut
+ * off from Postgres knows nothing about the scheduler, and its leases' lapse is
+ * already the scheduler's lease-expired. A tick that was never written is judged
+ * by this process's uptime, as the rule says.
+ */
+export class SchedulerStaleWatch {
+  readonly #alerter: Pick<Alerter, "fire" | "clear">;
+  readonly #now: () => number;
+  readonly #startedAt: number;
+  #tickAgeMs: number | null = null;
+  #readAt: number | null = null;
+  #firing = false;
+
+  constructor(options: { readonly alerter: Pick<Alerter, "fire" | "clear">; readonly now?: () => number }) {
+    this.#alerter = options.alerter;
+    this.#now = options.now ?? (() => Date.now());
+    this.#startedAt = this.#now();
+  }
+
+  /** One answered read of fleet.tick_at's age (null: no tick was ever written). Returns what the rule decided. */
+  observe(tickAgeMs: number | null): AlertDecision {
+    const now = this.#now();
+    const age = tickAgeMs !== null && Number.isFinite(tickAgeMs) ? tickAgeMs : null;
+    this.#tickAgeMs = age;
+    this.#readAt = now;
+    const decision = schedulerStaleAlert({ tickAgeMs: age, upMs: now - this.#startedAt });
+    if (decision.fire !== null) {
+      this.#alerter.fire(decision.fire);
+      this.#firing = true;
+    } else if (decision.clear && this.#firing) {
+      this.#alerter.clear(SCHEDULER_STALE_ALERT_KEY);
+      this.#firing = false;
+    }
+    return decision;
+  }
+
+  status(): SchedulerStaleWatchStatus {
+    return { tickAgeMs: this.#tickAgeMs, readAt: this.#readAt === null ? null : new Date(this.#readAt).toISOString(), firing: this.#firing };
+  }
+}
+
 // --- the evaluator -----------------------------------------------------------
 
 /** The `alerts` block of a dispatcher process's /status. */
@@ -256,6 +392,8 @@ export interface FleetAlertsStatus {
   readonly fenceRejectsTotal: number;
   readonly queueOldestDueMs: number | null;
   readonly schedulerTickAgeMs: number | null;
+  /** The longest any vault has been draining (fleet.unserved), what `vault-unserved` reads; null when none is. */
+  readonly unservedOldestMs: number | null;
   /** This process's pools at the last tick, summed, and how many ticks in a row had queries waiting. */
   readonly pg: { readonly waiting: number; readonly total: number; readonly idle: number; readonly saturatedStreak: number } | null;
   /** Keys this evaluator has raised and not cleared. */
@@ -296,6 +434,9 @@ export class FleetAlerts {
   #acting: boolean | null = null;
   #queueOldestDueMs: number | null = null;
   #tickAgeMs: number | null = null;
+  #unservedOldestMs: number | null = null;
+  /** The vaults this evaluator has raised `vault-unserved` for and not cleared. */
+  readonly #unservedFiring = new Set<string>();
   #pool: { waiting: number; total: number; idle: number } | null = null;
   #saturatedStreak = 0;
 
@@ -319,7 +460,7 @@ export class FleetAlerts {
   /**
    * One snapshot. The evidence is kept whether or not this process is acting —
    * a standby that takes the lock pages on the hour it already watched — but
-   * only the acting replica raises the fleet's three conditions.
+   * only the acting replica raises the fleet's four conditions.
    */
   observeSnapshot(snapshot: FleetSnapshot, input: { readonly acting: boolean }): void {
     const now = this.#now();
@@ -367,6 +508,8 @@ export class FleetAlerts {
 
     this.#queueOldestDueMs = snapshot.queue.oldestDueMs;
     this.#tickAgeMs = snapshot.scheduler?.tickAgeMs ?? null;
+    const draining = snapshot.unserved.vaults.filter((row) => row.system === "draining");
+    this.#unservedOldestMs = draining.reduce<number | null>((oldest, row) => (row.forMs !== null && (oldest === null || row.forMs > oldest) ? row.forMs : oldest), null);
 
     if (input.acting) {
       this.#apply(leaseExpiredAlert({ expiredLastHour: this.#expiries.size, latest: this.#latestExpiry }), LEASE_EXPIRED_ALERT_KEY);
@@ -376,12 +519,44 @@ export class FleetAlerts {
         queueLagAlert({ oldestDueMs: snapshot.queue.oldestDueMs, due: snapshot.queue.due, windowMs: this.#windowMs }),
         QUEUE_LAG_ALERT_KEY,
       );
+      this.#evaluateUnserved(draining, snapshot.unserved.draining);
     } else {
       // A REPLICA THAT STOPPED ACTING HANDS ITS PAGES BACK: cleared here, so the
       // day it acts again they fire afresh, and meanwhile the holder pages them.
       for (const key of [LEASE_EXPIRED_ALERT_KEY, FENCE_REJECT_ALERT_KEY, QUEUE_LAG_ALERT_KEY]) this.#apply(cleared, key);
+      for (const vault of [...this.#unservedFiring]) this.#clearUnserved(vault);
     }
     this.#apply(schedulerStaleAlert({ tickAgeMs: this.#tickAgeMs, upMs: now - this.#startedAt }), SCHEDULER_STALE_ALERT_KEY);
+  }
+
+  /**
+   * vault-unserved, one key per draining vault the snapshot lists. A vault that
+   * left 'draining' is cleared — but only when the list is whole: past the
+   * page's cap (VAULTS_LISTED) a vault missing from it may still be draining,
+   * and its page stands until a whole list says otherwise.
+   */
+  #evaluateUnserved(listed: readonly UnservedVault[], drainingTotal: number): void {
+    const seen = new Set<string>();
+    for (const row of listed) {
+      seen.add(row.vault);
+      const decision = vaultUnservedAlert({ vault: row.vault, forMs: row.forMs, from: row.from });
+      if (decision.fire !== null) {
+        this.#alerter.fire(decision.fire);
+        this.#firing.add(decision.fire.key);
+        this.#unservedFiring.add(row.vault);
+      } else if (decision.clear && this.#unservedFiring.has(row.vault)) {
+        this.#clearUnserved(row.vault);
+      }
+    }
+    if (listed.length < drainingTotal) return;
+    for (const vault of [...this.#unservedFiring]) if (!seen.has(vault)) this.#clearUnserved(vault);
+  }
+
+  #clearUnserved(vault: string): void {
+    const key = vaultUnservedKey(vault);
+    this.#alerter.clear(key);
+    this.#firing.delete(key);
+    this.#unservedFiring.delete(vault);
   }
 
   /** This process's pools, once per tick (samplePool, src/fleet-status.ts). */
@@ -426,6 +601,7 @@ export class FleetAlerts {
       fenceRejectsTotal: this.#rejectsTotal,
       queueOldestDueMs: this.#queueOldestDueMs,
       schedulerTickAgeMs: this.#tickAgeMs,
+      unservedOldestMs: this.#unservedOldestMs,
       pg: this.#pool === null ? null : { ...this.#pool, saturatedStreak: this.#saturatedStreak },
       firing: [...this.#firing].sort(),
     };

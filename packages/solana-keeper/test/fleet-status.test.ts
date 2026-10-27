@@ -7,10 +7,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { Redactor, Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { FleetAlerts } from "../src/fleet-alerts.js";
-import { parseFleetSnapshot } from "../src/fleet-pg.js";
+import { parseFleetSnapshot, vaultDetailOf, vaultStreaksOf } from "../src/fleet-pg.js";
 import {
   FLEET_STATUS_READ_BUDGET_MS,
   FleetStatusReader,
+  VAULTS_LISTED,
+  VAULT_DETAIL_CHARS,
+  VAULT_DETAIL_WITHHELD,
+  VAULT_STREAKS_KEYS,
   WORKER_HEARTBEAT_MS,
   decideFleetHealth,
   describeReadFailure,
@@ -22,9 +26,17 @@ import {
   type FleetStatusView,
 } from "../src/fleet-status.js";
 import { HEALTH_STALE_FLOOR_MS, httpHandler, type LeaderboardReply } from "../src/status.js";
+import { completionFor, readStreaks } from "../src/worker-job.js";
 
 const T0 = Date.parse("2026-10-12T12:00:00Z");
 const DB = "postgres://sip:FleetDbPassw0rdNeverServed@db.example.test:5432/sip";
+
+/** The owner's vault and wallet (test/doorbell.test.ts), and a PROFIT vault still draining. */
+const OWNER_VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
+const OWNER_WALLET = "9QX53J3Kbs8ogQirZq5iN11rucZAvgF4EKWw98QAkUSe";
+const DRAINING_VAULT = "D5J5o2gS1111111111111111111111111111111111";
+const BYTE_RUN_TEXT = `the signer's bytes: [${Array.from({ length: 40 }, (_, i) => (i * 7) % 256).join(", ")}]`;
+const HEX_KEY = "ab".repeat(32);
 
 /** What the statement returns, as json_build_object writes it: numbers, ISO text, nested objects. */
 const RAW = {
@@ -54,6 +66,36 @@ const RAW = {
   sends: { open: 2, oldestOpenAgeMs: 40_000, unechoed: 1 },
   lastHour: [{ kind: "settle", state: "landed", count: 3 }],
   carries: 2,
+  vaults: {
+    total: 6,
+    rows: [
+      {
+        vault: DRAINING_VAULT, system: "draining", skimMode: 0, lane: "new", lastOutcome: null, lastDetail: null,
+        lastDoneAt: null, dueAt: "2026-10-12T11:40:00+00:00", parkedReason: null, attempts: 0, streaks: {},
+      },
+      {
+        vault: OWNER_VAULT, system: "queue", skimMode: 0, lane: "busy", lastOutcome: "settle RETRY · invest REFUSED",
+        lastDetail: `the leg's quote failed (Error: connect to ${DB} refused) with key ${HEX_KEY}`,
+        lastDoneAt: "2026-10-12T11:59:00+00:00", dueAt: "2026-10-12T12:01:00+00:00", parkedReason: null, attempts: 1,
+        streaks: { settleRetries: { [OWNER_WALLET]: 2, "not an address": 3, ZZ: 4 }, investFailed: 0, investRefused: "2", wrapShort: -1, privateKey: "never served" },
+      },
+      {
+        vault: "4J3En7ug1111111111111111111111111111111111", system: "legacy", skimMode: 1, lane: "new", lastOutcome: "IDLE",
+        lastDetail: BYTE_RUN_TEXT, lastDoneAt: null, dueAt: "infinity", parkedReason: null, attempts: 0, streaks: null,
+      },
+      { vault: "LongDetai1Vau1t11111111111111111111111111111", system: "queue", skimMode: 0, lane: "safety", lastOutcome: "IDLE", lastDetail: "x".repeat(500), attempts: 0, streaks: {} },
+      { system: "queue", lane: "safety" },
+    ],
+  },
+  unserved: {
+    draining: 1,
+    parked: 1,
+    vaults: [
+      { vault: DRAINING_VAULT, system: "draining", forMs: 1_200_000, from: "due_at", parkedReason: null },
+      { vault: "VaultParked", system: "queue", forMs: null, from: null, parkedReason: "5 lapsed leases in a row" },
+      { vault: "VaultOddFrom", system: "draining", forMs: 5, from: "whatever", parkedReason: null },
+    ],
+  },
 };
 
 const SNAPSHOT: FleetSnapshot = parseFleetSnapshot(RAW);
@@ -103,6 +145,63 @@ describe("the snapshot as the statement returns it", () => {
     expect(empty.scheduler).toBeNull();
     expect(empty.workers).toEqual([]);
     expect(empty.queue.oldestDueMs).toBeNull();
+    expect([empty.vaults, empty.vaultsTruncated, empty.unserved]).toEqual([[], 0, { draining: 0, parked: 0, vaults: [] }]);
+  });
+});
+
+describe("the per-vault table (fleet.vaults) and the unserved view (fleet.unserved)", () => {
+  it("serves each row the statement listed — the full address, who acts, its mode byte, lane, last outcome and when — and counts what the cap left out", () => {
+    expect(SNAPSHOT.vaults.map((row) => row.vault)).toEqual([DRAINING_VAULT, OWNER_VAULT, "4J3En7ug1111111111111111111111111111111111", "LongDetai1Vau1t11111111111111111111111111111"]);
+    // A ROW WITHOUT AN ADDRESS IS NOT A ROW; the total still counts it, so it shows as left out.
+    expect(SNAPSHOT.vaultsTruncated).toBe(2);
+    expect(SNAPSHOT.vaults[1]).toMatchObject({
+      system: "queue",
+      skimMode: 0,
+      lane: "busy",
+      lastOutcome: "settle RETRY · invest REFUSED",
+      lastDoneAt: "2026-10-12T11:59:00+00:00",
+      dueAt: "2026-10-12T12:01:00+00:00",
+      parkedReason: null,
+      attempts: 1,
+    });
+    // A RETIRED QUEUE ROW IS DUE AT INFINITY, said as Postgres says it.
+    expect(SNAPSHOT.vaults[2]!.dueAt).toBe("infinity");
+    expect(VAULTS_LISTED).toBe(500);
+  });
+
+  it("serves only the four streak counts, a settle retry only under an address, and a count that is not a whole number as 0", () => {
+    expect(SNAPSHOT.vaults[1]!.streaks).toEqual({ settleRetries: { [OWNER_WALLET]: 2 }, investFailed: 0, investRefused: 2, wrapShort: 0 });
+    expect(JSON.stringify(SNAPSHOT)).not.toContain("never served");
+    expect(SNAPSHOT.vaults[2]!.streaks).toEqual({ settleRetries: {}, investFailed: 0, investRefused: 0, wrapShort: 0 });
+    expect(vaultStreaksOf({ investFailed: 1.5, investRefused: Number.MAX_SAFE_INTEGER + 2, wrapShort: 3 })).toEqual({ settleRetries: {}, investFailed: 0, investRefused: 0, wrapShort: 3 });
+  });
+
+  it("reads the same four keys a worker's job writes (completionFor), so a new streak cannot reach the page unnamed or vanish from it", () => {
+    const completion = completionFor({ settles: [], invest: { outcome: "REFUSED", detail: "refused" }, wrapShort: true, previous: readStreaks({}), unfinished: false });
+    expect(Object.keys(completion.streaks).sort()).toEqual([...VAULT_STREAKS_KEYS].sort());
+    expect(vaultStreaksOf(completion.streaks)).toEqual(completion.streaks);
+  });
+
+  it("cuts a detail to 200 characters, scrubs it with this process's redactor, and withholds one that carries a key nobody registered, row by row", () => {
+    expect(SNAPSHOT.vaults[3]!.lastDetail).toBe("x".repeat(VAULT_DETAIL_CHARS));
+    // A 64-HEX RUN IS MASKED; THE ROW STAYS.
+    expect(SNAPSHOT.vaults[1]!.lastDetail).toContain("<redacted:hex64:");
+    expect(SNAPSHOT.vaults[1]!.lastDetail).not.toContain(HEX_KEY);
+    // A RUN OF BYTE VALUES IS A KEY'S PRINTED FORM: this one row's text is withheld, not the page.
+    expect(SNAPSHOT.vaults[2]!.lastDetail).toBe(VAULT_DETAIL_WITHHELD);
+    expect(vaultDetailOf(null)).toBeNull();
+    expect(vaultDetailOf("landed; receipt read")).toBe("landed; receipt read");
+  });
+
+  it("reads the unserved view whole: draining and parked counted, each draining row's time and the column it is measured from", () => {
+    expect(SNAPSHOT.unserved.draining).toBe(1);
+    expect(SNAPSHOT.unserved.parked).toBe(1);
+    expect(SNAPSHOT.unserved.vaults).toEqual([
+      { vault: DRAINING_VAULT, system: "draining", forMs: 1_200_000, from: "due_at", parkedReason: null },
+      { vault: "VaultParked", system: "queue", forMs: null, from: null, parkedReason: "5 lapsed leases in a row" },
+      // A `from` the statement never writes is not served as if it were one.
+      { vault: "VaultOddFrom", system: "draining", forMs: 5, from: null, parkedReason: null },
+    ]);
   });
 });
 
@@ -214,6 +313,10 @@ describe("the page", () => {
     expect(parsed.fleet?.queue.oldestDueMs).toBe(140_000);
     expect(parsed.read.ok).toBe(true);
     expect(parsed.alerts?.pg).toEqual({ waiting: 0, total: 2, idle: 1, saturatedStreak: 0 });
+    // THE PER-USER TABLE IS IN THE FLEET BLOCK, every address whole.
+    expect(parsed.fleet?.vaults.map((row) => row.vault)).toContain(OWNER_VAULT);
+    expect(parsed.fleet?.vaultsTruncated).toBe(2);
+    expect(parsed.fleet?.unserved.draining).toBe(1);
     drive(handler, "/status");
     expect(source.reads, "a GET is not a read").toBe(1);
     expect(drive(handler, "/health").status).toBe(200);

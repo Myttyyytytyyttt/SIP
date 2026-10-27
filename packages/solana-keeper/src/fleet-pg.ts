@@ -30,17 +30,25 @@ import { FULL_PASS_REASON_MAX_CHARS, type BellBatch, type BellWrite, type FleetB
 import {
   JOB_CEILING_MS,
   PARKED_LISTED,
+  VAULTS_LISTED,
+  VAULT_DETAIL_CHARS,
+  VAULT_DETAIL_WITHHELD,
   WORKER_DEAD_AFTER_MS,
   type FleetQueue,
   type FleetSchedulerRow,
   type FleetSends,
   type FleetSnapshot,
   type FleetStatusSource,
+  type FleetUnserved,
+  type FleetVaultRow,
   type FleetWorkerRow,
   type LaneLag,
   type LeaseExpiry,
+  type UnservedVault,
+  type VaultStreaks,
   type WorkerStats,
 } from "./fleet-status.js";
+import { scrubbedForExport } from "./keeper-log.js";
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 
 /** What this file needs of a pool: one statement at a time. pg.Pool is one. */
@@ -57,6 +65,7 @@ export const FLEET_COLUMNS = {
   vault_work: [
     "vault_addr",
     "system",
+    "skim_mode",
     "lane",
     "priority",
     "due_at",
@@ -68,7 +77,11 @@ export const FLEET_COLUMNS = {
     "claimed_at",
     "attempts",
     "last_outcome",
+    "last_detail",
+    "last_done_at",
+    "streaks",
     "parked_reason",
+    "system_at",
   ],
   send_intent: ["id", "kind", "state", "signature", "created_at", "resolved_at", "echoed_at"],
   worker: ["worker_id", "kind", "version", "started_at", "heartbeat_at", "slots", "busy", "rps_quota", "jup_quota", "quota_at", "stopped_at", "stats"],
@@ -155,10 +168,42 @@ RETURNING old.full_pass_reason AS reason`;
 /**
  * THE FLEET IN ONE STATEMENT, so every part of the page is from the same
  * snapshot of the tables and costs one round trip. Each block scans vault_work
- * at most once — the workers' lease counts are one grouped scan joined in, not
- * a scan per worker — so at N = 10,000 a read is a handful of passes over ten
+ * at most twice — a count, and a capped list where it lists (parked, vaults,
+ * unserved) — and the workers' lease counts are one grouped scan joined in, not
+ * a scan per worker; so at N = 10,000 a read is about a dozen passes over ten
  * thousand rows every FLEET_STATUS_REFRESH_MS. $1 the job ceiling and $3
- * the echo deadline, in seconds; $2 how many parked vaults are listed.
+ * the echo deadline, in seconds; $2 how many parked vaults are listed; $4 how
+ * many vault rows (and unserved rows) are listed one by one, $5 how many
+ * characters of each last_detail.
+ *
+ * `vaults` is every vault_work row, the unserved ones first, then by address,
+ * capped at $4 and counted whole (`total`), with last_detail cut to $5
+ * characters in the statement: the page's per-user table (VAULTS_LISTED).
+ *
+ * `unserved` is what `vault-unserved` reads: the rows nobody acts on — draining
+ * (the legacy keepers leave it, CLAIM takes only 'queue'), or parked on the
+ * queue — and, for a draining one, for how long.
+ *
+ * HOW LONG A VAULT HAS BEEN DRAINING, WITHOUT A NEW COLUMN. A handover writes
+ * system_at whenever it changes `system` (DRAIN_SQL, ROLLBACK_SQL, arm's move,
+ * release: src/handover.ts), so a row it drained is measured from system_at.
+ * The scheduler's enrolment under new_vault_system = 'queue'
+ * (ENSURE_VAULTS_SQL, src/scheduler-pg.ts) inserts the row as 'draining' with
+ * no system_at; its time is due_at, which that INSERT sets to clock_timestamp()
+ * and which nothing moves later on a row outside the queue:
+ *   * MARK_DUE_SQL, SCHEDULER_COMPLETE_SQL and RETIRE_UNLINKED_SQL touch only
+ *     system = 'queue';
+ *   * COMPLETE (src/dispatch-store.ts) needs the row's holder and fence, and
+ *     CLAIM, the only writer of a holder, takes only 'queue';
+ *   * RING_SQL (above) sets due_at = LEAST(due_at, now + the bell delay), which
+ *     is never earlier than an insert made before that now.
+ * So for such a row, due_at IS the enrolment, and draining-since =
+ * coalesce(system_at, due_at). A row put into 'draining' by a hand edit that
+ * skips system_at is measured from its due_at too, which then says nothing
+ * about when it was drained — the handover's commands are the way to drain. A
+ * time that is not finite is not measured (a timestamp minus infinity is an
+ * error in Postgres 16, and would cost the whole page), and a time in the
+ * future reads as 0.
  *
  * The `lanes` block counts exactly the rows CLAIM could take now (ADR §3.5):
  * on the queue, not parked, due, free or with a lapsed lease. `expiries` is the
@@ -244,7 +289,33 @@ SELECT json_build_object(
   'lastHour', (SELECT coalesce(json_agg(json_build_object('kind', h.kind, 'state', h.state, 'count', h.n) ORDER BY h.kind, h.state), '[]'::json)
                  FROM (SELECT kind, state, count(*) AS n FROM ${S}.send_intent
                         WHERE created_at > t.now - interval '1 hour' GROUP BY kind, state) h),
-  'carries', (SELECT count(*) FROM ${S}.loss_carry)
+  'carries', (SELECT count(*) FROM ${S}.loss_carry),
+  'vaults', (SELECT json_build_object(
+               'total', (SELECT count(*) FROM ${S}.vault_work),
+               'rows', coalesce(json_agg(json_build_object(
+                  'vault', r.vault_addr, 'system', r.system, 'skimMode', r.skim_mode, 'lane', r.lane,
+                  'lastOutcome', r.last_outcome, 'lastDetail', left(r.last_detail, $5::int), 'lastDoneAt', r.last_done_at,
+                  'dueAt', r.due_at, 'parkedReason', r.parked_reason, 'attempts', r.attempts, 'streaks', r.streaks)
+                  ORDER BY r.unserved DESC, r.vault_addr), '[]'::json))
+               FROM (SELECT v.vault_addr, v.system, v.skim_mode, v.lane, v.last_outcome, v.last_detail, v.last_done_at,
+                            v.due_at, v.parked_reason, v.attempts, v.streaks,
+                            (v.system = 'draining' OR (v.system = 'queue' AND v.parked_reason IS NOT NULL)) AS unserved
+                       FROM ${S}.vault_work v
+                      ORDER BY unserved DESC, v.vault_addr LIMIT $4) r),
+  'unserved', (SELECT json_build_object(
+                 'draining', count(*) FILTER (WHERE u.system = 'draining'),
+                 'parked', count(*) FILTER (WHERE u.system = 'queue' AND u.parked_reason IS NOT NULL),
+                 'vaults', coalesce((SELECT json_agg(json_build_object(
+                                       'vault', x.vault_addr, 'system', x.system, 'forMs', x.for_ms, 'from', x.since,
+                                       'parkedReason', x.parked_reason) ORDER BY x.draining DESC, x.for_ms DESC NULLS LAST, x.vault_addr)
+                                       FROM (SELECT y.vault_addr, y.system, y.parked_reason, y.system = 'draining' AS draining,
+                                                    CASE WHEN y.system = 'draining' AND isfinite(coalesce(y.system_at, y.due_at))
+                                                         THEN round(greatest(0, extract(epoch FROM t.now - coalesce(y.system_at, y.due_at)) * 1000)) END AS for_ms,
+                                                    CASE WHEN y.system <> 'draining' THEN NULL WHEN y.system_at IS NOT NULL THEN 'system_at' ELSE 'due_at' END AS since
+                                               FROM ${S}.vault_work y
+                                              WHERE y.system = 'draining' OR (y.system = 'queue' AND y.parked_reason IS NOT NULL)
+                                              ORDER BY draining DESC, for_ms DESC NULLS LAST, y.vault_addr LIMIT $4) x), '[]'::json))
+                 FROM ${S}.vault_work u WHERE u.system = 'draining' OR (u.system = 'queue' AND u.parked_reason IS NOT NULL))
 ) AS snapshot
 FROM t`;
 
@@ -311,6 +382,71 @@ function schedulerRow(value: unknown): FleetSchedulerRow | null {
     boardDirtyAt: str(row["boardDirtyAt"]),
     discoveryOkAt: str(row["discoveryOkAt"]),
     discoveryAgeMs: num(row["discoveryAgeMs"]),
+  };
+}
+
+/** A base58 account address: the only key a settle retry is served under. */
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** A whole number of zero or more, as worker-job's readStreaks counts: anything else is 0. */
+const whole = (value: unknown): number => {
+  const n = num(value);
+  return n !== null && Number.isSafeInteger(n) && n >= 0 ? n : 0;
+};
+
+/** vault_work.streaks, read as VaultStreaks: the four keys and nothing else, and a count that is not one is 0. */
+export function vaultStreaksOf(value: unknown): VaultStreaks {
+  const raw = obj(value);
+  const settleRetries: Record<string, number> = {};
+  for (const [wallet, n] of Object.entries(obj(raw["settleRetries"]))) {
+    const retries = whole(n);
+    if (BASE58_ADDRESS.test(wallet) && retries > 0) settleRetries[wallet] = retries;
+  }
+  return { settleRetries, investFailed: whole(raw["investFailed"]), investRefused: whole(raw["investRefused"]), wrapShort: whole(raw["wrapShort"]) };
+}
+
+/**
+ * A last_detail as served: at most VAULT_DETAIL_CHARS (the statement already
+ * cut it), through this process's redactor and the byte-run net
+ * (scrubbedForExport), or the fixed marker when it does not pass.
+ */
+export function vaultDetailOf(value: unknown): string | null {
+  const text = str(value);
+  if (text === null) return null;
+  return scrubbedForExport(text.slice(0, VAULT_DETAIL_CHARS)) ?? VAULT_DETAIL_WITHHELD;
+}
+
+function vaultRow(value: unknown): FleetVaultRow | null {
+  const row = obj(value);
+  const vault = str(row["vault"]);
+  if (vault === null) return null;
+  return {
+    vault,
+    system: str(row["system"]) ?? "unknown",
+    skimMode: num(row["skimMode"]),
+    lane: str(row["lane"]) ?? "unknown",
+    lastOutcome: str(row["lastOutcome"]),
+    lastDetail: vaultDetailOf(row["lastDetail"]),
+    lastDoneAt: str(row["lastDoneAt"]),
+    dueAt: str(row["dueAt"]),
+    parkedReason: str(row["parkedReason"]),
+    attempts: count(row["attempts"]),
+    streaks: vaultStreaksOf(row["streaks"]),
+  };
+}
+
+function unservedOf(value: unknown): FleetUnserved {
+  const root = obj(value);
+  return {
+    draining: count(root["draining"]),
+    parked: count(root["parked"]),
+    vaults: arr(root["vaults"]).flatMap((entry): UnservedVault[] => {
+      const row = obj(entry);
+      const vault = str(row["vault"]);
+      if (vault === null) return [];
+      const from = row["from"] === "system_at" || row["from"] === "due_at" ? row["from"] : null;
+      return [{ vault, system: str(row["system"]) ?? "unknown", forMs: num(row["forMs"]), from, parkedReason: str(row["parkedReason"]) }];
+    }),
   };
 }
 
@@ -392,6 +528,11 @@ export function parseFleetSnapshot(raw: unknown): FleetSnapshot {
     const fence = num(row["fence"]);
     return vault === null || fence === null ? [] : [{ vault, fence, attempts: count(row["attempts"]), lapsed: row["lapsed"] === true }];
   });
+  const vaultsBlock = obj(root["vaults"]);
+  const vaults = arr(vaultsBlock["rows"]).flatMap((value) => {
+    const row = vaultRow(value);
+    return row === null ? [] : [row];
+  });
   return {
     now: str(root["now"]) ?? "",
     scheduler: schedulerRow(root["fleet"]),
@@ -403,6 +544,9 @@ export function parseFleetSnapshot(raw: unknown): FleetSnapshot {
     sends,
     carries: { pending: count(root["carries"]) },
     expiries: expiriesOf(expiryRows),
+    vaults,
+    vaultsTruncated: Math.max(0, count(vaultsBlock["total"]) - vaults.length),
+    unserved: unservedOf(root["unserved"]),
   };
 }
 
@@ -442,7 +586,13 @@ export class PgFleetStore implements FleetBellStore, FleetStatusSource {
   }
 
   async read(): Promise<FleetSnapshot> {
-    const result = await this.#db.query<{ snapshot: unknown }>(FLEET_SNAPSHOT_SQL, [JOB_CEILING_MS / 1000, PARKED_LISTED, ECHO_DEADLINE_MS / 1000]);
+    const result = await this.#db.query<{ snapshot: unknown }>(FLEET_SNAPSHOT_SQL, [
+      JOB_CEILING_MS / 1000,
+      PARKED_LISTED,
+      ECHO_DEADLINE_MS / 1000,
+      VAULTS_LISTED,
+      VAULT_DETAIL_CHARS,
+    ]);
     return parseFleetSnapshot(result.rows[0]?.snapshot);
   }
 }

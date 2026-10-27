@@ -1,8 +1,9 @@
 // The dispatcher's five alerts (src/fleet-alerts.ts): every threshold the ADR
 // sets (§6.3), pinned on the pure rules, and who raises what on the evaluator.
 
+import { Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
-import type { Alert } from "../src/alerts.js";
+import { createAlerter, type Alert } from "../src/alerts.js";
 import {
   FENCE_REJECT_ALERT_KEY,
   FleetAlerts,
@@ -13,13 +14,18 @@ import {
   QUEUE_LAG_ALERT_KEY,
   SCHEDULER_STALE_AFTER_MS,
   SCHEDULER_STALE_ALERT_KEY,
+  SchedulerStaleWatch,
+  VAULT_UNSERVED_CRITICAL_MS,
+  VAULT_UNSERVED_WARN_MS,
   fenceRejectAlert,
   leaseExpiredAlert,
   pgSaturatedAlert,
   queueLagAlert,
   schedulerStaleAlert,
+  vaultUnservedAlert,
+  vaultUnservedKey,
 } from "../src/fleet-alerts.js";
-import type { FleetSnapshot, FleetWorkerRow } from "../src/fleet-status.js";
+import type { FleetSnapshot, FleetUnserved, FleetWorkerRow, UnservedVault } from "../src/fleet-status.js";
 
 const WINDOW = 60_000;
 const T0 = Date.parse("2026-10-12T12:00:00Z");
@@ -43,7 +49,9 @@ function worker(workerId: string, fenceRejects: number | null, fenceRejectsLastH
   };
 }
 
-function snapshot(over: Partial<{ expiries: FleetSnapshot["expiries"]; workers: FleetWorkerRow[]; oldestDueMs: number | null; due: number; tickAgeMs: number | null }> = {}): FleetSnapshot {
+function snapshot(
+  over: Partial<{ expiries: FleetSnapshot["expiries"]; workers: FleetWorkerRow[]; oldestDueMs: number | null; due: number; tickAgeMs: number | null; unserved: FleetUnserved }> = {},
+): FleetSnapshot {
   return {
     now: new Date(T0).toISOString(),
     scheduler: {
@@ -68,8 +76,22 @@ function snapshot(over: Partial<{ expiries: FleetSnapshot["expiries"]; workers: 
     sends: { open: 0, oldestOpenAgeMs: null, unechoed: 0, lastHour: [] },
     carries: { pending: 0 },
     expiries: over.expiries ?? [],
+    vaults: [],
+    vaultsTruncated: 0,
+    unserved: over.unserved ?? { draining: 0, parked: 0, vaults: [] },
   };
 }
+
+const VAULT_A = "D5J5o2gS1111111111111111111111111111111111";
+const VAULT_B = "4J3En7ug1111111111111111111111111111111111";
+const draining = (vault: string, forMs: number | null, from: UnservedVault["from"] = "due_at"): UnservedVault => ({ vault, system: "draining", forMs, from, parkedReason: null });
+const parkedRow = (vault: string): UnservedVault => ({ vault, system: "queue", forMs: null, from: null, parkedReason: "its lease lapsed 5 claims in a row" });
+/** The unserved view as FLEET_SNAPSHOT_SQL lists it: every draining row first, then the parked ones, whole unless `draining` says more. */
+const unserved = (rows: UnservedVault[], counts: Partial<{ draining: number; parked: number }> = {}): FleetUnserved => ({
+  draining: counts.draining ?? rows.filter((row) => row.system === "draining").length,
+  parked: counts.parked ?? rows.filter((row) => row.system === "queue").length,
+  vaults: rows,
+});
 
 function evaluator() {
   let now = T0;
@@ -122,6 +144,25 @@ describe("the rules, at the ADR's thresholds (§6.3)", () => {
     const never = schedulerStaleAlert({ tickAgeMs: null, upMs: SCHEDULER_STALE_AFTER_MS + 1 }).fire!;
     expect(never.severity).toBe("critical");
     expect(never.title).toBe("No dispatcher scheduler has ever ticked");
+  });
+
+  it("vault-unserved warns past 15 minutes of draining, pages past an hour, and clears on no evidence", () => {
+    expect(vaultUnservedAlert({ vault: VAULT_A, forMs: null, from: null })).toEqual({ fire: null, clear: true });
+    expect(vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_WARN_MS, from: "due_at" })).toEqual({ fire: null, clear: true });
+    const warn = vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_WARN_MS + 1, from: "due_at" }).fire!;
+    expect(warn.severity).toBe("warn");
+    expect(warn.key).toBe(`vault-unserved:${VAULT_A}`);
+    expect(warn.key).toBe(vaultUnservedKey(VAULT_A));
+    // WHO PUT IT THERE, AND WHAT TO RUN: the person reading it is the one who runs arm or release.
+    expect(warn.detail).toContain("since the scheduler enrolled it");
+    expect(warn.detail).toContain("dispatch-handover arm");
+    expect(warn.detail).toContain("dispatch-handover release");
+    expect(warn.context).toEqual({ vault: VAULT_A, forMs: VAULT_UNSERVED_WARN_MS + 1, from: "due_at" });
+    expect(vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_CRITICAL_MS, from: "system_at" }).fire?.severity).toBe("warn");
+    const page = vaultUnservedAlert({ vault: VAULT_A, forMs: VAULT_UNSERVED_CRITICAL_MS + 1, from: "system_at" }).fire!;
+    expect(page.severity).toBe("critical");
+    expect(page.detail).toContain("since a handover drained it");
+    expect([VAULT_UNSERVED_WARN_MS, VAULT_UNSERVED_CRITICAL_MS]).toEqual([15 * 60_000, 60 * 60_000]);
   });
 
   it("pg-saturated pages after 3 ticks in a row and says nothing before", () => {
@@ -222,5 +263,133 @@ describe("the evaluator", () => {
     alerts.observePools([{ total: 2, idle: 2, waiting: 0 }]);
     expect(clearedKeys).toContain(PG_SATURATED_ALERT_KEY);
     expect(alerts.status().pg?.saturatedStreak).toBe(0);
+  });
+});
+
+describe("vault-unserved on the evaluator", () => {
+  it("raises one key per draining vault while acting, escalates it at the hour, and clears it when the vault leaves draining", () => {
+    const { alerts, keys, clearedKeys } = evaluator();
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_WARN_MS - 1)]) }), { acting: true });
+    expect(keys()).toEqual([]);
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_WARN_MS + 60_000), draining(VAULT_B, 60_000)]) }), { acting: true });
+    expect(keys()).toEqual([`vault-unserved:${VAULT_A}:warn`]);
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_CRITICAL_MS + 60_000), draining(VAULT_B, 120_000)]) }), { acting: true });
+    expect(keys().at(-1)).toBe(`vault-unserved:${VAULT_A}:critical`);
+    expect(alerts.status().firing).toEqual([`vault-unserved:${VAULT_A}`]);
+    expect(alerts.status().unservedOldestMs).toBe(VAULT_UNSERVED_CRITICAL_MS + 60_000);
+    // A WAVE OF ARM MOVES A TO THE QUEUE: its row is no longer listed, and its page ends. B never paged, so nothing clears for it.
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_B, 180_000)]) }), { acting: true });
+    expect(clearedKeys.filter((key) => key.startsWith("vault-unserved"))).toEqual([`vault-unserved:${VAULT_A}`]);
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("never pages a parked queue row from here: vault-parked already did, when the reap parked it", () => {
+    const { alerts, keys } = evaluator();
+    alerts.observeSnapshot(snapshot({ unserved: unserved([parkedRow(VAULT_A), parkedRow(VAULT_B)]) }), { acting: true });
+    expect(keys()).toEqual([]);
+    expect(alerts.status().unservedOldestMs).toBeNull();
+  });
+
+  it("keeps a page standing for a vault the list left out when the list was cut at the cap, and clears it once a whole list omits it", () => {
+    const { alerts, keys, clearedKeys } = evaluator();
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_WARN_MS + 1)]) }), { acting: true });
+    expect(keys()).toEqual([`vault-unserved:${VAULT_A}:warn`]);
+    // TWO DRAINING, ONE LISTED: A may be the one left out, so its page stands.
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_B, VAULT_UNSERVED_WARN_MS + 2)], { draining: 2 }) }), { acting: true });
+    expect(clearedKeys).not.toContain(`vault-unserved:${VAULT_A}`);
+    expect(alerts.status().firing).toEqual([`vault-unserved:${VAULT_A}`, `vault-unserved:${VAULT_B}`].sort());
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_B, VAULT_UNSERVED_WARN_MS + 3)]) }), { acting: true });
+    expect(clearedKeys).toContain(`vault-unserved:${VAULT_A}`);
+    expect(alerts.status().firing).toEqual([`vault-unserved:${VAULT_B}`]);
+  });
+
+  it("clears a page when the same vault comes back drained afresh (a rollback re-stamps system_at), and a time it could not measure is no evidence", () => {
+    const { alerts, clearedKeys } = evaluator();
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_CRITICAL_MS + 1)]) }), { acting: true });
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_A, 30_000, "system_at")]) }), { acting: true });
+    expect(clearedKeys.filter((key) => key.startsWith("vault-unserved"))).toEqual([`vault-unserved:${VAULT_A}`]);
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_B, VAULT_UNSERVED_WARN_MS + 1)]) }), { acting: true });
+    alerts.observeSnapshot(snapshot({ unserved: unserved([draining(VAULT_B, null)]) }), { acting: true });
+    expect(alerts.status().firing).toEqual([]);
+  });
+
+  it("is the lock holder's only: a standby raises none, and a holder that stops acting hands every vault's page back", () => {
+    const { alerts, keys, clearedKeys } = evaluator();
+    const long = snapshot({ unserved: unserved([draining(VAULT_A, VAULT_UNSERVED_CRITICAL_MS + 1), draining(VAULT_B, VAULT_UNSERVED_WARN_MS + 1)]) });
+    alerts.observeSnapshot(long, { acting: false });
+    expect(keys()).toEqual([]);
+    // THE STANDBY STILL SHOWS WHAT IT READ: the view is the same on every replica.
+    expect(alerts.status().unservedOldestMs).toBe(VAULT_UNSERVED_CRITICAL_MS + 1);
+    alerts.observeSnapshot(long, { acting: true });
+    expect(keys().sort()).toEqual([`vault-unserved:${VAULT_A}:critical`, `vault-unserved:${VAULT_B}:warn`].sort());
+    alerts.observeSnapshot(long, { acting: false });
+    expect(clearedKeys).toEqual(expect.arrayContaining([`vault-unserved:${VAULT_A}`, `vault-unserved:${VAULT_B}`]));
+    expect(alerts.status().firing).toEqual([]);
+  });
+});
+
+describe("scheduler-stale from a worker (SchedulerStaleWatch)", () => {
+  function watch() {
+    let now = T0;
+    const fired: Alert[] = [];
+    const clearedKeys: string[] = [];
+    const watcher = new SchedulerStaleWatch({ alerter: { fire: (alert) => fired.push(alert), clear: (key) => clearedKeys.push(key) }, now: () => now });
+    return {
+      watcher,
+      fired,
+      clearedKeys,
+      at: (ms: number) => {
+        now = ms;
+      },
+    };
+  }
+
+  it("pages past the replicas' own ten minutes, says nothing while the tick is fresh, and clears once it is fresh again", () => {
+    const { watcher, fired, clearedKeys } = watch();
+    expect(watcher.observe(5_000)).toEqual({ fire: null, clear: true });
+    expect(watcher.observe(SCHEDULER_STALE_AFTER_MS)).toEqual({ fire: null, clear: true });
+    // A CLEAR WITH NOTHING RAISED IS NOT SENT: the beat is every 10 s.
+    expect([fired, clearedKeys]).toEqual([[], []]);
+    watcher.observe(SCHEDULER_STALE_AFTER_MS + 1);
+    expect(fired.map((alert) => [alert.key, alert.severity, alert.title])).toEqual([
+      [SCHEDULER_STALE_ALERT_KEY, "critical", "The dispatcher's scheduler has stopped ticking"],
+    ]);
+    expect(watcher.status()).toMatchObject({ tickAgeMs: SCHEDULER_STALE_AFTER_MS + 1, firing: true });
+    watcher.observe(20 * 60_000);
+    expect(fired).toHaveLength(2);
+    watcher.observe(30_000);
+    expect(clearedKeys).toEqual([SCHEDULER_STALE_ALERT_KEY]);
+    expect(watcher.status().firing).toBe(false);
+  });
+
+  it("judges a tick never written by its own uptime, and takes a value that is not a number for none", () => {
+    const { watcher, fired, at } = watch();
+    expect(watcher.observe(null)).toEqual({ fire: null, clear: false });
+    at(T0 + SCHEDULER_STALE_AFTER_MS + 1);
+    watcher.observe(Number.NaN);
+    expect(fired.map((alert) => alert.title)).toEqual(["No dispatcher scheduler has ever ticked"]);
+    expect(watcher.status().tickAgeMs).toBeNull();
+  });
+
+  it("reaches the chat titled as the worker's, critical so it leaves the box, and repeats only on the alerter's window", () => {
+    const lines: string[] = [];
+    const posted: string[] = [];
+    let now = T0;
+    const alerter = createAlerter({
+      webhookUrl: new Secret("https://alerts.example.test/hook", "alertWebhook"),
+      minSeverity: "critical",
+      titlePrefix: "[worker] ",
+      log: (_severity, line) => lines.push(line),
+      post: async (_url, body) => {
+        posted.push(body);
+      },
+      now: () => now,
+    });
+    const watcher = new SchedulerStaleWatch({ alerter, now: () => now });
+    watcher.observe(SCHEDULER_STALE_AFTER_MS + 60_000);
+    now += 10_000;
+    watcher.observe(SCHEDULER_STALE_AFTER_MS + 70_000);
+    expect(lines).toEqual([expect.stringMatching(/^\[CRITICAL\] \[worker\] The dispatcher's scheduler has stopped ticking — fleet\.tick_at is 11 min old/)]);
+    expect(posted).toHaveLength(1);
   });
 });

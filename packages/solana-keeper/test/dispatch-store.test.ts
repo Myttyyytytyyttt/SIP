@@ -626,6 +626,32 @@ describe("the merge's wiring, over a scripted client: the quota hand-out, worker
     expect(db.sent).toEqual([{ text: WORKER_BEAT_SQL, values: ["w", 2, JSON.stringify({ jobsLast10Min: 5 })] }]);
   });
 
+  it("reads the scheduler tick's age in the same beat, hands it to onTick from a beat that answered, and keeps the quota row's shape", async () => {
+    expect(WORKER_BEAT_SQL).toContain("(SELECT round(extract(epoch FROM clock_timestamp() - f.tick_at) * 1000) FROM sip_solana.fleet f WHERE f.id) AS tick_age_ms");
+    const ticks: (number | null)[] = [];
+    const answered = scripted(() => ({ rows: [{ rps_quota: 8, jup_quota: null, quota_age_ms: 1_000, tick_age_ms: "660000" }] }));
+    const store = new DispatchStore(answered.pool, "w");
+    expect(await store.quotaSource(() => ({ busy: 0 }), (age) => ticks.push(age)).readQuota()).toEqual({ rpsQuota: 8, jupQuotaPerMinute: null, ageMs: 1_000 });
+    expect(await store.beatProcess(0)).toEqual({ rpsQuota: 8, jupQuotaPerMinute: null, ageMs: 1_000 });
+    // NO TICK EVER WRITTEN: null, told as such.
+    const never = scripted(() => ({ rows: [{ rps_quota: null, jup_quota: null, quota_age_ms: null, tick_age_ms: null }] }));
+    await new DispatchStore(never.pool, "w").quotaSource(() => ({ busy: 0 }), (age) => ticks.push(age)).readQuota();
+    // A ROW THAT IS GONE, OR A BEAT THAT FAILED, TELLS IT NOTHING.
+    const gone = scripted(() => ({ rows: [] }));
+    expect(await new DispatchStore(gone.pool, "w").quotaSource(() => ({ busy: 0 }), (age) => ticks.push(age)).readQuota()).toBeNull();
+    const failing = scripted(() => new Error("Connection terminated unexpectedly"));
+    await expect(new DispatchStore(failing.pool, "w").quotaSource(() => ({ busy: 0 }), (age) => ticks.push(age)).readQuota()).rejects.toThrow();
+    expect(ticks).toEqual([660_000, null]);
+    // AN onTick THAT THROWS NEVER COSTS THE BEAT ITS QUOTAS.
+    const throwing = store.quotaSource(
+      () => ({ busy: 0 }),
+      () => {
+        throw new Error("an alerter bug");
+      },
+    );
+    expect(await throwing.readQuota()).toEqual({ rpsQuota: 8, jupQuotaPerMinute: null, ageMs: 1_000 });
+  });
+
   it("hands out fleetQuotas over the workers alive now, writes exactly those, and divides among all of them when more than r_max are alive", async () => {
     const live = (ids: string[]) =>
       scripted((text) => (text === LIVE_WORKERS_SQL ? { rows: ids.map((worker_id) => ({ worker_id })) } : { rows: ids.map((worker_id) => ({ worker_id })) }));

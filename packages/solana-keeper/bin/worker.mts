@@ -36,7 +36,10 @@
 // check at boot and every AUTHORIZATION_KEY_RECHECK_MS. They go to the keeper's
 // SIP_SOLANA_ALERT_WEBHOOK, titled "[worker] " (a shadow's "[worker, shadow] ").
 // The fleet's own alerts (lease-expired, fence-reject, queue-lag,
-// scheduler-stale, pg-saturated) stay the scheduler's (src/fleet-alerts.ts).
+// vault-unserved, pg-saturated) stay the scheduler's (src/fleet-alerts.ts) —
+// all but scheduler-stale, which a worker raises too, from the tick age its
+// beat reads with its quotas (SchedulerStaleWatch): with both scheduler
+// replicas gone, the workers are the only dispatcher processes left to say so.
 
 import "../src/console-bridge.js";
 import { randomUUID } from "node:crypto";
@@ -88,6 +91,7 @@ import { loadLocalSigners } from "../src/signers.js";
 import { keeperEnvOf, readWorkerSettings, workerRefusals, type WorkerSettings } from "../src/worker-config.js";
 import { jobLogFields, runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
 import { jobAlerts } from "../src/worker-alerts.js";
+import { SchedulerStaleWatch } from "../src/fleet-alerts.js";
 import { WorkerLoop } from "../src/worker-loop.js";
 
 const log = createKeeperLogger();
@@ -167,6 +171,8 @@ const alerter = createAlerter({
 if (world === "live" && config.alertWebhook === null) {
   log.warn("armed with no alert destination: a failed settle or buy on a queue vault reaches only this log", fields({}));
 }
+/** scheduler-stale from this side (src/fleet-alerts.ts): fed by every beat that answered, never by one that failed. */
+const schedulerWatch = new SchedulerStaleWatch({ alerter });
 
 // ── the store: two connections, the replica's whole budget (ADR §3.11) ───────
 const pool = createDispatchPool(config.databaseUrl!, "worker", workerId.slice(0, 60), (message, extra) => log.warn(message, fields(extra)));
@@ -385,7 +391,12 @@ const loop = new WorkerLoop({
     return end;
   },
   beat: async () => {
-    await follower.refresh(store.quotaSource(() => ({ busy: loop.busy, stats: loop.stats() })));
+    await follower.refresh(
+      store.quotaSource(
+        () => ({ busy: loop.busy, stats: loop.stats() }),
+        (tickAgeMs) => void schedulerWatch.observe(tickAgeMs),
+      ),
+    );
     await collector.flush(usageFeed);
   },
 });
