@@ -349,7 +349,7 @@ CREATE TABLE IF NOT EXISTS sip_solana.rpc_usage (
 -- 'queue' the scheduler enrols a new vault as 'draining', never straight onto the
 -- queue, and the legacy keepers take a vault with no row for not theirs; the
 -- vault then reaches the queue through the same two-step handover as any other
--- (src/dispatch-select.ts ENROL_VAULTS_SQL, src/handover.ts), so a legacy keeper
+-- (src/scheduler-pg.ts ENSURE_VAULTS_SQL, src/handover.ts), so a legacy keeper
 -- that read the flag before it flipped can never act on a vault a worker holds.
 CREATE TABLE IF NOT EXISTS sip_solana.fleet (
   id               boolean     PRIMARY KEY DEFAULT true CHECK (id),

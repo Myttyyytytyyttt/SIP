@@ -21,7 +21,7 @@ import "../src/console-bridge.js";
 import { Connection } from "@solana/web3.js";
 import pg from "pg";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
-import { Handover, type ChainHeights } from "../src/handover.js";
+import { Handover, readChainHeights, type ChainHeights } from "../src/handover.js";
 import { HANDOVER_USAGE, parseHandoverArgs, runHandoverCommand, type HandoverCommand } from "../src/handover-cli.js";
 import { createKeeperLogger } from "../src/keeper-log.js";
 import { sslFor } from "../src/read-model.js";
@@ -56,15 +56,14 @@ const rpcUrl = (process.env["SIP_SOLANA_RPC_URLS"] ?? "")
   .find((entry) => entry !== "");
 if (rpcUrl !== undefined) sharedRedactor.register(rpcUrl, "rpcUrl:0");
 
-/** Read only, and only for the commands that wait on the chain. */
+/**
+ * Read only, and only for the commands that wait on the chain: processed first,
+ * then finalized, by the one reader the scheduler's auto-arm uses too
+ * (readChainHeights, src/handover.ts).
+ */
 async function heights(): Promise<ChainHeights> {
   if (rpcUrl === undefined) throw new Error("SIP_SOLANA_RPC_URLS is not set: arm and release read the chain's block height");
-  const connection = new Connection(rpcUrl, { commitment: "finalized" });
-  // PROCESSED FIRST: it is the height a step records, and it must be at or above
-  // any height a legacy keeper fetched a blockhash at before its receipt.
-  const processed = BigInt(await connection.getBlockHeight("processed"));
-  const finalized = BigInt(await connection.getBlockHeight("finalized"));
-  return { processed, finalized };
+  return readChainHeights(new Connection(rpcUrl, { commitment: "finalized" }));
 }
 
 const pool = new pg.Pool({

@@ -23,6 +23,10 @@
 //     read every 15 s on both replicas, with the five fleet alerts
 //     (src/fleet-alerts.ts) raised by the holder;
 //   * /leaderboard, debounced, on both replicas (src/scheduler-board.ts);
+//   * the auto-arm (src/auto-arm.ts), run by the tick of the holder under `on`
+//     when SIP_SOLANA_AUTO_ARM=on: the vaults it enrolled as 'draining' armed by
+//     the handover's own `arm` (src/handover.ts), on the pool's connection,
+//     with the chain's two heights read through the budgeted Connection;
 //   * the process's own `worker` row (kind scheduler), its rpc_usage flushed
 //     on the same 10 s beat, and its RPC bucket at the scheduler's share of
 //     the plan (ADR §3.9: 8 of the fleet's 40 requests a second, lane `sched`);
@@ -43,6 +47,7 @@ import * as anchor from "@coral-xyz/anchor";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { sharedRedactor, summarizeUpstreamError } from "@sip/solana-log";
 import { createAlerter } from "../src/alerts.js";
+import { AutoArm, PgAutoArmStore } from "../src/auto-arm.js";
 import { ConfigError } from "../src/config.js";
 import { CreditGovernor, RpcUsageCollector } from "../src/credit-governor.js";
 import { DispatchStore, HEARTBEAT_EVERY_MS, PgRpcUsageFeed, createDispatchPool } from "../src/dispatch-store.js";
@@ -58,6 +63,7 @@ import {
   samplePool,
   type FleetStatusView,
 } from "../src/fleet-status.js";
+import { Handover, readChainHeights } from "../src/handover.js";
 import { WebhookSync, createHeliusWebhookClient } from "../src/helius-webhooks.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
 import { createKeeperLogger, scrubbedForExport } from "../src/keeper-log.js";
@@ -69,7 +75,7 @@ import { fleetQuotas } from "../src/rpc-quota.js";
 import { heliusRestFetch } from "../src/rpc-usage.js";
 import { BOARD_TIMER_MS, FleetBoard } from "../src/scheduler-board.js";
 import { createSchedulerChain } from "../src/scheduler-chain.js";
-import { loadSchedulerConfig, readDispatchMode, type SchedulerConfig } from "../src/scheduler-config.js";
+import { autoArmRuns, loadSchedulerConfig, readDispatchMode, type SchedulerConfig } from "../src/scheduler-config.js";
 import { PgSchedulerLock, PgSchedulerStore, missingSchedulerColumns, schedulerLockClient } from "../src/scheduler-pg.js";
 import { SCHEDULER_LOCK_NAME, Scheduler, type SchedulerWebhook } from "../src/scheduler.js";
 import { advisoryKeyFor } from "../src/singleton.js";
@@ -262,6 +268,17 @@ const lock = new PgSchedulerLock({
   key: advisoryKeyFor(SCHEDULER_LOCK_NAME),
   onLost: (detail) => log.warn("the scheduler lock's session failed", { detail }),
 });
+// THE AUTO-ARM: always built, so /status says whether it runs; it acts only
+// under `on` with SIP_SOLANA_AUTO_ARM=on (autoArmRuns), and only in the holder's tick.
+const autoArm = new AutoArm({
+  enabled: autoArmRuns(config),
+  legacyRoles: config.legacyRoles,
+  store: new PgAutoArmStore(pool),
+  handover: new Handover(pool),
+  // READ ONLY, processed first — the operator's command's own reader — through the budgeted pool.
+  heights: () => readChainHeights(connection),
+  log: (level, message, fields) => log[level](message, fields ?? {}),
+});
 const governor = new CreditGovernor({
   feed: usageFeed,
   planCreditsPerMonth: config.planCreditsPerMonth,
@@ -288,6 +305,7 @@ const scheduler = new Scheduler({
   progress,
   // SIP_SOLANA_PRICE_TAPE=on: one SOL/USD sample a tick into sip_solana.sol_price_tape. Off: none.
   tape: config.priceTape ? new TapeSampler(new PgPriceTape(pool)) : null,
+  autoArm,
 });
 
 const reader = new FleetStatusReader({
@@ -383,6 +401,9 @@ log.info("scheduler starting", {
   doorbell: base.doorbellSecret === null ? "off — no bell can reach this replica" : "on — the receiver writes bells to Postgres",
   webhook: webhookSync === null ? "not managed here" : "managed by the lock holder while fleet.webhook_owner is 'scheduler'",
   priceTape: config.priceTape ? "on — the lock holder samples SOL/USD into sip_solana.sol_price_tape every tick" : "off",
+  autoArm: autoArm.enabled
+    ? `on — the lock holder arms the vaults it enrolled as draining; acting receipts required from: ${config.legacyRoles.length === 0 ? "none (legacy keepers retired)" : config.legacyRoles.join(", ")}`
+    : "off — a vault enrolled as draining waits for dispatch-handover arm",
 });
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
@@ -415,6 +436,7 @@ const runTick = async (): Promise<void> => {
       discovery: report.discovery,
       fullPass: report.fullReason,
       lanes: report.lanes,
+      autoArmed: report.autoArmed.length,
       due: report.marked.length,
       completedIdle: report.completedIdle.length,
       leftBusy: report.leftBusy,

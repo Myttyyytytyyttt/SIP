@@ -31,8 +31,9 @@ import {
   type LegacyView,
   type NotLegacy,
 } from "../src/dispatch-select.js";
-import { ENROL_VAULTS_SQL } from "../src/handover.js";
+import { ENSURE_VAULTS_SQL } from "../src/scheduler-pg.js";
 import { HANDOVER_USAGE, parseHandoverArgs } from "../src/handover-cli.js";
+import { parseLegacyRoles } from "../src/handover.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { KEEPER_ROLES, roleProfile, settlesMode } from "../src/role-registry.js";
 
@@ -154,13 +155,13 @@ describe("the rule: vault_work.system, and a read that failed acts on nothing", 
       .join("\n");
     expect(selectCode).not.toMatch(/skim_?mode|skimMode/i);
     // THE QUEUE'S SIDE: a claim takes a vault by its system; the scheduler's
-    // enrolment rewrites only the mode byte of a row it already has.
+    // enrolment (ENSURE_VAULTS_SQL) never touches a row it already has, and
+    // writes no mode byte into the one it creates.
     const claimFilter = CLAIM_SQL.slice(CLAIM_SQL.indexOf("WHERE"), CLAIM_SQL.indexOf("ORDER BY"));
     expect(claimFilter).toContain("system = 'queue'");
     expect(claimFilter).not.toMatch(/skim_mode/);
-    const onConflict = ENROL_VAULTS_SQL.slice(ENROL_VAULTS_SQL.indexOf("ON CONFLICT"));
-    expect(onConflict).toContain("DO UPDATE SET skim_mode = EXCLUDED.skim_mode");
-    expect(onConflict).not.toMatch(/system\s*=/);
+    expect(ENSURE_VAULTS_SQL.slice(ENSURE_VAULTS_SQL.indexOf("ON CONFLICT"))).toMatch(/^ON CONFLICT \(vault_addr\) DO NOTHING/);
+    expect(ENSURE_VAULTS_SQL).not.toMatch(/skim_mode/);
   });
 
   it("names, on /status, what the keeper did not do and why", () => {
@@ -369,9 +370,10 @@ describe("dispatch-handover: the command line", () => {
   const vault = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
 
   it("parses every command, and arm's roles and drill flag", () => {
-    expect(parseHandoverArgs(["status"])).toEqual({ kind: "status", vault: null });
-    expect(parseHandoverArgs(["status", vault])).toEqual({ kind: "status", vault });
-    for (const kind of ["drain", "rollback", "release"] as const) expect(parseHandoverArgs([kind, vault])).toEqual({ kind, vault });
+    expect(parseHandoverArgs(["status"])).toEqual({ kind: "status", vault: null, all: false });
+    expect(parseHandoverArgs(["status", vault])).toEqual({ kind: "status", vault, all: false });
+    expect(parseHandoverArgs(["status", "--all"])).toEqual({ kind: "status", vault: null, all: true });
+    for (const kind of ["drain", "rollback", "release", "unpark"] as const) expect(parseHandoverArgs([kind, vault])).toEqual({ kind, vault });
     expect(parseHandoverArgs(["arm", vault])).toEqual({ kind: "arm", vault, requiredRoles: KEEPER_ROLES, allowDry: false });
     expect(parseHandoverArgs(["arm", "--all", "--roles=profit", "--allow-dry"])).toEqual({ kind: "arm", vault: "all", requiredRoles: ["profit"], allowDry: true });
     expect(parseHandoverArgs(["arm", "--all", "--roles=none"])).toEqual({ kind: "arm", vault: "all", requiredRoles: [], allowDry: false });
@@ -379,6 +381,16 @@ describe("dispatch-handover: the command line", () => {
     expect(parseHandoverArgs(["gone", "--stale"])).toEqual({ kind: "gone", processIds: "stale" });
     expect(parseHandoverArgs(["new-vaults", "queue"])).toEqual({ kind: "new-vaults", system: "queue" });
     expect(HANDOVER_USAGE).toContain("dispatch-handover arm <vault>|--all [--roles=profit,volume] [--allow-dry]");
+    expect(HANDOVER_USAGE).toContain("dispatch-handover status [vault]|--all");
+    expect(HANDOVER_USAGE).toContain("dispatch-handover unpark <vault>");
+  });
+
+  it("--roles= and SIP_SOLANA_LEGACY_ROLES are one grammar: roles each once, or none spelled out", () => {
+    expect(parseLegacyRoles("profit,volume")).toEqual(["profit", "volume"]);
+    expect(parseLegacyRoles(" volume ")).toEqual(["volume"]);
+    expect(parseLegacyRoles("none")).toEqual([]);
+    for (const value of ["", "none,profit", "profit,profit", "worker", "Profit", "profit,", ","]) expect(parseLegacyRoles(value), value).toBeNull();
+    expect(parseHandoverArgs(["arm", vault, "--roles=volume"])).toMatchObject({ requiredRoles: ["volume"] });
   });
 
   it("refuses before touching anything: an address that is not one, an unknown command or flag, a missing or extra argument", () => {
@@ -400,6 +412,16 @@ describe("dispatch-handover: the command line", () => {
       ["gone"],
       ["gone", "a", "--stale"],
       ["new-vaults", "draining"],
+      // status --all lists every vault; with one named it is refused, not narrowed.
+      ["status", "--all", vault],
+      ["status", vault, "--all"],
+      ["status", "--every"],
+      ["status", vault, vault],
+      ["unpark"],
+      ["unpark", "not-a-vault"],
+      ["unpark", `${vault}x`],
+      ["unpark", vault, vault],
+      ["unpark", vault, "--all"],
     ];
     for (const argv of refused) expect(() => parseHandoverArgs(argv), argv.join(" ")).toThrow();
   });

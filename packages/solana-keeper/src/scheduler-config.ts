@@ -42,7 +42,21 @@
 //     Pyth's SOL/USD price into sip_solana.sol_price_tape once a tick, from the
 //     tick's first request (src/price-tape.ts, ADR §5.2.3). The per-trade modes'
 //     round-up prices from it; switched on before any per-trade vault is served,
-//     so the tape holds history by the time one is (ADR §5.7 U1).
+//     so the tape holds history by the time one is (ADR §5.7 U1);
+//   * SIP_SOLANA_AUTO_ARM — off (unset) or on: whether the lock holder, under
+//     SIP_SOLANA_DISPATCH=on only, arms the vaults it enrolled itself as
+//     'draining' (src/auto-arm.ts) — the same `arm` an operator runs, receipts
+//     and 150 blocks included, on rows nobody has touched since. Off, a new vault
+//     enrolled under new_vault_system = 'queue' waits for `dispatch-handover arm`;
+//     on under `shadow`, it is said in a warning and does nothing;
+//   * SIP_SOLANA_LEGACY_ROLES — which legacy roles must still hold an ACTING
+//     receipt before the auto-arm arms anything: unset is every role (the rule
+//     `arm` has always had), else a comma-separated list of profit and volume,
+//     each once, or `none` — the legacy keepers are retired (stopped, not
+//     deleted). `none` lifts only the role rule: every legacy_process row not
+//     marked gone must still have read the vault as not its own, so a legacy
+//     keeper brought back with SIP_SOLANA_DISPATCH=on holds every arm until it
+//     has. Set while the auto-arm is off, a warning says nothing reads it.
 //
 // SIP_SOLANA_CUTS ON A SCHEDULER names the scheduler's cuts: `gpa-v2` (C6, its
 // listing) and `lamports-filter` (C7, its batch read). Every legacy token is
@@ -55,7 +69,9 @@ import { sharedRedactor, type Redactor } from "@sip/solana-log";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, shape, type KeeperConfig } from "./config.js";
 import { CUT_TOKENS, DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_CREDITS_MONTH } from "./credit-governor.js";
+import { parseLegacyRoles } from "./handover.js";
 import { JUPITER_MAX_CALLS_PER_MINUTE } from "./jupiter-pacer.js";
+import { KEEPER_ROLES, type KeeperRole } from "./role-registry.js";
 import { HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS, SCHEDULER_RPS } from "./rpc-quota.js";
 import { JUPITER_KEYLESS_CALLS_PER_MINUTE } from "./sweep-cost.js";
 
@@ -74,7 +90,15 @@ export type SchedulerCutToken = (typeof SCHEDULER_CUT_TOKENS)[number];
 export const SCHEDULER_ACCEPTED_TOKENS: readonly string[] = [...CUT_TOKENS, "lamports-filter"];
 
 /** The scheduler's own variables, which the legacy keeper does not read. */
-export const SCHEDULER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_PLAN_RPS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_CREDITS_MONTH", "SIP_SOLANA_PRICE_TAPE"] as const;
+export const SCHEDULER_VARS = [
+  "SIP_SOLANA_DISPATCH",
+  "SIP_SOLANA_PLAN_RPS",
+  "SIP_SOLANA_WORKERS_MAX",
+  "SIP_SOLANA_PLAN_CREDITS_MONTH",
+  "SIP_SOLANA_PRICE_TAPE",
+  "SIP_SOLANA_AUTO_ARM",
+  "SIP_SOLANA_LEGACY_ROLES",
+] as const;
 
 /** Present on a scheduler, these refuse to start: it holds no key and arms nothing. */
 export const SCHEDULER_REFUSED_VARS = [
@@ -111,6 +135,10 @@ export interface SchedulerConfig {
   readonly jupiterCallsPerMinute: number;
   /** SIP_SOLANA_PRICE_TAPE: whether the lock holder samples the per-trade price tape. Off when unset. */
   readonly priceTape: boolean;
+  /** SIP_SOLANA_AUTO_ARM, as written: on runs the step only under SIP_SOLANA_DISPATCH=on (autoArmRuns). Off when unset. */
+  readonly autoArm: boolean;
+  /** SIP_SOLANA_LEGACY_ROLES: the roles whose acting receipt the auto-arm requires. Every role when unset; none is []. */
+  readonly legacyRoles: readonly KeeperRole[];
   /** Already scrubbed. */
   readonly warnings: readonly string[];
 }
@@ -121,6 +149,37 @@ export function readPriceTape(raw: string | undefined): { readonly on: boolean }
   if (value === undefined || value === "" || value === "off") return { on: false };
   if (value === "on") return { on: true };
   return { problem: `SIP_SOLANA_PRICE_TAPE must be off or on (unset is off); it holds ${shape(value)}.` };
+}
+
+/** SIP_SOLANA_AUTO_ARM, strictly: unset or "off" is off, "on" is on, anything else refuses to start. */
+export function readAutoArm(raw: string | undefined): { readonly on: boolean } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "" || value === "off") return { on: false };
+  if (value === "on") return { on: true };
+  return { problem: `SIP_SOLANA_AUTO_ARM must be off or on (unset is off); it holds ${shape(value)}.` };
+}
+
+/**
+ * SIP_SOLANA_LEGACY_ROLES, strictly: unset is every legacy role (KEEPER_ROLES,
+ * `arm`'s own default); otherwise parseLegacyRoles's grammar (src/handover.ts) —
+ * a comma-separated list of roles, each once, or `none`. Anything else refuses
+ * to start, by shape and never by value.
+ */
+export function readLegacyRoles(raw: string | undefined): { readonly roles: readonly KeeperRole[] } | { readonly problem: string } {
+  const value = raw?.trim();
+  if (value === undefined || value === "") return { roles: KEEPER_ROLES };
+  const roles = parseLegacyRoles(value);
+  if (roles === null) {
+    return {
+      problem: `SIP_SOLANA_LEGACY_ROLES must be a comma-separated list of ${KEEPER_ROLES.join(", ")}, each once, or none (unset is every role); it holds ${shape(value)}.`,
+    };
+  }
+  return { roles };
+}
+
+/** Whether the auto-arm step runs: SIP_SOLANA_AUTO_ARM=on, and only under SIP_SOLANA_DISPATCH=on. */
+export function autoArmRuns(config: Pick<SchedulerConfig, "autoArm" | "dispatch">): boolean {
+  return config.autoArm && config.dispatch === "on";
 }
 
 /** SIP_SOLANA_CUTS on a scheduler: readCuts's rules (src/cuts.ts) over the scheduler's accepted list. */
@@ -211,6 +270,18 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
   const tapeRead = readPriceTape(env["SIP_SOLANA_PRICE_TAPE"]);
   if ("problem" in tapeRead) problems.push(tapeRead.problem);
   const priceTape = "on" in tapeRead && tapeRead.on;
+  const autoArmRead = readAutoArm(env["SIP_SOLANA_AUTO_ARM"]);
+  if ("problem" in autoArmRead) problems.push(autoArmRead.problem);
+  const autoArm = "on" in autoArmRead && autoArmRead.on;
+  const rolesRead = readLegacyRoles(env["SIP_SOLANA_LEGACY_ROLES"]);
+  if ("problem" in rolesRead) problems.push(rolesRead.problem);
+  const legacyRoles = "roles" in rolesRead ? rolesRead.roles : KEEPER_ROLES;
+  if (autoArm && dispatch === "shadow") {
+    warnings.push("SIP_SOLANA_AUTO_ARM is on under SIP_SOLANA_DISPATCH=shadow: a shadow scheduler arms nothing; it runs only under on.");
+  }
+  if (!autoArm && (env["SIP_SOLANA_LEGACY_ROLES"]?.trim() ?? "") !== "") {
+    warnings.push("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it.");
+  }
   const jupiterCallsPerMinute = readCount(
     env,
     "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE",
@@ -254,6 +325,8 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
     planCreditsPerMonth,
     jupiterCallsPerMinute,
     priceTape,
+    autoArm,
+    legacyRoles: Object.freeze([...legacyRoles]),
     warnings: Object.freeze(warnings.map(scrub)),
   });
 }

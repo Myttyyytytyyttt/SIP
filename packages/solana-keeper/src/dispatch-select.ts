@@ -40,8 +40,9 @@
 //
 // A VAULT WITH NO ROW is what fleet.new_vault_system says (plan P3a design detail
 // 3): 'legacy' until P3d, and then not this keeper's (`unenrolled`). Under
-// 'queue' the scheduler enrols new vaults as 'draining' (src/handover.ts,
-// ENROL_VAULTS_SQL), so a new vault reaches the queue by the same handover as any.
+// 'queue' the scheduler enrols new vaults as 'draining' (src/scheduler-pg.ts,
+// ENSURE_VAULTS_SQL), so a new vault reaches the queue by the same handover as
+// any — `arm`, run by an operator or by the scheduler itself (src/auto-arm.ts).
 //
 // THE CARRY LEFT IN MEMORY. A PROFIT link's loss carry lives in this process's
 // memory when SIP_SOLANA_CARRY_STORE is off — and under `dual` when its Postgres

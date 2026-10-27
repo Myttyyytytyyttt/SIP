@@ -57,13 +57,27 @@
 // NO PUSH WHILE A HANDOVER IS OPEN (ADR §6.1 rule 5): a push restarts every
 // keeper service, and a new container is a new row the open handover must see.
 //
-// DARK. Only bin/dispatch-handover.mts loads this file (an operator's command,
-// never started by production; test/dispatch-dark.test.ts), and the scheduler
-// will, for ENROL_VAULTS_SQL. Every statement is on the database's clock.
+// THE SCHEDULER'S OWN ENROLMENTS ARE ARMED BY THE SCHEDULER, AND NOTHING ELSE
+// IS (src/auto-arm.ts, SIP_SOLANA_AUTO_ARM). Under new_vault_system = 'queue'
+// the scheduler enrols a new vault as 'draining' (ENSURE_VAULTS_SQL,
+// src/scheduler-pg.ts) and, with the variable on, calls `arm` on it each tick
+// until it moves — the same `arm`, receipts and 150 blocks included, with one
+// more refusal (`enrolledOnly`): the row must still be exactly as the
+// enrolment left it (AUTO_ARMABLE_SQL), checked under the row's lock. Every
+// step here stamps system_at — drain, the move of `arm`, rollback, release —
+// and ENSURE_VAULTS_SQL does not, so a vault an operator drained, rolled back
+// or released is never armed by the scheduler: its handover is the operator's
+// to finish. A claim raises the fence and a lease sets the holder, so a vault a
+// worker ever took is not one either.
+//
+// DARK. Only the dispatcher's entry points load this file: bin/dispatch-handover.mts
+// (an operator's command, never started by production) and bin/scheduler.mts,
+// for the auto-arm step and nothing else (test/dispatch-dark.test.ts). Every
+// statement is on the database's clock.
 
 import { READ_MODEL_SCHEMA } from "./read-model.js";
 import type { NewVaultSystem, VaultSystem } from "./dispatch-select.js";
-import { KEEPER_ROLES, roleCarriesLosses, type KeeperRole } from "./role-registry.js";
+import { KEEPER_ROLES, isKeeperRole, roleCarriesLosses, type KeeperRole } from "./role-registry.js";
 
 const S = READ_MODEL_SCHEMA;
 
@@ -85,20 +99,74 @@ export const LEGACY_READ_FRESH_MS = 15 * 60_000;
 export const RELEASE_JOB_CEILING_MINUTES = 6;
 
 /**
- * THE SCHEDULER'S ENROLMENT of the vaults its discovery found: $1 vault
- * addresses, $2 their mode bytes. A new vault is 'legacy' while
- * fleet.new_vault_system is 'legacy', and 'draining' — never 'queue' — once it
- * is 'queue', so it reaches the queue through `arm` like any other. AN EXISTING
- * ROW ONLY EVER HAS ITS MODE BYTE REWRITTEN: an on-chain mode change never
- * touches `system`.
+ * A ROW THE SCHEDULER ENROLLED AND NOBODY HAS TOUCHED SINCE: the only rows the
+ * scheduler's auto-arm may arm (the header). A vault_work condition over the
+ * row's own columns, unqualified, so the auto-arm's selection and `arm`'s
+ * locked read (VAULT_FOR_UPDATE_SQL, under `enrolledOnly`) are the same words.
+ *
+ *   * draining — what ENSURE_VAULTS_SQL writes under new_vault_system = 'queue';
+ *   * system_at IS NULL — every handover step stamps it, the enrolment does not;
+ *   * fence = 0 — no worker ever claimed it (a claim is the only thing that raises it);
+ *   * holder IS NULL — nobody holds it now.
  */
-export const ENROL_VAULTS_SQL = `INSERT INTO ${S}.vault_work AS w (vault_addr, system, skim_mode, system_at)
-SELECT v.vault_addr, CASE f.new_vault_system WHEN 'queue' THEN 'draining' ELSE 'legacy' END, v.skim_mode, clock_timestamp()
-  FROM unnest($1::text[], $2::smallint[]) AS v(vault_addr, skim_mode),
-       (SELECT COALESCE((SELECT new_vault_system FROM ${S}.fleet WHERE id), 'legacy') AS new_vault_system) f
-ON CONFLICT (vault_addr) DO UPDATE SET skim_mode = EXCLUDED.skim_mode
- WHERE w.skim_mode IS DISTINCT FROM EXCLUDED.skim_mode
-RETURNING vault_addr, system`;
+export const AUTO_ARMABLE_SQL = "system = 'draining' AND system_at IS NULL AND fence = 0 AND holder IS NULL";
+
+/** AUTO_ARMABLE_SQL over a row already read: the unit tests' mirror of the statement. */
+export function autoArmable(row: { readonly system: string; readonly systemAt: unknown; readonly fence: bigint | number | string; readonly holder: string | null }): boolean {
+  return row.system === "draining" && (row.systemAt === null || row.systemAt === undefined) && BigInt(row.fence) === 0n && row.holder === null;
+}
+
+/**
+ * THE LEGACY ROLES WHOSE ACTING RECEIPT `arm` REQUIRES, from one string: the
+ * command line's --roles= and the scheduler's SIP_SOLANA_LEGACY_ROLES read it
+ * alike. A comma-separated list of roles, each once, or `none` SPELLED OUT: no
+ * role's receipt is required, which is right only where no legacy keeper acts —
+ * a shadow's database, or a fleet whose legacy keeper services are stopped.
+ * Every receipt that IS there still has to name the vault. null: refused.
+ */
+export function parseLegacyRoles(value: string): readonly KeeperRole[] | null {
+  if (value === "none") return [];
+  const roles = value.split(",").map((role) => role.trim());
+  if (roles.some((role) => !isKeeperRole(role)) || new Set(roles).size !== roles.length) return null;
+  return roles as KeeperRole[];
+}
+
+/** What reading the two heights needs of a chain: @solana/web3.js's Connection is one. */
+export interface BlockHeightReader {
+  getBlockHeight(commitment: "processed" | "finalized"): Promise<number>;
+}
+
+/**
+ * THE TWO HEIGHTS A STEP IS TAKEN AGAINST, read only — the operator's command
+ * and the scheduler's auto-arm read them this one way. PROCESSED FIRST: it is
+ * the height a step records, and it must be at or above any height a legacy
+ * keeper fetched a blockhash at before its receipt. A processed height BELOW the
+ * finalized one is two endpoints out of step (a failover between the reads),
+ * and nothing is recorded from it.
+ */
+export async function readChainHeights(chain: BlockHeightReader): Promise<ChainHeights> {
+  const processed = BigInt(await chain.getBlockHeight("processed"));
+  const finalized = BigInt(await chain.getBlockHeight("finalized"));
+  if (processed < finalized) {
+    throw new Error(`the chain answered a processed height (${processed}) below its finalized one (${finalized}): two endpoints out of step; nothing is recorded from it`);
+  }
+  return { processed, finalized };
+}
+
+/**
+ * THE OPERATOR'S UNPARK (src/scheduler-pg.ts parks a vault whose lease lapsed
+ * PARK_AFTER_ATTEMPTS claims in a row): parked_reason cleared, the streak of
+ * lapsed claims back to 0, and the vault due now — never later than it already
+ * was. Only a parked row; holder, lease and fence are the claim's and are not
+ * touched (a lapsed holder is taken over by the next CLAIM). Answers what it
+ * cleared.
+ */
+export const UNPARK_SQL = `WITH prior AS (SELECT vault_addr, parked_reason, attempts FROM ${S}.vault_work WHERE vault_addr = $1)
+UPDATE ${S}.vault_work w
+   SET parked_reason = NULL, attempts = 0, due_at = LEAST(w.due_at, clock_timestamp())
+  FROM prior
+ WHERE w.vault_addr = prior.vault_addr AND w.parked_reason IS NOT NULL
+RETURNING prior.parked_reason AS was_reason, prior.attempts AS was_attempts`;
 
 export const DRAIN_SQL = `INSERT INTO ${S}.vault_work AS w (vault_addr, system, system_at) VALUES ($1, 'draining', clock_timestamp())
 ON CONFLICT (vault_addr) DO UPDATE SET system = 'draining', system_at = clock_timestamp(), handover_height = NULL
@@ -109,9 +177,10 @@ export const ROLLBACK_SQL = `UPDATE ${S}.vault_work SET system = 'draining', sys
  WHERE vault_addr = $1 AND system = 'queue'
 RETURNING system`;
 
-const VAULT_FOR_UPDATE_SQL = `SELECT system, handover_height, holder, lease_until,
+export const VAULT_FOR_UPDATE_SQL = `SELECT system, handover_height, holder, lease_until,
        holder IS NOT NULL AND lease_until < clock_timestamp()
-         AND claimed_at < clock_timestamp() - interval '${RELEASE_JOB_CEILING_MINUTES} minutes' AS holder_dead
+         AND claimed_at < clock_timestamp() - interval '${RELEASE_JOB_CEILING_MINUTES} minutes' AS holder_dead,
+       (${AUTO_ARMABLE_SQL}) AS auto_armable
   FROM ${S}.vault_work WHERE vault_addr = $1 FOR UPDATE`;
 
 const RECEIPTS_SQL = `SELECT process_id, role, deployment, host, live, read_at,
@@ -189,22 +258,60 @@ export interface LegacyProcessRow {
   readonly carryStore: string | null;
 }
 
+/** One vault_work row as `status` prints it. Every field after leaseUntil was added for `status --all`, and is printed by plain `status` too. */
+export interface HandoverVaultRow {
+  readonly vault: string;
+  readonly system: VaultSystem;
+  readonly systemAt: string | null;
+  readonly handoverHeight: bigint | null;
+  readonly holder: string | null;
+  readonly leaseUntil: string | null;
+  /** The last mode byte the enrolment wrote, or null (the scheduler's enrolment writes none). */
+  readonly skimMode: number | null;
+  readonly lane: string;
+  /** A bigint in the database, printed as its decimal string. */
+  readonly fence: string;
+  readonly claimedAt: string | null;
+  readonly lastDoneAt: string | null;
+  readonly lastOutcome: string | null;
+  /** The first STATUS_DETAIL_CHARS characters. */
+  readonly lastDetail: string | null;
+  readonly parkedReason: string | null;
+  readonly attempts: number;
+  /** ISO, or "infinity" for a queue vault no live link names (RETIRE_UNLINKED_SQL). */
+  readonly dueAt: string | null;
+  readonly streaks: Readonly<Record<string, unknown>>;
+}
+
 export interface HandoverStatus {
   readonly newVaultSystem: NewVaultSystem | null;
-  readonly vaults: readonly {
-    readonly vault: string;
-    readonly system: VaultSystem;
-    readonly systemAt: string | null;
-    readonly handoverHeight: bigint | null;
-    readonly holder: string | null;
-    readonly leaseUntil: string | null;
-  }[];
+  /** fleet.webhook_owner: who keeps the Helius webhook, 'legacy' or 'scheduler'. */
+  readonly webhookOwner: string | null;
+  readonly vaults: readonly HandoverVaultRow[];
   readonly processes: readonly LegacyProcessRow[];
 }
 
+/** What `unpark` did. */
+export interface Unparked {
+  readonly vault: string;
+  /** Whether the row was parked: false for a free row, and for a vault with no row. */
+  readonly wasParked: boolean;
+  /** What was cleared, when it was parked. */
+  readonly parkedReason?: string;
+  readonly attempts?: number;
+  /** Why nothing was done, when it was not. */
+  readonly detail?: string;
+}
+
+/** How much of last_detail `status` prints. */
+export const STATUS_DETAIL_CHARS = 300;
+
 const iso = (value: unknown): string | null =>
   value instanceof Date ? value.toISOString() : typeof value === "string" ? new Date(value).toISOString() : null;
+/** A timestamptz that may be ±infinity (node-postgres reads those as ±Infinity). */
+const isoOrInfinity = (value: unknown): string | null => (value === Number.POSITIVE_INFINITY ? "infinity" : value === Number.NEGATIVE_INFINITY ? "-infinity" : iso(value));
 const big = (value: unknown): bigint | null => (value === null || value === undefined ? null : BigInt(value as string | number));
+const textOrNull = (value: unknown): string | null => (value === null || value === undefined ? null : String(value));
 
 function ago(ms: number): string {
   if (ms < 90_000) return `${Math.round(ms / 1000)} s`;
@@ -238,11 +345,15 @@ export class Handover {
    * records `heights.processed`, and the first after the finalized height has
    * passed it by HANDOVER_WAIT_BLOCKS moves the vault. Every call re-checks
    * every receipt.
+   *
+   * `enrolledOnly` is the scheduler's auto-arm (the header): the row must still
+   * be as ENSURE_VAULTS_SQL left it (AUTO_ARMABLE_SQL), read under the row's
+   * lock, or nothing is written and the vault is left to its operator.
    */
   async arm(
     vault: string,
     heights: ChainHeights,
-    options: { readonly requiredRoles?: readonly KeeperRole[]; readonly allowDry?: boolean } = {},
+    options: { readonly requiredRoles?: readonly KeeperRole[]; readonly allowDry?: boolean; readonly enrolledOnly?: boolean } = {},
   ): Promise<Step> {
     const required = options.requiredRoles ?? KEEPER_ROLES;
     return this.#tx(async (client) => {
@@ -252,6 +363,17 @@ export class Handover {
       const system = row["system"] as VaultSystem;
       if (system !== "draining") {
         return { vault, system, moved: false, blockers: [`the vault is ${system}: only a draining vault is armed (drain it first)`] };
+      }
+      if (options.enrolledOnly === true && row["auto_armable"] !== true) {
+        return {
+          vault,
+          system,
+          moved: false,
+          blockers: [
+            "the vault is not as the scheduler enrolled it (an operator drained, rolled back or released it, or a worker claimed it): " +
+              "the scheduler arms only its own untouched enrolments; finish this handover with `dispatch-handover arm`",
+          ],
+        };
       }
       const blockers: string[] = [];
       const receipts = (await client.query(RECEIPTS_SQL, [vault])).rows;
@@ -400,7 +522,12 @@ export class Handover {
     return blockers;
   }
 
-  /** Every vault that is draining, armed one by one (the scheduler's way under new_vault_system = 'queue', and `arm --all`). */
+  /**
+   * Every vault that is draining, armed one by one: the operator's `arm --all`.
+   * The scheduler arms only its own untouched enrolments, one `arm` each with
+   * `enrolledOnly` (src/auto-arm.ts, under SIP_SOLANA_AUTO_ARM=on); with the
+   * variable off, nothing but this command moves a draining vault.
+   */
   async armAll(heights: ChainHeights, options: { readonly requiredRoles?: readonly KeeperRole[]; readonly allowDry?: boolean } = {}): Promise<readonly Step[]> {
     const draining = await this.#read(`SELECT vault_addr FROM ${S}.vault_work WHERE system = 'draining' ORDER BY vault_addr`, []);
     const steps: Step[] = [];
@@ -447,29 +574,48 @@ export class Handover {
     return rows[0]!["new_vault_system"] as NewVaultSystem;
   }
 
-  /** Every vault that is not legacy (or `vault` alone), every legacy process row, and the new-vault flag. */
-  async status(vault?: string): Promise<HandoverStatus> {
+  /**
+   * Every vault that is not legacy (or `vault` alone; or, with `all`, every
+   * vault_work row, legacy included), every legacy process row, the new-vault
+   * flag and the webhook's owner. One transaction, so the three agree.
+   */
+  async status(vault?: string, options: { readonly all?: boolean } = {}): Promise<HandoverStatus> {
+    if (options.all === true && vault !== undefined) throw new Error("status lists every vault or one, not both");
     return this.#tx(async (client) => {
       const vaults = await client.query(
-        `SELECT vault_addr, system, system_at, handover_height, holder, lease_until FROM ${S}.vault_work
-          WHERE ($1::text IS NULL AND system <> 'legacy') OR vault_addr = $1::text ORDER BY vault_addr`,
-        [vault ?? null],
+        `SELECT vault_addr, system, system_at, handover_height, holder, lease_until, skim_mode, lane, fence::text AS fence, claimed_at,
+                last_done_at, last_outcome, left(last_detail, ${STATUS_DETAIL_CHARS}) AS last_detail, parked_reason, attempts, due_at, streaks
+           FROM ${S}.vault_work
+          WHERE $2::boolean OR ($1::text IS NULL AND system <> 'legacy') OR vault_addr = $1::text ORDER BY vault_addr`,
+        [vault ?? null, options.all === true],
       );
       const processes = await client.query(
         `SELECT process_id, role, dispatch, deployment, host, live, reads, read_at, started_at, gone_at, seen, absent_is, carry_vaults, carry_store,
                 round(extract(epoch FROM clock_timestamp() - read_at) * 1000)::bigint AS age_ms
            FROM ${S}.legacy_process ORDER BY gone_at NULLS FIRST, role, read_at DESC, process_id`,
       );
-      const flag = await client.query(`SELECT new_vault_system FROM ${S}.fleet WHERE id`);
+      const flag = await client.query(`SELECT new_vault_system, webhook_owner FROM ${S}.fleet WHERE id`);
       return {
         newVaultSystem: (flag.rows[0]?.["new_vault_system"] as NewVaultSystem | undefined) ?? null,
+        webhookOwner: textOrNull(flag.rows[0]?.["webhook_owner"]),
         vaults: vaults.rows.map((row) => ({
           vault: String(row["vault_addr"]),
           system: row["system"] as VaultSystem,
           systemAt: iso(row["system_at"]),
           handoverHeight: big(row["handover_height"]),
-          holder: row["holder"] === null ? null : String(row["holder"]),
+          holder: textOrNull(row["holder"]),
           leaseUntil: iso(row["lease_until"]),
+          skimMode: row["skim_mode"] === null || row["skim_mode"] === undefined ? null : Number(row["skim_mode"]),
+          lane: String(row["lane"]),
+          fence: String(row["fence"]),
+          claimedAt: iso(row["claimed_at"]),
+          lastDoneAt: iso(row["last_done_at"]),
+          lastOutcome: textOrNull(row["last_outcome"]),
+          lastDetail: textOrNull(row["last_detail"]),
+          parkedReason: textOrNull(row["parked_reason"]),
+          attempts: Number(row["attempts"]),
+          dueAt: isoOrInfinity(row["due_at"]),
+          streaks: (row["streaks"] ?? {}) as Record<string, unknown>,
         })),
         processes: processes.rows.map((row) => ({
           processId: String(row["process_id"]),
@@ -488,6 +634,27 @@ export class Handover {
           carryVaults: row["carry_vaults"] as string[],
           carryStore: row["carry_store"] === null || row["carry_store"] === undefined ? null : String(row["carry_store"]),
         })),
+      };
+    });
+  }
+
+  /**
+   * A parked vault back in the queue's hands (UNPARK_SQL): only a parked row is
+   * changed. The scheduler sent its vault-parked page once, when it parked the
+   * vault, and this does not touch that process's alerter; a vault whose claims
+   * lapse PARK_AFTER_ATTEMPTS times in a row again is parked, and paged, again.
+   */
+  async unpark(vault: string): Promise<Unparked> {
+    return this.#tx(async (client) => {
+      const cleared = (await client.query(UNPARK_SQL, [vault])).rows[0];
+      if (cleared !== undefined) {
+        return { vault, wasParked: true, parkedReason: String(cleared["was_reason"]), attempts: Number(cleared["was_attempts"]) };
+      }
+      const system = await this.#system(client, vault);
+      return {
+        vault,
+        wasParked: false,
+        detail: system === null ? "vault_work has no row for this vault: there is nothing to unpark" : `the vault (${system}) is not parked: there is nothing to unpark`,
       };
     });
   }

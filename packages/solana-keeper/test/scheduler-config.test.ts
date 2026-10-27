@@ -10,11 +10,16 @@ import { DISPATCH_MODES as LEGACY_DISPATCH_MODES, readCuts, readDispatchMode as 
 import { HELIUS_DEVELOPER_CREDITS_MONTH } from "../src/credit-governor.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 import { HELIUS_DEVELOPER_RPS } from "../src/rpc-quota.js";
+import { KEEPER_ROLES } from "../src/role-registry.js";
 import {
   DISPATCH_MODES as SCHEDULER_DISPATCH_MODES,
   SCHEDULER_REFUSED_VARS,
+  SCHEDULER_VARS,
+  autoArmRuns,
   loadSchedulerConfig,
+  readAutoArm,
   readDispatchMode,
+  readLegacyRoles,
   readSchedulerCuts,
 } from "../src/scheduler-config.js";
 import { DISPATCH_MODES as WORKER_DISPATCH_MODES, readDispatchMode as readWorkerDispatchMode } from "../src/worker-config.js";
@@ -154,5 +159,55 @@ describe("one reader of SIP_SOLANA_DISPATCH for the whole fleet", () => {
     expect(readWorkerDispatchMode).toBe(readLegacyDispatchMode);
     expect(SCHEDULER_DISPATCH_MODES).toBe(LEGACY_DISPATCH_MODES);
     expect(WORKER_DISPATCH_MODES).toBe(LEGACY_DISPATCH_MODES);
+  });
+});
+
+describe("SIP_SOLANA_AUTO_ARM and SIP_SOLANA_LEGACY_ROLES", () => {
+  it("SIP_SOLANA_AUTO_ARM is off unless it says on, and refuses anything else by shape", () => {
+    expect(readAutoArm(undefined)).toEqual({ on: false });
+    expect(readAutoArm("  ")).toEqual({ on: false });
+    expect(readAutoArm("off")).toEqual({ on: false });
+    expect(readAutoArm(" on ")).toEqual({ on: true });
+    for (const raw of ["ON", "1", "true", "yes", "auto"]) {
+      const read = readAutoArm(raw);
+      expect(read, raw).toEqual({ problem: expect.stringContaining("SIP_SOLANA_AUTO_ARM must be off or on") });
+      expect(JSON.stringify(read), raw).not.toContain(`"${raw}"`);
+    }
+  });
+
+  it("SIP_SOLANA_LEGACY_ROLES is every role unset — arm's own rule — a list of roles each once, or none; anything else refuses", () => {
+    expect(readLegacyRoles(undefined)).toEqual({ roles: KEEPER_ROLES });
+    expect(readLegacyRoles(" ")).toEqual({ roles: KEEPER_ROLES });
+    expect(readLegacyRoles("profit")).toEqual({ roles: ["profit"] });
+    expect(readLegacyRoles("volume")).toEqual({ roles: ["volume"] });
+    expect(readLegacyRoles("volume, profit")).toEqual({ roles: ["volume", "profit"] });
+    expect(readLegacyRoles("none")).toEqual({ roles: [] });
+    for (const raw of ["None", "profit,profit", "none,volume", "worker", "profit,,volume", "all"]) {
+      expect(readLegacyRoles(raw), raw).toEqual({ problem: expect.stringContaining("SIP_SOLANA_LEGACY_ROLES must be a comma-separated list of profit, volume") });
+    }
+  });
+
+  it("are the scheduler's own variables: off and every role by default, read strictly, malformed values refuse to start", () => {
+    expect(SCHEDULER_VARS).toEqual(expect.arrayContaining(["SIP_SOLANA_AUTO_ARM", "SIP_SOLANA_LEGACY_ROLES"]));
+    const plain = load({ ...BASE, SIP_SOLANA_DISPATCH: "on" });
+    expect(plain).toMatchObject({ autoArm: false, legacyRoles: KEEPER_ROLES });
+    expect(autoArmRuns(plain)).toBe(false);
+    // NEVER HANDED TO loadConfig: no "not a variable this keeper reads" warning.
+    const on = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_AUTO_ARM: "on", SIP_SOLANA_LEGACY_ROLES: "none" });
+    expect(on).toMatchObject({ autoArm: true, legacyRoles: [] });
+    expect(autoArmRuns(on)).toBe(true);
+    expect(on.warnings).toEqual([]);
+    expect(problemsOf({ ...BASE, SIP_SOLANA_AUTO_ARM: "true" })).toEqual([expect.stringContaining("SIP_SOLANA_AUTO_ARM")]);
+    expect(problemsOf({ ...BASE, SIP_SOLANA_LEGACY_ROLES: "profit,profit" })).toEqual([expect.stringContaining("SIP_SOLANA_LEGACY_ROLES")]);
+  });
+
+  it("runs only under SIP_SOLANA_DISPATCH=on, and says so under shadow; roles set with the step off are said to be unread", () => {
+    const shadow = load({ ...BASE, SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_AUTO_ARM: "on" });
+    expect(shadow.autoArm).toBe(true);
+    expect(autoArmRuns(shadow)).toBe(false);
+    expect(shadow.warnings.join(" ")).toContain("SIP_SOLANA_AUTO_ARM is on under SIP_SOLANA_DISPATCH=shadow");
+    const unread = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_LEGACY_ROLES: "profit" });
+    expect(unread.legacyRoles).toEqual(["profit"]);
+    expect(unread.warnings.join(" ")).toContain("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off");
   });
 });

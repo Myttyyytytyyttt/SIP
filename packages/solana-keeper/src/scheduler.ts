@@ -23,6 +23,13 @@
 //      FAIL THE TICK: the last-known-good list is keeper_link itself, re-read
 //      fresh by address (L3's rule, now persisted, so a new holder has it too);
 //      warn after three failures, critical once the list is ten minutes old;
+//   2b. the auto-arm (SIP_SOLANA_AUTO_ARM, src/auto-arm.ts) — by the holder,
+//      only under `on`, only when the variable says so: the vaults this
+//      scheduler enrolled as 'draining' and nobody has touched since are armed
+//      by the handover's own `arm`, receipts and 150 blocks included, so a new
+//      vault reaches the queue without an operator. It never fails the tick:
+//      its failure is on /status and in the log, and a new vault unserved for
+//      15 minutes warns, for an hour pages;
 //   3. the selection (src/scheduler-select.ts: Doorbell.select ported to
 //      vault_work), written as due times — and, under `lamports-filter` (C7),
 //      the batch read that lets the scheduler COMPLETE a quiet vault itself
@@ -69,6 +76,7 @@
 
 import { summarizeUpstreamError } from "@sip/solana-log";
 import type { Alert, Alerter } from "./alerts.js";
+import { AUTO_ARM_ALERT_KEY, type AutoArmStatus, type SchedulerAutoArm } from "./auto-arm.js";
 import type { ChainSnapshot } from "./chain-state.js";
 import type { DispatchMode } from "./cuts.js";
 import { CREDIT_GOVERNOR_ALERT_KEY, type CreditGovernor, type GovernorVerdict } from "./credit-governor.js";
@@ -198,6 +206,12 @@ export interface SchedulerOptions {
    * acting tick — only the lock holder acts, so the fleet samples once.
    */
   readonly tape?: TapeSampler | null;
+  /**
+   * SIP_SOLANA_AUTO_ARM's step (src/auto-arm.ts), or null. bin/scheduler.mts
+   * always builds one, enabled or not, so /status says which; the tick runs it
+   * only as the lock holder, only under `on`, only when it is enabled.
+   */
+  readonly autoArm?: SchedulerAutoArm | null;
 }
 
 /** What one tick did: the tests' handle and the log line. */
@@ -212,6 +226,8 @@ export type TickReport =
       readonly discovery: { readonly source: "fresh" | "lkg" | "none"; readonly method: DiscoveryMethod | null; readonly links: number; readonly freshLinks: boolean };
       readonly fullReason: string | null;
       readonly lanes: Readonly<Record<SelectLane, number>>;
+      /** Vaults the auto-arm moved to the queue this tick (SIP_SOLANA_AUTO_ARM). */
+      readonly autoArmed: readonly string[];
       /** Vaults made due this tick. */
       readonly marked: readonly string[];
       /** Vaults the scheduler completed itself (C7). */
@@ -259,6 +275,8 @@ export interface SchedulerStatus {
   readonly governor: GovernorVerdict | null;
   /** ADDITIVE, present only with SIP_SOLANA_PRICE_TAPE=on: what the tape sampler has done since boot. */
   readonly priceTape?: TapeSamplerStatus;
+  /** ADDITIVE, present whenever the process built the step (bin/scheduler.mts always does): SIP_SOLANA_AUTO_ARM's state. */
+  readonly autoArm?: AutoArmStatus;
 }
 
 const toRow = (link: ManagedLink): LinkRow => ({
@@ -491,6 +509,11 @@ export class Scheduler {
     // 2. DISCOVERY.
     const found = snapshot.programDeployed === false ? null : await this.#discover(fleet.now);
     this.#progress();
+
+    // 2b. THE AUTO-ARM, after this tick's enrolments and before the rows are
+    // read, so a vault it moves is this tick's selection's.
+    const autoArmed = await this.#autoArm();
+    this.#progress();
     const links: readonly LinkRow[] = found?.links ?? [];
     const linksByVault = new Map<string, LinkRow[]>();
     for (const link of links) linksByVault.set(link.vault, [...(linksByVault.get(link.vault) ?? []), link]);
@@ -596,6 +619,7 @@ export class Scheduler {
       discovery: { source: found?.source ?? "none", method: found?.method ?? null, links: links.length, freshLinks: found?.freshLinks === true },
       fullReason: selection.fullReason,
       lanes: selection.lanes,
+      autoArmed,
       marked,
       completedIdle,
       leftBusy,
@@ -603,6 +627,25 @@ export class Scheduler {
       resolvedIntents,
       quotaWorkers,
     };
+  }
+
+  /**
+   * SIP_SOLANA_AUTO_ARM's step (src/auto-arm.ts): only under `on`, only when
+   * enabled. Answers the vaults it moved. NEVER THE TICK'S FAILURE: the step
+   * itself never throws, and a wrapper that did is logged and passed over.
+   */
+  async #autoArm(): Promise<readonly string[]> {
+    const autoArm = this.#o.autoArm;
+    if (autoArm === null || autoArm === undefined || !autoArm.enabled || this.#o.mode !== "on") return [];
+    try {
+      const tick = await autoArm.step();
+      if (tick.alert.fire !== null) this.#fire(tick.alert.fire);
+      else if (tick.alert.clear) this.#clear(AUTO_ARM_ALERT_KEY);
+      return tick.moved;
+    } catch (error) {
+      this.#o.log("warn", "the auto-arm step threw; the tick goes on", { detail: summarizeUpstreamError(error) });
+      return [];
+    }
   }
 
   /**
@@ -846,6 +889,7 @@ export class Scheduler {
       quotas: this.#quotas,
       governor: this.#o.governor?.verdict ?? null,
       ...(this.#o.tape ? { priceTape: this.#o.tape.status() } : {}),
+      ...(this.#o.autoArm ? { autoArm: this.#o.autoArm.status() } : {}),
     };
   }
 }

@@ -154,13 +154,18 @@ export const CACHED_LINKS_SQL = `SELECT link_addr, wallet_addr, vault_addr, epoc
 /**
  * A row for each vault the listing names that has none yet, as the fleet flag
  * says (plan design detail 3): 'legacy' until P3d; then 'draining', NEVER
- * 'queue' — the handover's enrolment rule (src/handover.ts, ENROL_VAULTS_SQL).
- * A legacy keeper that read the flag before it flipped takes a vault with no
- * row for its own, and a row written straight to the queue could be claimed
- * by a worker while that keeper's sweep still turns it; through 'draining' the
- * vault reaches the queue only by `arm`, after every legacy process's receipt
- * and 150 finalized blocks. Due now, in the new lane. A vault that has a row
- * keeps it untouched.
+ * 'queue' — the handover's enrolment rule (src/handover.ts). A legacy keeper
+ * that read the flag before it flipped takes a vault with no row for its own,
+ * and a row written straight to the queue could be claimed by a worker while
+ * that keeper's sweep still turns it; through 'draining' the vault reaches the
+ * queue only by `arm`, after every legacy process's receipt and 150 finalized
+ * blocks — the operator's, or this scheduler's own under SIP_SOLANA_AUTO_ARM
+ * (src/auto-arm.ts). Due now, in the new lane. A vault that has a row keeps it
+ * untouched.
+ *
+ * system_at IS LEFT NULL ON PURPOSE: every handover step stamps it, so a NULL
+ * on a draining row is what tells the auto-arm the row is still the scheduler's
+ * own enrolment (AUTO_ARMABLE_SQL). The insert writes no mode byte.
  */
 export const ENSURE_VAULTS_SQL = `INSERT INTO ${S}.vault_work (vault_addr, system, lane, priority, due_at)
 SELECT v.vault, CASE f.new_vault_system WHEN 'queue' THEN 'draining' ELSE 'legacy' END, 'new', ${LANE_PRIORITY.new}, clock_timestamp()

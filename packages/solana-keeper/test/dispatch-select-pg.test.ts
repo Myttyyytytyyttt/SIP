@@ -18,7 +18,8 @@ import { LEGACY_SELECT_SQL, LegacySelector, carryOnlyInMemoryVaults, partitionLe
 import { DurableCarries, type DurableCarryStore } from "../src/carry-store.js";
 import { MODE_PROFIT } from "../src/program-scripts.js";
 import type { CarryBook } from "../src/settle-decision.js";
-import { ENROL_VAULTS_SQL, HANDOVER_WAIT_BLOCKS, Handover, LEGACY_READ_FRESH_MS, RELEASE_JOB_CEILING_MINUTES } from "../src/handover.js";
+import { HANDOVER_WAIT_BLOCKS, Handover, LEGACY_READ_FRESH_MS, RELEASE_JOB_CEILING_MINUTES, STATUS_DETAIL_CHARS, type HandoverStatus } from "../src/handover.js";
+import { ENSURE_VAULTS_SQL, PgSchedulerStore } from "../src/scheduler-pg.js";
 import type { CarryStoreMode } from "../src/cuts.js";
 import { parseHandoverArgs, runHandoverCommand } from "../src/handover-cli.js";
 import type { KeeperRole } from "../src/role-registry.js";
@@ -81,8 +82,18 @@ describe.skipIf(!usable)("the migration on Postgres 16 (needs KEEPER_TEST_PG_URL
     if (!read.ok) throw new Error(read.detail);
     return read.view;
   };
-  const enrol = (vaults: readonly (readonly [string, number])[]) =>
-    db.query(ENROL_VAULTS_SQL, [vaults.map(([vault]) => vault), vaults.map(([, mode]) => mode)]);
+  /**
+   * THE SCHEDULER'S ENROLMENT (ENSURE_VAULTS_SQL), then the mode byte each named
+   * row records, written straight — a stand-in for an owner's set_policy_v2
+   * reaching the row, which no statement may let move a vault between actors.
+   */
+  const enrol = async (vaults: readonly (readonly [string, number])[]) => {
+    await db.query(ENSURE_VAULTS_SQL, [vaults.map(([vault]) => vault)]);
+    await db.query(
+      `UPDATE sip_solana.vault_work w SET skim_mode = v.mode FROM unnest($1::text[], $2::smallint[]) AS v(vault, mode) WHERE w.vault_addr = v.vault`,
+      [vaults.map(([vault]) => vault), vaults.map(([, mode]) => mode)],
+    );
+  };
   const systemOf = async (vault: string) => (await db.query("SELECT system FROM sip_solana.vault_work WHERE vault_addr = $1", [vault])).rows[0]?.system ?? null;
   const heights = (processed: bigint, finalized: bigint) => ({ processed, finalized });
 
@@ -173,7 +184,7 @@ describe.skipIf(!usable)("the migration on Postgres 16 (needs KEEPER_TEST_PG_URL
       ]);
       await db.query("UPDATE sip_solana.vault_work SET system = 'queue' WHERE vault_addr = $1", [VOLUME_VAULT]);
       const before = await readOk(keeper("profit", "p-1"));
-      // BOTH OWNERS CALL set_policy_v2: the scheduler's next enrolment writes the new bytes.
+      // BOTH OWNERS CALL set_policy_v2: the rows record the new bytes, and the enrolment runs again.
       await enrol([
         [VOLUME_VAULT, 0],
         [PROFIT_VAULT, 1],
@@ -533,6 +544,94 @@ describe.skipIf(!usable)("the migration on Postgres 16 (needs KEEPER_TEST_PG_URL
         },
       });
       expect(await runHandoverCommand(parseHandoverArgs(["new-vaults", "queue"]), deps)).toEqual({ ok: true, result: { newVaultSystem: "queue" } });
+    });
+
+    it("status --all lists every row, legacy included, with the queue's columns and the webhook's owner; plain status keeps its selection", async () => {
+      const handover = new Handover(db);
+      const deps = { handover, heights: async () => heights(1n, 1n) };
+      await enrol([
+        [PROFIT_VAULT, 0],
+        [VOLUME_VAULT, 1],
+      ]);
+      await db.query(
+        `UPDATE sip_solana.vault_work
+            SET system = 'queue', lane = 'retry', priority = 1, fence = 7, attempts = 2, claimed_at = clock_timestamp(), last_done_at = clock_timestamp(),
+                last_outcome = 'SETTLED', last_detail = repeat('x', 400), streaks = '{"settleRetries": {"WalletMadeUp": 1}}', due_at = 'infinity'
+          WHERE vault_addr = $1`,
+        [VOLUME_VAULT],
+      );
+      await db.query("UPDATE sip_solana.fleet SET webhook_owner = 'scheduler'");
+      const plain = await runHandoverCommand(parseHandoverArgs(["status"]), deps);
+      expect((plain.result as HandoverStatus).vaults.map((v) => v.vault)).toEqual([VOLUME_VAULT]);
+      expect(plain.result).toMatchObject({ webhookOwner: "scheduler" });
+      const all = await runHandoverCommand(parseHandoverArgs(["status", "--all"]), deps);
+      expect(all).toMatchObject({
+        ok: true,
+        result: {
+          newVaultSystem: "legacy",
+          webhookOwner: "scheduler",
+          vaults: [
+            {
+              vault: VOLUME_VAULT,
+              system: "queue",
+              skimMode: 1,
+              lane: "retry",
+              fence: "7",
+              attempts: 2,
+              lastOutcome: "SETTLED",
+              lastDetail: "x".repeat(STATUS_DETAIL_CHARS),
+              parkedReason: null,
+              dueAt: "infinity",
+              streaks: { settleRetries: { WalletMadeUp: 1 } },
+              claimedAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+              lastDoneAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/),
+            },
+            { vault: PROFIT_VAULT, system: "legacy", skimMode: 0, lane: "new", fence: "0", attempts: 0, lastOutcome: null, lastDetail: null, claimedAt: null, streaks: {} },
+          ],
+        },
+      });
+      const profit = (all.result as HandoverStatus).vaults[1]!;
+      expect(new Date(profit.dueAt!).getTime()).toBeGreaterThan(Date.now() - 60_000);
+      // THE PRINTED LINE (bin/dispatch-handover.mts): bigints as strings, the rest as it is.
+      const printed = JSON.parse(JSON.stringify(all.result, (_key, value: unknown) => (typeof value === "bigint" ? value.toString() : value)));
+      expect(printed.vaults[0]).toMatchObject({ fence: "7", handoverHeight: null, dueAt: "infinity" });
+      await expect(handover.status(VOLUME_VAULT, { all: true })).rejects.toThrow(/not both/);
+    });
+
+    it("unpark clears a vault the scheduler parked — reason, streak, due now — and the queue takes it again; anything else is refused", async () => {
+      const handover = new Handover(db);
+      const deps = { handover, heights: async () => heights(1n, 1n) };
+      await enrol([[VOLUME_VAULT, 1]]);
+      await db.query(
+        `UPDATE sip_solana.vault_work
+            SET system = 'queue', holder = 'w-dead', lease_until = clock_timestamp() - interval '1 second', claimed_at = clock_timestamp() - interval '2 minutes',
+                attempts = 5, fence = 5, due_at = clock_timestamp() + interval '1 hour'`,
+      );
+      // PARKED BY THE SCHEDULER'S OWN REAP: no worker takes it.
+      expect(await new PgSchedulerStore(db).park()).toEqual([{ vault: VOLUME_VAULT, attempts: 5 }]);
+      expect((await db.query(CLAIM_SQL, ["w-2", 1])).rows).toEqual([]);
+      expect(await runHandoverCommand(parseHandoverArgs(["unpark", VOLUME_VAULT]), deps)).toEqual({
+        ok: true,
+        result: { vault: VOLUME_VAULT, wasParked: true, parkedReason: expect.stringContaining("its lease lapsed 5 claims in a row"), attempts: 5 },
+      });
+      const row = (
+        await db.query(
+          "SELECT parked_reason, attempts, holder, fence::text AS fence, due_at <= clock_timestamp() AS due FROM sip_solana.vault_work WHERE vault_addr = $1",
+          [VOLUME_VAULT],
+        )
+      ).rows[0];
+      // THE CLAIM'S COLUMNS ARE THE CLAIM'S: the lapsed holder stays until the next CLAIM takes it over.
+      expect(row).toEqual({ parked_reason: null, attempts: 0, holder: "w-dead", fence: "5", due: true });
+      expect((await db.query(CLAIM_SQL, ["w-2", 1])).rows.map((r) => [r.vault_addr, r.fence, r.attempts])).toEqual([[VOLUME_VAULT, "6", 1]]);
+      // NOT PARKED, OR NO ROW: refused, nothing written.
+      expect(await runHandoverCommand(parseHandoverArgs(["unpark", VOLUME_VAULT]), deps)).toEqual({
+        ok: false,
+        result: { vault: VOLUME_VAULT, wasParked: false, detail: expect.stringMatching(/the vault \(queue\) is not parked/) },
+      });
+      expect(await runHandoverCommand(parseHandoverArgs(["unpark", PROFIT_VAULT]), deps)).toEqual({
+        ok: false,
+        result: { vault: PROFIT_VAULT, wasParked: false, detail: expect.stringMatching(/no row for this vault/) },
+      });
     });
   });
 });
