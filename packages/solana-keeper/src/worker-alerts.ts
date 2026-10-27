@@ -3,10 +3,11 @@
 //
 // THE SAME RULES, NOT NEW ONES. Every alert here is built by the function the
 // legacy keeper already calls — settleAlert, settleThrewAlert, investFailedAlert,
-// wrapShortAlert, legFeeAlert — so a wallet a worker serves pages exactly as it
-// paged under the legacy keeper, with the same keys: a vault moved to the queue
-// keeps its open alerts' keys, and the worker's first SETTLED clears what the
-// legacy keeper raised.
+// wrapShortAlert, legFeeAlert — so a wallet a worker serves pages as it paged
+// under the legacy keeper, under the same key names. What an alerter remembers
+// (its dedup window, what it has raised) is per process: nothing crosses the
+// handover, so the worker's first alert for a wallet is sent, and its clears
+// resolve only what the worker itself raised.
 //
 // WHAT IS COUNTED WHERE. The legacy keeper keeps its streaks in process memory,
 // sweep after sweep. A worker keeps them in vault_work.streaks (completionFor),
@@ -23,7 +24,7 @@
 // a cadence). Both are per process, not per job.
 
 import type { Alert } from "./alerts.js";
-import { INVEST_FAILED_CRITICAL_STREAK, investFailedAlert, wrapShortAlert } from "./invest-decision.js";
+import { investFailedAlert, wrapShortAlert } from "./invest-decision.js";
 import { settleAlert, settleThrewAlert } from "./settle-decision.js";
 import { legFeeAlert } from "./sweep-decision.js";
 import { readStreaks, type JobEnd } from "./worker-job.js";
@@ -32,20 +33,43 @@ import { readStreaks, type JobEnd } from "./worker-job.js";
 export interface JobAlertRules {
   readonly clear: readonly string[];
   readonly fire: readonly Alert[];
+  /** The leg-fee keys this turn raised, when it read the mints (undefined: it did not, and nothing is known). */
+  readonly legFeeKeys?: ReadonlySet<string>;
+  /** A settle waited on the shared loss-carry store: the store's page is the caller's (it knows since when). */
+  readonly carryWaited: boolean;
 }
+
+/** The settle-key check's own alert, the legacy keeper's key (bin/keeper.mts: settle-key-mismatch). */
+export const SETTLE_KEY_ALERT_KEY = "settle-key-mismatch";
 
 /** The per-vault invest-refused alert, in the legacy keeper's exact shape (bin/keeper.mts). */
 export function investRefusedAlert(vault: string, detail: string): Alert {
   return { key: `invest-refused:${vault}`, severity: "warn", title: "A basket cannot be bought", detail, context: { vault } };
 }
 
-export function jobAlerts(end: JobEnd): JobAlertRules {
-  if (end.kind !== "complete") return { clear: [], fire: [] };
+export function jobAlerts(end: JobEnd, previous: { readonly legFeeKeys?: ReadonlySet<string> } = {}): JobAlertRules {
+  if (end.kind !== "complete") return { clear: [], fire: [], carryWaited: false };
   const { report } = end;
   const vault = report.vault;
   const streaks = readStreaks(end.completion.streaks);
   const clear: string[] = [];
   const fire: Alert[] = [];
+
+  // THE SETTLE KEY THE CHAIN NAMES. A key the chain no longer names makes every
+  // job end RETRY with nothing settled and no wallet turn to page (worker-job.ts):
+  // the legacy keeper refuses to start on it and pages it mid-run; so does this.
+  if (report.settleKey !== undefined) {
+    if (report.settleKey.kind === "verified") clear.push(SETTLE_KEY_ALERT_KEY);
+    else {
+      fire.push({
+        key: SETTLE_KEY_ALERT_KEY,
+        severity: report.settleKey.kind === "mismatch" ? "critical" : "warn",
+        title: report.settleKey.kind === "mismatch" ? "The worker's settle key is not the one the chain names" : "The worker cannot verify its settle key",
+        detail: `${report.settleKey.detail ?? report.settleKey.kind}. Nothing is settled or bought for the queue's vaults until it is fixed.`,
+        context: { vault },
+      });
+    }
+  }
 
   // EACH WALLET'S SETTLE, as the legacy sweep raises it per wallet.
   for (const turn of report.settles) {
@@ -61,15 +85,16 @@ export function jobAlerts(end: JobEnd): JobAlertRules {
   // THE VAULT'S INVEST, once: what the legacy sweep folds per vault.
   const invest = report.invest;
   if (invest !== null) {
+    // AS THE LEGACY SWEEP DOES: only a turn that bought or failed resolves a refusal; a throw, a deferral or a rest does not.
     if (invest.outcome === "REFUSED") fire.push(investRefusedAlert(vault, invest.detail));
-    else clear.push(`invest-refused:${vault}`);
+    else if (invest.outcome === "INVESTED" || invest.outcome === "FAILED") clear.push(`invest-refused:${vault}`);
 
     // A THROW IN THE INVEST HALF IS A FAILED TURN, as the legacy keeper folds it.
     const failed = invest.outcome === "FAILED" || invest.outcome === "THREW";
     if (failed) {
-      // THE ALERTER DEDUPES BY KEY ALONE: the standing warning is cleared before
-      // the critical that replaces it, or it would swallow the escalation.
-      if (streaks.investFailed === INVEST_FAILED_CRITICAL_STREAK) clear.push(`invest-failed:${vault}`);
+      // NO CLEAR BEFORE THE CRITICAL: the alerter lets an escalation through its
+      // dedup (alerts.ts), and a clear here would page the critical twice when a
+      // COMPLETE is discarded and the same streak is computed again.
       fire.push(investFailedAlert(vault, Math.max(1, streaks.investFailed), invest.detail));
     } else if (streaks.investFailed === 0) {
       clear.push(`invest-failed:${vault}`);
@@ -82,8 +107,20 @@ export function jobAlerts(end: JobEnd): JobAlertRules {
       if (short !== null) fire.push(short);
     }
 
-    // A LEG'S FEE WALKING TOWARD THE CEILING, on any turn that read the mints.
-    for (const warning of report.investFacts?.feeWarnings ?? []) fire.push(legFeeAlert(warning));
+    // A LEG'S FEE WALKING TOWARD THE CEILING, on any turn that read the mints;
+    // and, as the legacy sweep folds it, the warnings this vault raised before
+    // and no longer does are cleared (only a turn that looked can say so).
+    const warnings = report.investFacts?.feeWarnings;
+    if (warnings !== undefined) {
+      const raised = new Set<string>();
+      for (const warning of warnings) {
+        const alert = legFeeAlert(warning);
+        raised.add(alert.key);
+        fire.push(alert);
+      }
+      for (const key of previous.legFeeKeys ?? []) if (!raised.has(key)) clear.push(key);
+      return { clear, fire, legFeeKeys: raised, carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store") };
+    }
   }
-  return { clear, fire };
+  return { clear, fire, carryWaited: report.settles.some((turn) => turn.waitingOn === "carry-store") };
 }

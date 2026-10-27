@@ -206,7 +206,10 @@ export function keeperEnvOf(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  *   * NO DATABASE. The lease, the fence and the gate are rows; without them a
  *     worker is not a worker.
  */
-export function workerRefusals(config: Pick<KeeperConfig, "armed" | "databaseUrl">, settings: Pick<WorkerSettings, "mode">): string[] {
+export function workerRefusals(
+  config: Pick<KeeperConfig, "armed" | "databaseUrl"> & Partial<Pick<KeeperConfig, "signing" | "privySignerId" | "privyPolicyId">>,
+  settings: Pick<WorkerSettings, "mode">,
+): string[] {
   const problems: string[] = [];
   if (config.databaseUrl === null) problems.push("DATABASE_URL is required for a dispatcher worker: its leases, fences and send intents are rows.");
   if (settings.mode === "shadow" && config.armed) {
@@ -214,6 +217,20 @@ export function workerRefusals(config: Pick<KeeperConfig, "armed" | "databaseUrl
       "SIP_SOLANA_DISPATCH=shadow on an armed keeper: a shadow worker is keyless and sends nothing, and an armed config has read " +
         "the signing secrets. Unset SIP_SOLANA_BROADCAST (and the sentence) for the shadow, or use `on`.",
     );
+  }
+  // A LIVE WORKER SIGNING THROUGH PRIVY NAMES ITS SEAT AND ITS POLICY. Without
+  // the signer id every Privy wallet resolves as signable, and without the policy
+  // id a seat with no policy of its own is not told apart: the legacy keeper pages
+  // that at boot (seatCheckNotice); a new service has no healthcheck to keep
+  // alive, so a worker refuses instead.
+  if (settings.mode === "on" && config.signing?.privy != null) {
+    const missing = [config.privySignerId == null ? "SIP_SOLANA_PRIVY_SIGNER_ID" : null, config.privyPolicyId == null ? "SIP_SOLANA_PRIVY_POLICY_ID" : null].filter((name): name is string => name !== null);
+    if (missing.length > 0) {
+      problems.push(
+        `SIP_SOLANA_DISPATCH=on signs through Privy without ${missing.join(" and ")}: the worker would sign for wallets whose seat it cannot check. ` +
+          "Reference them from sip-solana-keeper, as the signing secrets.",
+      );
+    }
   }
   if (settings.mode === "on" && !config.armed) {
     problems.push(

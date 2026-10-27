@@ -83,6 +83,13 @@ export interface WorkerLoopOptions {
   readonly drainMs?: number;
   readonly claimIdleMs?: number;
   readonly now?: () => number;
+  /**
+   * How each job ended: completed (its outcome), threw before it could finish, or
+   * was aborted at its ceiling (not a SIGTERM drain). A thrown or overrun job
+   * writes no streaks and reaches no per-wallet alert, so this is where a vault
+   * that fails that way every time is noticed.
+   */
+  readonly onJobEnd?: (vault: string, how: "complete" | "threw" | "aborted", detail: string) => void;
 }
 
 /** The counters a worker's beat writes into its row (src/fleet-status.ts, WORKER_STATS_KEYS). */
@@ -245,12 +252,14 @@ export class WorkerLoop {
         // COMPLETE IS ITS OWN CHECK: it changes nothing unless this worker still holds the vault at this fence.
         const kept = await this.#complete(claimed, end.end.completion);
         if (!kept) this.#lost(job, "COMPLETE found the lease gone; the job's outcome was discarded");
+        this.#ended(claimed.vault, "complete", end.end.completion.outcome);
       } else if (end.kind === "threw" && !job.draining) {
         // A JOB THAT THREW IS NOT HANDED BACK DUE NOW: the same throw would come straight back, claim after
         // claim, in a loop. It completes THREW, due again in a tick, as a turn that threw always was (ADR §3.7).
         const detail = `the job threw: ${summarizeUpstreamError(end.error)}`;
         this.#options.log("error", "a worker job threw; its vault is due again in a minute", { vault: claimed.vault, detail });
         await this.#complete(claimed, { rests: false, lane: "retry", streaks: claimed.streaks, outcome: "THREW", detail, dueInSeconds: THREW_DUE_SECONDS });
+        this.#ended(claimed.vault, "threw", detail);
       } else {
         // AND SO IS RELEASE: a vault taken over since is left alone; one only past its ceiling is handed back, due now.
         const reason =
@@ -262,11 +271,22 @@ export class WorkerLoop {
                 ? end.end.reason
                 : "the job could no longer act";
         await this.#release(claimed, reason, job.draining);
+        // PAST ITS CEILING, NOT DRAINING: a job that never finishes, which no streak and no fence ever sees.
+        if (end.kind === "aborted" && !job.draining) this.#ended(claimed.vault, "aborted", reason);
       }
     } finally {
       this.#jobs.delete(claimed.vault);
       this.#jobTimes.push(this.#now());
       this.#wake?.();
+    }
+  }
+
+  /** Tells the owner of the loop how a job ended (bin/worker.mts pages a vault whose jobs keep throwing or overrunning). Never throws. */
+  #ended(vault: string, how: "complete" | "threw" | "aborted", detail: string): void {
+    try {
+      this.#options.onJobEnd?.(vault, how, detail);
+    } catch {
+      // An alert that cannot be raised never changes what became of the vault.
     }
   }
 

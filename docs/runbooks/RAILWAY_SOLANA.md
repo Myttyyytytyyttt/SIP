@@ -724,7 +724,7 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
 | servicio | réplicas | público | lleva | no lleva |
 |---|---|---|---|---|
 | `keeper-scheduler` | 2 (una tiene el candado `sip-solana-scheduler`, la otra espera) | sí: `/hooks/helius`, `/status`, `/leaderboard`, `/health` | `DATABASE_URL`, las URL de RPC, la clave de Helius, el secreto del timbre, el Telegram | la llave de cobro, nada de Privy |
-| `keeper-worker` | `r` réplicas (empezar con 2) × 2 huecos | no | `DATABASE_URL`, las URL de RPC, la llave de cobro, la app y la authorization key de Privy, la clave de Jupiter, el Telegram | el secreto del timbre (no recibe a Helius) |
+| `keeper-worker` | `r` réplicas (empezar con 2) × 2 huecos | no | `DATABASE_URL`, las URL de RPC, la llave de cobro, la app, la authorization key, **`SIP_SOLANA_PRIVY_SIGNER_ID` y `SIP_SOLANA_PRIVY_POLICY_ID`** de Privy (en `on` sin estas dos **no arranca**), la clave de Jupiter, el Telegram | el secreto del timbre (no recibe a Helius) |
 
 - **Cada servicio se configura a mano**, como los de las secciones 1 y 6: el Dockerfile de la raíz construye la imagen
   del vigilante (que copia `packages/solana-keeper` entero, así que los archivos nuevos van dentro), *Restart On
@@ -734,8 +734,13 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
   `packages/solana-keeper`): `node_modules/.bin/tsx bin/scheduler.mts` en `keeper-scheduler` y
   `node_modules/.bin/tsx bin/worker.mts` en `keeper-worker`. Sin él, la imagen arranca el vigilante de siempre.
 - **`keeper-worker` no abre ningún puerto** (ni `/status` ni `/health`): no le pongas *Healthcheck Path*. Su estado lo
-  enseña el `/status` de la flota, que sirve el scheduler desde Postgres. Tampoco manda alertas todavía: las de la flota
-  son del scheduler.
+  enseña el `/status` de la flota, que sirve el scheduler desde Postgres. **Manda sus propias alertas** (desde 34816a1)
+  al mismo `SIP_SOLANA_ALERT_WEBHOOK` que los vigilantes, con «[worker] » delante: la misma escalera por wallet y por
+  vault que el vigilante de siempre (cobro fallido, reintentos, sin firmante, compra fallida o rechazada, wrap corto,
+  comisión de una pata), `settle-key-mismatch` si la llave de cobro no es la que nombra la cadena, `seat-unbounded`,
+  la authorization key de Privy (al arrancar y cada 30 min), el almacén de pérdidas y `job-failing:<vault>` para un
+  vault cuyos trabajos revientan o pasan el techo una y otra vez. Las de la flota (lease, fence, cola, scheduler,
+  Postgres) siguen siendo del scheduler.
 - **Sus variables**, además de las compartidas (`DATABASE_URL`, `SIP_SOLANA_RPC_URLS`, `SIP_SOLANA_PROGRAM_ID` y, en el
   scheduler, el Telegram). Todas estrictas: un valor que no sea exactamente uno de los aceptados **no arranca**.
 

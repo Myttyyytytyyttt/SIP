@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { INVEST_FAILED_CRITICAL_STREAK, WRAP_SHORT_ALERT_STREAK } from "../src/invest-decision.js";
 import { SETTLE_RETRY_CRITICAL_AFTER } from "../src/settle-decision.js";
-import { investRefusedAlert, jobAlerts } from "../src/worker-alerts.js";
+import { SETTLE_KEY_ALERT_KEY, investRefusedAlert, jobAlerts } from "../src/worker-alerts.js";
 import { completionFor, readStreaks, type JobEnd, type JobReport, type JobStreaks, type LinkTurn } from "../src/worker-job.js";
 
 const VAULT = "EFXK995PV49Qz8xPSYMEUDBU5AKRR466JkgsfuGak5iU";
@@ -24,6 +24,7 @@ function done(input: {
   previous?: JobStreaks;
   wrapShort?: boolean;
   investFacts?: JobReport["investFacts"];
+  settleKey?: JobReport["settleKey"];
 }): JobEnd {
   const report: JobReport = {
     vault: VAULT,
@@ -35,6 +36,7 @@ function done(input: {
     settles: input.settles,
     invest: input.invest,
     ...(input.investFacts === undefined ? {} : { investFacts: input.investFacts }),
+    ...(input.settleKey === undefined ? {} : { settleKey: input.settleKey }),
     intents: 0,
     resolvedAtTakeover: 0,
   };
@@ -60,7 +62,7 @@ describe("a job's settles, wallet by wallet, as the legacy sweep raises them", (
 
   it("neither counts nor pages a RETRY that waited on the shared carry store", () => {
     const waited = done({ settles: [turn(A, "RETRY", { waitingOn: "carry-store" })], invest: null, previous: readStreaks({ settleRetries: { [A]: 2 } }) });
-    expect(jobAlerts(waited)).toEqual({ clear: [], fire: [] });
+    expect(jobAlerts(waited)).toEqual({ clear: [], fire: [], carryWaited: true });
     expect(readStreaks(waited.kind === "complete" ? waited.completion.streaks : {}).settleRetries[A]).toBe(2);
   });
 
@@ -76,10 +78,12 @@ describe("a job's settles, wallet by wallet, as the legacy sweep raises them", (
 });
 
 describe("the vault's invest, once a job", () => {
-  it("warns on the first FAILED turn and pages critical on the third in a row, clearing the warning first", () => {
+  it("warns on the first FAILED turn and pages critical on the third in a row, through the alerter's escalation (no clear, so a discarded COMPLETE cannot page it twice)", () => {
     expect(keys(jobAlerts(done({ settles: [], invest: { outcome: "FAILED", detail: "slippage" } }))).fire).toEqual([[`invest-failed:${VAULT}`, "warn"]]);
     const third = done({ settles: [], invest: { outcome: "FAILED", detail: "slippage" }, previous: readStreaks({ investFailed: INVEST_FAILED_CRITICAL_STREAK - 1 }) });
-    expect(keys(jobAlerts(third))).toMatchObject({ clear: expect.arrayContaining([`invest-failed:${VAULT}`]), fire: [[`invest-failed:${VAULT}`, "critical"]] });
+    const rules = keys(jobAlerts(third));
+    expect(rules.fire).toEqual([[`invest-failed:${VAULT}`, "critical"]]);
+    expect(rules.clear).not.toContain(`invest-failed:${VAULT}`);
   });
 
   it("counts a THROW in the invest half as a FAILED turn, as the legacy sweep folds it", () => {
@@ -88,9 +92,13 @@ describe("the vault's invest, once a job", () => {
     expect(keys(jobAlerts(threw)).fire).toEqual([[`invest-failed:${VAULT}`, "warn"]]);
   });
 
-  it("clears the failed and refused warnings once the vault invests or rests", () => {
+  it("clears the failed warning once the vault rests, and the refused one only when a turn bought or failed, as the legacy sweep does", () => {
     const rests = done({ settles: [], invest: { outcome: "IDLE", detail: "" }, previous: readStreaks({ investFailed: 2 }) });
-    expect(keys(jobAlerts(rests)).clear).toEqual(expect.arrayContaining([`invest-refused:${VAULT}`, `invest-failed:${VAULT}`, `wrap-short:${VAULT}`]));
+    expect(keys(jobAlerts(rests)).clear).toEqual(expect.arrayContaining([`invest-failed:${VAULT}`, `wrap-short:${VAULT}`]));
+    for (const outcome of ["IDLE", "THREW", "DEFERRED", "PAUSED", "NO_POLICY"] as const) {
+      expect(keys(jobAlerts(done({ settles: [], invest: { outcome, detail: "" } }))).clear, outcome).not.toContain(`invest-refused:${VAULT}`);
+    }
+    expect(keys(jobAlerts(done({ settles: [], invest: { outcome: "INVESTED", detail: "" } }))).clear).toContain(`invest-refused:${VAULT}`);
   });
 
   it("raises a refused basket in the legacy keeper's exact shape", () => {
@@ -106,11 +114,35 @@ describe("the vault's invest, once a job", () => {
   });
 });
 
+describe("the settle key the chain names", () => {
+  it("pages a key the chain no longer names, critical, though the job settled nothing and has no wallet turn to page", () => {
+    const blocked = done({ settles: [], invest: null, settleKey: { kind: "mismatch", detail: "the on-chain ProtocolConfig names attester X" } });
+    expect(keys(jobAlerts(blocked)).fire).toEqual([[SETTLE_KEY_ALERT_KEY, "critical"]]);
+    expect(keys(jobAlerts(done({ settles: [turn(A, "IDLE")], invest: { outcome: "IDLE", detail: "" }, settleKey: { kind: "verified", detail: null } }))).clear).toContain(SETTLE_KEY_ALERT_KEY);
+  });
+});
+
+describe("what the caller keeps between jobs", () => {
+  it("clears the leg-fee warnings a vault raised before and no longer does, and says nothing when the turn did not look", () => {
+    const looked = jobAlerts(done({ settles: [], invest: { outcome: "INVESTED", detail: "" }, investFacts: { feeWarnings: [] } }), { legFeeKeys: new Set(["leg-fee:MINT"]) });
+    expect(looked.clear).toContain("leg-fee:MINT");
+    expect(looked.legFeeKeys).toEqual(new Set());
+    const blind = jobAlerts(done({ settles: [], invest: { outcome: "IDLE", detail: "" } }), { legFeeKeys: new Set(["leg-fee:MINT"]) });
+    expect(blind.clear).not.toContain("leg-fee:MINT");
+    expect(blind.legFeeKeys).toBeUndefined();
+  });
+
+  it("says when a settle waited on the shared carry store, for the caller to page the store once", () => {
+    expect(jobAlerts(done({ settles: [turn(A, "RETRY", { waitingOn: "carry-store" })], invest: null })).carryWaited).toBe(true);
+    expect(jobAlerts(done({ settles: [turn(A, "IDLE")], invest: null })).carryWaited).toBe(false);
+  });
+});
+
 describe("only a completed job speaks", () => {
   it("raises and resolves nothing for a stopped job: it wrote no streaks, and the next job decides", () => {
     const end = done({ settles: [turn(A, "FAILED")], invest: { outcome: "FAILED", detail: "" } });
     const stopped: JobEnd = { kind: "stop", reason: "the lease was lost", report: end.report };
-    expect(jobAlerts(stopped)).toEqual({ clear: [], fire: [] });
+    expect(jobAlerts(stopped)).toEqual({ clear: [], fire: [], carryWaited: false });
   });
 });
 
@@ -125,9 +157,15 @@ describe("bin/worker.mts fires them", () => {
 
   it("applies each job's rules after its log line, clearing before firing, and never lets an alert fail the job", () => {
     const after = worker.slice(worker.indexOf('log.info(end.kind === "complete" ? "job done" : "job stopped"'));
-    expect(after.indexOf("const rules = jobAlerts(end);")).toBeGreaterThan(-1);
+    expect(after.indexOf("const rules = jobAlerts(end, legFeeKeys === undefined ? {} : { legFeeKeys });")).toBeGreaterThan(-1);
     expect(after.indexOf("for (const key of rules.clear) alerter.clear(key);")).toBeLessThan(after.indexOf("for (const alert of rules.fire) alerter.fire(alert);"));
     expect(after.indexOf("} catch (error) {")).toBeLessThan(after.indexOf("return end;"));
+  });
+
+  it("pages a vault whose jobs keep throwing or overrunning, from the loop's own end hook", () => {
+    expect(worker).toContain("onJobEnd,");
+    expect(worker).toContain("const key = `job-failing:${vault}`;");
+    expect(worker).toContain("severity: streak >= JOB_FAILING_CRITICAL_STREAK ? \"critical\" : \"warn\",");
   });
 
   it("raises the seat alert where a wallet's signer is resolved, and checks the authorization key at boot and on a cadence", () => {

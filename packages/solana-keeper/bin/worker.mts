@@ -44,7 +44,7 @@ import { hostname } from "node:os";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { summarizeUpstreamError } from "@sip/solana-log";
-import { PgCarryStore } from "../src/carry-store.js";
+import { CARRY_STORE_ALERT_KEY, PgCarryStore, carryStoreAlert } from "../src/carry-store.js";
 import { ConfigError, SIGNING_SECRET_VARS, loadConfig, type KeeperConfig } from "../src/config.js";
 import { RpcUsageCollector } from "../src/credit-governor.js";
 import { DispatchStore, PgRpcUsageFeed, createDispatchPool } from "../src/dispatch-store.js";
@@ -251,7 +251,11 @@ const keys: JobKeys | null =
           const prepared = privyQueue.then(() => privyBook.prepare([address], Date.now()));
           privyQueue = prepared.catch(() => undefined);
           const view = await prepared;
-          if (view.failed.has(address)) return local;
+          if (view.failed.has(address)) {
+            // SAID, because the settle then reads NO_SIGNER and blames the wallet's seat, which is not the cause.
+            log.warn("the Privy lookup for this wallet failed this turn; it is not signed for until it answers", fields({ wallet: address }));
+            return local;
+          }
           const resolution = await createPrivySolanaSigner(privyConfig, wallet, config.privySignerId ?? undefined, view.index, config.privyPolicyId ?? undefined);
           // THE LEGACY KEEPER'S SEAT ALERT (bin/keeper.mts), same key: a seat with no
           // policy of its own could sign anything with that wallet, and nothing else
@@ -296,9 +300,42 @@ const shared: JobShared = {
 /** The keeper the last job's config named: read in the same request as the next job's vault. */
 let crankHint: PublicKey | null = null;
 
+/** Per vault, the leg-fee warnings its last looking turn raised (what the legacy sweep's legFeeLooked keeps). */
+const legFeeRaised = new Map<string, ReadonlySet<string>>();
+/** Since when settles have waited on the loss-carry store; null while they do not. */
+let carryWaitingSince: number | null = null;
+
+/**
+ * A VAULT WHOSE JOBS NEVER FINISH: they throw before any wallet turn ends, or run
+ * past their ceiling. Such a job writes no streaks and reaches no per-wallet
+ * alert, and the legacy keeper's equivalents (sweep-failed, the vault-read ladder,
+ * its watchdog) do not exist here. Counted per vault in this process: a warn on
+ * the first, critical on the JOB_FAILING_CRITICAL_STREAK-th in a row; the next
+ * completed job clears it.
+ */
+const JOB_FAILING_CRITICAL_STREAK = 3;
+const jobFailing = new Map<string, number>();
+function onJobEnd(vault: string, how: "complete" | "threw" | "aborted", detail: string): void {
+  const key = `job-failing:${vault}`;
+  if (how === "complete") {
+    if (jobFailing.delete(vault)) alerter.clear(key);
+    return;
+  }
+  const streak = (jobFailing.get(vault) ?? 0) + 1;
+  jobFailing.set(vault, streak);
+  alerter.fire({
+    key,
+    severity: streak >= JOB_FAILING_CRITICAL_STREAK ? "critical" : "warn",
+    title: how === "threw" ? "A worker's jobs on a vault keep throwing before they finish" : "A worker's jobs on a vault keep running past their ceiling",
+    detail: `${streak} in a row: ${detail}. Nothing is settled or bought for this vault while it lasts.`,
+    context: { vault },
+  });
+}
+
 const loop = new WorkerLoop({
   store,
   slots: settings.slots,
+  onJobEnd,
   log: (level, message, extra) => log[level](message, fields(extra)),
   runJob: async (claimed, control) => {
     const chain = createJobChain({
@@ -326,9 +363,21 @@ const loop = new WorkerLoop({
     log.info(end.kind === "complete" ? "job done" : "job stopped", fields(jobLogFields(end)));
     // THE LEGACY SWEEP'S LADDER, for this vault's wallets and its invest: cleared, then fired.
     try {
-      const rules = jobAlerts(end);
+      const legFeeKeys = legFeeRaised.get(claimed.vault);
+      const rules = jobAlerts(end, legFeeKeys === undefined ? {} : { legFeeKeys });
       for (const key of rules.clear) alerter.clear(key);
       for (const alert of rules.fire) alerter.fire(alert);
+      if (rules.legFeeKeys !== undefined) legFeeRaised.set(claimed.vault, rules.legFeeKeys);
+      // THE SHARED LOSS-CARRY STORE: a settle that waited on it pages nothing per
+      // wallet (settleAlert), so the store pages once, critical once it has kept
+      // failing (carryStoreAlert's rule); the first job that did not wait clears it.
+      if (rules.carryWaited) {
+        carryWaitingSince ??= Date.now();
+        alerter.fire(carryStoreAlert("on", "read", "a PROFIT settle on a queue vault waited on the store", Date.now() - carryWaitingSince));
+      } else if (end.kind === "complete" && end.report.settles.length > 0 && carryWaitingSince !== null) {
+        carryWaitingSince = null;
+        alerter.clear(CARRY_STORE_ALERT_KEY);
+      }
     } catch (error) {
       // An alert that cannot be raised never fails a job that moved money.
       log.warn("the job's alerts could not be raised", fields({ vault: claimed.vault, detail: summarizeUpstreamError(error) }));

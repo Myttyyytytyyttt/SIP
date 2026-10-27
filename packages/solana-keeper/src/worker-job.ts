@@ -217,6 +217,8 @@ export interface JobReport {
   readonly module: string | null;
   readonly settles: readonly LinkTurn[];
   readonly invest: { readonly outcome: TurnInvest; readonly detail: string } | null;
+  /** A live job's settle-key check against the on-chain ProtocolConfig, when it ran (src/worker-alerts.ts pages a mismatch). */
+  readonly settleKey?: { readonly kind: "verified" | "mismatch" | "no-config" | "unreadable"; readonly detail: string | null };
   /** What the invest turn reported beside its outcome, for the alerts the legacy sweep raises from it (src/worker-alerts.ts). */
   readonly investFacts?: { readonly wrap?: WrapReport; readonly feeWarnings?: readonly Alert[] };
   /** Intents this job gated. */
@@ -505,6 +507,7 @@ export async function runVaultJob(claimed: ClaimedVault, deps: VaultJobDeps): Pr
   if (store.world === "live") {
     if (keys === null) return waiting("RETRY", "a live worker holds no settle key; nothing was settled or bought", 60);
     const verification = verifySettleKey(keys.settleKey.publicKey, { config: read.config, configReadable: true });
+    report.settleKey = { kind: verification.kind, detail: verification.kind === "verified" ? null : verification.detail };
     if (verification.kind !== "verified") return waiting("RETRY", `${verification.detail}; nothing was settled or bought`, 60);
   } else if (keys !== null) {
     // UNREACHABLE: bin/worker.mts refuses to start a shadow worker that holds a key.

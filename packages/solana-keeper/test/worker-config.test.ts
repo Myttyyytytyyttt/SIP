@@ -98,6 +98,19 @@ describe("workerRefusals", () => {
     expect(workerRefusals({ armed: true, databaseUrl: db }, { mode: "on" })).toEqual([]);
     expect(workerRefusals({ armed: false, databaseUrl: null }, { mode: "shadow" })).toEqual([expect.stringContaining("DATABASE_URL is required")]);
   });
+
+  it("refuses a live worker signing through Privy without its signer id or policy id: it could not tell a wallet's seat apart", () => {
+    const privy = { privy: {} } as unknown as NonNullable<Parameters<typeof workerRefusals>[0]["signing"]>;
+    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: null, privyPolicyId: "pol" }, { mode: "on" })).toEqual([
+      expect.stringContaining("without SIP_SOLANA_PRIVY_SIGNER_ID"),
+    ]);
+    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: "sig", privyPolicyId: null }, { mode: "on" })).toEqual([
+      expect.stringContaining("without SIP_SOLANA_PRIVY_POLICY_ID"),
+    ]);
+    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: "sig", privyPolicyId: "pol" }, { mode: "on" })).toEqual([]);
+    // WITHOUT PRIVY (local keypairs) there is no seat to check.
+    expect(workerRefusals({ armed: true, databaseUrl: db, signing: { privy: null } as unknown as NonNullable<Parameters<typeof workerRefusals>[0]["signing"]>, privySignerId: null, privyPolicyId: null }, { mode: "on" })).toEqual([]);
+  });
 });
 
 describe("SIP_SOLANA_EXTRA_MODES* (the per-trade modes, ADR §6.2 M4–M6)", () => {

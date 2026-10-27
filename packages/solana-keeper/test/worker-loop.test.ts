@@ -186,6 +186,36 @@ describe("the job ceiling", () => {
   });
 });
 
+describe("how each job ended, told to the loop's owner (bin/worker.mts pages a vault whose jobs never finish)", () => {
+  it("says complete for a completed job, threw for one that threw, aborted for one past its ceiling — and nothing for a SIGTERM drain", async () => {
+    const ends: [string, string][] = [];
+    let hung = false;
+    const { loop } = setup(3, (claimed) => {
+      if (claimed.vault === "vault-1") return Promise.reject(new Error("a bug in the job"));
+      if (claimed.vault === "vault-2" && !hung) {
+        hung = true;
+        return new Promise<JobEnd>(() => undefined);
+      }
+      return Promise.resolve(complete(claimed));
+    }, { slots: 3, ceilingMs: 30, onJobEnd: (vault, how) => void ends.push([vault, how]) });
+    const started = loop.start();
+    await until(() => ends.some(([, how]) => how === "aborted") && ends.some(([, how]) => how === "threw") && ends.some(([vault, how]) => vault === "vault-0" && how === "complete"));
+    expect(ends).toEqual(expect.arrayContaining([["vault-0", "complete"], ["vault-1", "threw"], ["vault-2", "aborted"]]));
+    await loop.stop();
+    await started;
+  });
+
+  it("never lets a hook that throws change what became of the vault", async () => {
+    const { db, loop } = setup(1, async (claimed) => complete(claimed), { slots: 1, onJobEnd: () => {
+      throw new Error("the alerter broke");
+    } });
+    const started = loop.start();
+    await until(() => db.vaults.get("vault-0")!.lastOutcome === "DONE");
+    await loop.stop();
+    await started;
+  });
+});
+
 describe("SIGTERM: stop claiming, drain, release", () => {
   it("lets a job that can end do so inside the drain, aborts the one that cannot, releases both due now, and counts them", async () => {
     const senders: { drained: boolean }[] = [];
