@@ -363,7 +363,8 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
       expect(code, out).toBe(130);
       expect(out).toContain("esperando a que los keepers de siempre lean el cambio");
       expect(out).toContain("Parado a mitad.");
-      expect(out).toContain("Sigue «pasando»: nadie lo cobra ni compra.");
+      // IT DOES NOT KNOW whether the arm in flight had committed: «flota» does.
+      expect(out).toContain("haya quedado «pasando» (nadie lo cobra ni compra) o que ya esté en el sistema nuevo. Mira «flota».");
       expect(out).toContain(`«traspasar ${LEGACY_B.slice(0, 8)}»`);
       expect(out).toContain(`«volver ${LEGACY_B.slice(0, 8)}»`);
       expect(await system(LEGACY_B)).toBe("draining");
@@ -377,6 +378,51 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
     } finally {
       await db.query("DELETE FROM sip_solana.legacy_process WHERE process_id = 'frozen-profit'");
       await db.query("UPDATE sip_solana.vault_work SET system = 'legacy', system_at = NULL, handover_height = NULL WHERE vault_addr = ANY($1::text[])", [[LEGACY_B, LEGACY_C]]);
+    }
+  }, 90_000);
+
+  it("traspasar, stopped with Ctrl-C DURING the drain: still says where the vault may be and to look at «flota», not a silent 130", async () => {
+    // THE SIGNAL REACHES THE TOOL ALONE while its dispatch-handover child drains: before, no listener
+    // was installed until the wait, and tsx exited 130 printing nothing — with the drain going on.
+    const child = spawn("node_modules/.bin/tsx", [TOOL, "traspasar", LEGACY_B], {
+      cwd: KEEPER,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HOME: process.env["HOME"] ?? "",
+        PROD_DB: dbUrl,
+        SIP_FLOTA_TOOL_REHEARSAL: "1",
+        SIP_FLOTA_TOOL_PAGES: pagesBase,
+        SIP_FLOTA_TOOL_RPC: rpcUrl,
+        SIP_FLOTA_TOOL_POLL_MS: "150",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    const ended = new Promise<number | null>((done) => child.on("close", (code) => done(code)));
+    try {
+      await new Promise<void>((draining, failed) => {
+        const timer = setTimeout(() => failed(new Error(`no drain to interrupt:\n${out}`)), 40_000);
+        const watch = (chunk: Buffer): void => {
+          out += chunk.toString();
+          if (out.includes(`2/3  ${short(LEGACY_B)} pasa a «pasando»`)) {
+            clearTimeout(timer);
+            draining();
+          }
+        };
+        child.stdout.on("data", watch);
+        child.stderr.on("data", watch);
+      });
+      child.kill("SIGINT");
+      const code = await ended;
+      expect(code, out).toBe(130);
+      expect(out).toContain("Parado a mitad.");
+      expect(out).toContain("Mira «flota».");
+      expect(out).toContain(`Si «flota» lo enseña «pasando»: «traspasar ${LEGACY_B.slice(0, 8)}» para acabar, o «volver ${LEGACY_B.slice(0, 8)}» para devolverlo.`);
+    } finally {
+      // THE CHILD WAS NOT SIGNALLED and drains on: wait for it, then put the vault back.
+      const until = Date.now() + 20_000;
+      while ((await system(LEGACY_B)) !== "draining" && Date.now() < until) await new Promise((wait) => setTimeout(wait, 200));
+      await db.query("UPDATE sip_solana.vault_work SET system = 'legacy', system_at = NULL, handover_height = NULL WHERE vault_addr = $1", [LEGACY_B]);
     }
   }, 90_000);
 

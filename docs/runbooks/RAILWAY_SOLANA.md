@@ -1031,9 +1031,10 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
    cobra ni compra; los que aún no ha tocado siguen servidos por los vigilantes de siempre.
    - **Comprobar**: termina con «LISTO: todos los vaults están en el sistema nuevo.»; en `flota` todos dicen «sistema
      nuevo» y, al rato, su último trabajo; en el `/status` del scheduler, `fleet.queue.bySystem` ya no tiene `legacy`.
-   - **Si para a medias** (también si lo cortas con Ctrl-C: lo dice antes de salir): el vault que se quedó «pasando» no
-     lo sirve nadie. Termínalo con `"$F" traspasar <vault>` o devuélvelo con `"$F" volver <vault>`; `traspasar-todos` lo
-     nombra en vez de saltárselo. Si mientras espera te pide `marcar-ido`, hazlo en otra ventana: esa sigue esperando.
+   - **Si para a medias**: el vault que se quedó «pasando» no lo sirve nadie. Termínalo con `"$F" traspasar <vault>` o
+     devuélvelo con `"$F" volver <vault>`; `traspasar-todos` lo nombra en vez de saltárselo. Si lo cortas con Ctrl-C
+     (también mientras drena), antes de salir te dice que mires `flota`: no sabe si el último paso llegó a la base, y
+     `flota` sí. Si mientras espera te pide `marcar-ido`, hazlo en otra ventana: esa sigue esperando.
    - **Deshacer**: `"$F" volver <vault>`, de uno en uno (10.5).
 
 5. **Los vaults nuevos, también a la cola.**

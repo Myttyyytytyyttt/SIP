@@ -212,33 +212,40 @@ async function findVault(typed: string): Promise<{ readonly db: FleetDb; readonl
 }
 
 /**
- * A wait: the same command again every pollMs until `decide` says done or stop,
- * MOVE_TIMEOUT_MS at most. A call that gives no result at all is tolerated
- * CLI_FAILURES_TOLERATED times in a row (a database blip, the public RPC's 429).
- * `stranded` is where the wait leaves the vault — said when it gives up, by the
- * clock, by the CLI not answering, OR BY THE OWNER'S Ctrl-C (SIGINT, or a
- * SIGTERM): every way, the vault is still «pasando», and the owner must hear
- * that nobody serves it and what to type. The tool's own exit is 130 then, and
- * a dispatch-handover child in flight gets the same signal from the terminal.
+ * The owner's Ctrl-C (SIGINT, or a SIGTERM), from just BEFORE the step that
+ * takes the vault out of service (the drain, the rollback) until the move
+ * ends: the tool says where the vault may be and what to type, and exits 130.
+ * Without a listener tsx exits 130 and prints nothing — and a Ctrl-C during
+ * that 2–4 s child, which the terminal's signal kills too, could leave the
+ * vault «pasando» with no word. NOTHING HERE KNOWS whether the child's write
+ * had committed, nor whether the wait's last arm or release had: so `lines`
+ * send the owner to «flota», which does. Returns the remover.
  */
-async function waitFor(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
+function onInterrupt(lines: readonly string[]): () => void {
   const interrupted = (): void => {
     say("");
     say("     Parado a mitad.");
-    for (const line of stranded) say(`     ${line}`);
+    for (const line of lines) say(`     ${line}`);
     process.exit(130);
   };
   process.once("SIGINT", interrupted);
   process.once("SIGTERM", interrupted);
-  try {
-    return await waitLoop(args, decide, stranded);
-  } finally {
+  return () => {
     process.off("SIGINT", interrupted);
     process.off("SIGTERM", interrupted);
-  }
+  };
 }
 
-async function waitLoop(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
+/**
+ * A wait: the same command again every pollMs until `decide` says done or stop,
+ * MOVE_TIMEOUT_MS at most. A call that gives no result at all is tolerated
+ * CLI_FAILURES_TOLERATED times in a row (a database blip, the public RPC's 429).
+ * `stranded` is where the wait leaves the vault when it gives up — by the clock
+ * or by the CLI not answering: the vault is still «pasando», and the owner must
+ * hear that nobody serves it and what to type. The owner's Ctrl-C is the
+ * caller's (onInterrupt), installed before the step this wait finishes.
+ */
+async function waitFor(args: readonly string[], decide: (result: unknown) => Progress | null, stranded: readonly string[]): Promise<boolean> {
   const started = Date.now();
   let lastNote = "";
   let failures = 0;
@@ -294,27 +301,37 @@ async function moveOne(typed: string): Promise<boolean> {
     say("     No he tocado nada.");
     return false;
   }
-  if (row.system === "legacy") {
-    say(`2/3  ${short(vault)} pasa a «pasando»: desde su próxima vuelta (~1 min) los keepers de siempre lo dejan en paz.`);
-    say("     Hasta que termine, nadie lo cobra ni compra.");
-    const drained = await handover(["drain", vault]);
-    if (drained.ok !== true) {
-      const blockers = (drained.result as { blockers?: unknown } | null)?.blockers;
-      say("     No se pudo:");
-      if (Array.isArray(blockers) && blockers.length > 0) for (const blocker of blockers) say(`     ${plainBlocker(String(blocker))}`);
-      else say(drained.tail);
-      return false;
-    }
-  } else {
-    say(`2/3  ${short(vault)} ya estaba «pasando»: sigo desde ahí.`);
-  }
-  say("3/3  Esperando a que los keepers de siempre lo lean como ajeno y a que pasen 150 bloques (2–4 min)…");
-  const moved = await waitFor(["arm", vault, ...(rehearsal ? ["--allow-dry"] : [])], armProgress, [
-    "No he podido pasarlo. Sigue «pasando»: nadie lo cobra ni compra.",
-    "Si un keeper no lo ha leído, mira en Railway si su despliegue aún existe; si no, «marcar-ido <id>».",
-    `Para terminarlo (cuando el keeper haya leído, o lo hayas marcado ido): «traspasar ${vault.slice(0, 8)}».`,
-    `Para devolverlo a los keepers de siempre: «volver ${vault.slice(0, 8)}».`,
+  const v8 = vault.slice(0, 8);
+  const off = onInterrupt([
+    "No sé en qué punto: puede que siga con los keepers de siempre, que haya quedado «pasando» (nadie lo cobra ni compra) o que ya esté en el sistema nuevo. Mira «flota».",
+    `Si «flota» lo enseña «pasando»: «traspasar ${v8}» para acabar, o «volver ${v8}» para devolverlo.`,
   ]);
+  let moved: boolean;
+  try {
+    if (row.system === "legacy") {
+      say(`2/3  ${short(vault)} pasa a «pasando»: desde su próxima vuelta (~1 min) los keepers de siempre lo dejan en paz.`);
+      say("     Hasta que termine, nadie lo cobra ni compra.");
+      const drained = await handover(["drain", vault]);
+      if (drained.ok !== true) {
+        const blockers = (drained.result as { blockers?: unknown } | null)?.blockers;
+        say("     No se pudo:");
+        if (Array.isArray(blockers) && blockers.length > 0) for (const blocker of blockers) say(`     ${plainBlocker(String(blocker))}`);
+        else say(drained.tail);
+        return false;
+      }
+    } else {
+      say(`2/3  ${short(vault)} ya estaba «pasando»: sigo desde ahí.`);
+    }
+    say("3/3  Esperando a que los keepers de siempre lo lean como ajeno y a que pasen 150 bloques (2–4 min)…");
+    moved = await waitFor(["arm", vault, ...(rehearsal ? ["--allow-dry"] : [])], armProgress, [
+      "No he podido pasarlo. Sigue «pasando»: nadie lo cobra ni compra.",
+      "Si un keeper no lo ha leído, mira en Railway si su despliegue aún existe; si no, «marcar-ido <id>».",
+      `Para terminarlo (cuando el keeper haya leído, o lo hayas marcado ido): «traspasar ${v8}».`,
+      `Para devolverlo a los keepers de siempre: «volver ${v8}».`,
+    ]);
+  } finally {
+    off();
+  }
   if (!moved) return false;
   // A VAULT PARKED BEFORE IT LEFT THE QUEUE IS STILL PARKED: no handover step clears parked_reason, and no worker claims a parked vault.
   if (row.parkedReason !== null) {
@@ -382,21 +399,31 @@ async function volver(typed: string): Promise<number> {
   if (autoArmable(row) && scheduler.answered && scheduler.page.autoArm?.enabled === true) {
     say("     OJO: es un vault nuevo que el scheduler está pasando solo; podría terminar de pasarlo mientras espero. Si pasa, te lo digo.");
   }
-  if (row.system === "queue") {
-    say(`     Sacando ${short(vault)} de la cola: ningún trabajador lo vuelve a tomar.`);
-    const back = await handover(["rollback", vault]);
-    if (back.ok !== true) {
-      say("     No se pudo:");
-      say(back.tail);
-      return 1;
-    }
-  }
-  say(`2/2  Esperando a que el trabajador lo suelte y a que caduque su último envío (hasta ~6 min)…`);
-  const released = await waitFor(["release", vault], releaseProgress, [
-    "No he podido devolverlo. Sigue «pasando»: nadie lo cobra ni compra.",
-    `Para dejarlo otra vez en el sistema nuevo, servido: «traspasar ${vault.slice(0, 8)}».`,
-    `O vuelve a probar «volver ${vault.slice(0, 8)}» en unos minutos; si sigue igual, dímelo.`,
+  const v8 = vault.slice(0, 8);
+  const off = onInterrupt([
+    "No sé en qué punto: puede que siga en el sistema nuevo, que haya quedado «pasando» (nadie lo cobra ni compra) o que ya sea de los keepers de siempre. Mira «flota».",
+    `Si «flota» lo enseña «pasando»: «volver ${v8}» para acabar, o «traspasar ${v8}» para dejarlo otra vez en el sistema nuevo.`,
   ]);
+  let released: boolean;
+  try {
+    if (row.system === "queue") {
+      say(`     Sacando ${short(vault)} de la cola: ningún trabajador lo vuelve a tomar.`);
+      const back = await handover(["rollback", vault]);
+      if (back.ok !== true) {
+        say("     No se pudo:");
+        say(back.tail);
+        return 1;
+      }
+    }
+    say(`2/2  Esperando a que el trabajador lo suelte y a que caduque su último envío (hasta ~6 min)…`);
+    released = await waitFor(["release", vault], releaseProgress, [
+      "No he podido devolverlo. Sigue «pasando»: nadie lo cobra ni compra.",
+      `Para dejarlo otra vez en el sistema nuevo, servido: «traspasar ${v8}».`,
+      `O vuelve a probar «volver ${v8}» en unos minutos; si sigue igual, dímelo.`,
+    ]);
+  } finally {
+    off();
+  }
   if (!released) return 1;
   say(`LISTO: ${short(vault)} vuelve a ser de los keepers de siempre (lo atienden desde su próxima vuelta, ~1 min).`);
   return 0;
