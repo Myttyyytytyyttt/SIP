@@ -5,7 +5,15 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { INVEST_FAILED_CRITICAL_STREAK, UNMEASURED_BASKET_REFUSAL, WRAP_SHORT_ALERT_STREAK } from "../src/invest-decision.js";
+import {
+  INVEST_FAILED_CRITICAL_STREAK,
+  UNMEASURED_BASKET_REFUSAL,
+  UNROUTABLE_BASKET_REFUSAL,
+  WRAP_SHORT_ALERT_STREAK,
+  measurementFailedUpstream,
+} from "../src/invest-decision.js";
+import { JupiterBackoffError } from "../src/jupiter-pacer.js";
+import { JupiterRouteRefusal } from "../src/program-scripts.js";
 import { SETTLE_RETRY_CRITICAL_AFTER } from "../src/settle-decision.js";
 import { Secret } from "@sip/solana-log";
 import { createAlerter, type AlertSeverity } from "../src/alerts.js";
@@ -342,6 +350,43 @@ describe("a refusal the upstream caused: the basket's venues could not be measur
       w.job(FUNDED[1]!, { outcome: "REFUSED", detail: "the leg's pool holds $51 against a $149 buy: too thin" });
     }
     expect(w.posted.map((page) => page.key).sort()).toEqual([INVEST_REFUSED_UPSTREAM_ALERT_KEY, `invest-refused:${FUNDED[1]!}`].sort());
+  });
+
+  it("counts as upstream only what every vault meets: a pair's 400 or the builder's refusal is the vault's own, and pages on its key", () => {
+    const answered = (status: number) => new Error(`Jupiter answered HTTP ${status} at api.jup.ag/swap/v1/quote: {"error":"Could not find any route"}`);
+    for (const status of [400, 404, 422]) expect(measurementFailedUpstream(answered(status))).toBe(false);
+    expect(measurementFailedUpstream(new JupiterRouteRefusal("platform-fee", "the route carries a platform fee"))).toBe(false);
+    for (const status of [401, 403, 408, 429, 500, 503]) expect(measurementFailedUpstream(answered(status))).toBe(true);
+    expect(measurementFailedUpstream(new JupiterBackoffError(60_000, 0))).toBe(true);
+    expect(measurementFailedUpstream(new TypeError("fetch failed"))).toBe(true);
+    expect(measurementFailedUpstream(new Error("failed to get info about account: 503 Service Unavailable"))).toBe(true);
+
+    // A PAIR JUPITER REFUSES, BESIDE A REAL OUTAGE: the pair pages on its own
+    // vault at the third refusal, and the outage on the shared key on time.
+    // BEFORE, the 400 held the shared key from minute 2 and the 503 that began
+    // at minute 5 was paged only at the 30-minute repeat.
+    const PAIR = `${UNROUTABLE_BASKET_REFUSAL}Error: Jupiter answered HTTP 400 at api.jup.ag/swap/v1/quote: COULD_NOT_FIND_ANY_ROUTE — refusing the whole basket`;
+    const w = worker();
+    for (let minute = 0; minute <= 8; minute++) {
+      w.at(minute);
+      w.job(FUNDED[0]!, { outcome: "REFUSED", detail: PAIR });
+      if (minute >= 5) w.job(FUNDED[1]!, { outcome: "REFUSED", detail: OUTAGE });
+    }
+    expect(w.posted.map((page) => [page.at, page.key])).toEqual([
+      [2, `invest-refused:${FUNDED[0]!}`],
+      [7, INVEST_REFUSED_UPSTREAM_ALERT_KEY],
+    ]);
+  });
+
+  it("names the vaults it stops, and carries the vault's button when there is one", () => {
+    const upstream = new UpstreamRefusals({ now: () => 0 });
+    const three = { streak: INVEST_REFUSED_CRITICAL_STREAK, detail: OUTAGE };
+    const one = upstream.observe(FUNDED[0]!, three).fire!;
+    expect(one.detail).toContain(FUNDED[0]!);
+    expect(one.context).toMatchObject({ vault: FUNDED[0]! });
+    const two = upstream.observe(FUNDED[1]!, three).fire!;
+    expect(two.detail).toContain(`${FUNDED[0]!}, ${FUNDED[1]!}`);
+    expect(two.context?.["vault"]).toBeUndefined();
   });
 
   it("clears once no refused vault is left at the streak — one bought, the other forgotten unheard of — and starts again from a warn", () => {

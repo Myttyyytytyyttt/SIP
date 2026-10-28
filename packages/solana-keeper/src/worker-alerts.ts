@@ -13,12 +13,14 @@
 // turns critical on the third REFUSED job in a row (investRefusedAlert says
 // why). The legacy keeper's stays a warn. AND ONE CAUSE PAGES ONCE: a refusal
 // because the basket's venues could not be measured at all — Jupiter or the
-// RPC not answering, or answering 5xx — is the upstream's, and every vault
-// buying at that moment meets it. Paged per vault, one Jupiter outage was one
-// critical per funded vault two minutes in and again every 30 minutes; so such
-// a refusal stays a warn on the vault's own key, and UpstreamRefusals pages it
-// once for all of them (invest-refused-upstream). A refusal for the vault's own
-// reason — a drained pool, a basket over the share — still pages per vault.
+// RPC not answering, or Jupiter answering 5xx, 429 or a key it refuses — is the
+// upstream's, and every vault buying at that moment meets it. Paged per vault,
+// one Jupiter outage was one critical per funded vault two minutes in and again
+// every 30 minutes; so such a refusal stays a warn on the vault's own key, and
+// UpstreamRefusals pages it once for all of them (invest-refused-upstream). A
+// refusal for the vault's own reason — a drained pool, a basket over the share,
+// Jupiter refusing its pair with a 400 (invest-decision.ts,
+// measurementFailedUpstream) — still pages per vault.
 //
 // WHAT IS COUNTED WHERE. The legacy keeper keeps its streaks in process memory,
 // sweep after sweep. A worker keeps them in vault_work.streaks (completionFor),
@@ -226,6 +228,9 @@ export const INVEST_REFUSED_UPSTREAM_ALERT_KEY = "invest-refused-upstream";
  */
 export const UPSTREAM_REFUSAL_FORGET_MS = 2 * REFUSED_DUE_MAX_SECONDS * 1_000;
 
+/** How many of the persistent vaults the page names before it says "and N more". */
+const UPSTREAM_REFUSAL_NAMED_MAX = 5;
+
 /**
  * THE UPSTREAM REFUSAL, PAGED ONCE (the header): which vaults' last word was a
  * basket refused because its venues could not be measured, and the critical,
@@ -262,6 +267,9 @@ export class UpstreamRefusals {
     this.#firing = true;
     const latest = entries.reduce((newest, entry) => (entry.at >= newest.at ? entry : newest));
     const n = entries.length;
+    // WHICH VAULTS, not only how many: the page is the only one they get.
+    const named = [...this.#vaults].filter(([, entry]) => entry.streak >= INVEST_REFUSED_CRITICAL_STREAK).map(([vault]) => vault);
+    const shown = named.length <= UPSTREAM_REFUSAL_NAMED_MAX ? named.join(", ") : `${named.slice(0, UPSTREAM_REFUSAL_NAMED_MAX).join(", ")} and ${named.length - UPSTREAM_REFUSAL_NAMED_MAX} more`;
     return {
       fire: {
         key: INVEST_REFUSED_UPSTREAM_ALERT_KEY,
@@ -269,10 +277,10 @@ export class UpstreamRefusals {
         title: "Baskets keep being refused: their venues cannot be measured",
         detail:
           `${n} vault${n === 1 ? "'s basket is" : "s' baskets are"} refused because the venues could not be measured, ` +
-          `${persistent === n ? (n === 1 ? "for" : "each for") : `${persistent} of them for`} ${INVEST_REFUSED_CRITICAL_STREAK} turns or more in a row; nothing is bought. ` +
-          "One cause upstream (Jupiter or the RPC not answering), paged once here; each vault's invest-refused stays a warn. " +
+          `${persistent === n ? (n === 1 ? "for" : "each for") : `${persistent} of them for`} ${INVEST_REFUSED_CRITICAL_STREAK} turns or more in a row; nothing is bought ` +
+          `(${shown}). One cause upstream (Jupiter or the RPC not answering), paged once here; each vault's invest-refused stays a warn. ` +
           `Latest: ${latest.detail}`,
-        context: { vaults: n, persistent },
+        context: { vaults: n, persistent, ...(named.length === 1 ? { vault: named[0] } : {}) },
       },
       clear: false,
     };

@@ -64,6 +64,7 @@ import { BN } from "./anchor-interop.js";
 import {
   CRANK_WRAP_RESERVE_LAMPORTS,
   UNMEASURED_BASKET_REFUSAL,
+  UNROUTABLE_BASKET_REFUSAL,
   USDC_MINT,
   WRAP_DUST_LAMPORTS,
   basketBudget,
@@ -80,6 +81,7 @@ import {
   legFeeWarnings,
   legShare,
   legSlippageBps,
+  measurementFailedUpstream,
   oracleConvertDecision,
   pythConservativeBounds,
   rollingDecision,
@@ -969,11 +971,14 @@ async function investTurn(deps: InvestDeps, found: TurnFindings): Promise<Invest
     // that did not answer, an RPC that failed: none of them is evidence that
     // the venue is deep, and the doctrine is that the owner's SOL is not sold
     // toward a basket whose depth is unknown.
+    // WHOSE CAUSE IT IS decides who is woken (src/worker-alerts.ts): a cause
+    // every vault shares pages once for all of them, a refusal of this
+    // basket's own route pages on this vault (measurementFailedUpstream).
     if (error instanceof VenueMeasurementRefusal) return { outcome: "REFUSED", detail: error.message };
     return {
       outcome: "REFUSED",
       detail:
-        `${UNMEASURED_BASKET_REFUSAL}${summarizeUpstreamError(error)} — refusing ` +
+        `${measurementFailedUpstream(error) ? UNMEASURED_BASKET_REFUSAL : UNROUTABLE_BASKET_REFUSAL}${summarizeUpstreamError(error)} — refusing ` +
         "the whole basket and refusing to convert SOL toward it, because an unmeasurable depth is not a depth",
     };
   }

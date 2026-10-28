@@ -45,7 +45,7 @@ import {
 } from "../src/accounts.js";
 import type { ManagedLink } from "../src/discovery.js";
 import { accountDiscriminator, idl } from "../src/idl.js";
-import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, USDC_MINT } from "../src/invest-decision.js";
+import { JUPITER_V6_PROGRAM, RAYDIUM_CLMM_PROGRAM, UNROUTABLE_BASKET_REFUSAL, USDC_MINT, isUnmeasuredRefusal } from "../src/invest-decision.js";
 import { KEYED_API, LANDING_WINDOW_SLOTS, LITE_API, MODE_PROFIT, MODE_VOLUME } from "../src/program-scripts.js";
 import { convertCall, investCall, runInvestTick } from "../src/invest-tick.js";
 import { CrankSender, QUIET_AFTER_TAKEOVER_MS } from "../src/explicit-send.js";
@@ -1858,6 +1858,32 @@ describe("the ticks' first steps, over the same bytes", () => {
     // took 52-72 s and died on a versioned transaction. Pinning 0 keeps it gone.
     expect(calls.filter((name) => name === "getSignaturesForAddress")).toHaveLength(0);
     for (const rpc of ["getLatestBlockhash", "sendTransaction", "sendRawTransaction"]) expect(calls).not.toContain(rpc);
+  });
+
+  it("names a pair Jupiter refuses (a 400) as this basket's own refusal, not as Jupiter or the RPC not answering", async () => {
+    // WHOSE CAUSE IT IS DECIDES WHO IS WOKEN (src/worker-alerts.ts). A 400
+    // for this pair — no route, a venue Jupiter will not build for — leaves
+    // every other vault buying; filed under "could not be measured" it was held
+    // at a warn on this vault and paged as an upstream outage naming no vault.
+    const basket = basketOnChain([DEEP_INVENTORY, DEEP_INVENTORY, DEEP_INVENTORY]);
+    const refuse = (status: number) =>
+      vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "Could not find any route", errorCode: "COULD_NOT_FIND_ANY_ROUTE" }), { status }));
+    const turnWith = async (status: number) => {
+      refuse(status);
+      const { vault, connection, program } = chainWith({}, { legs: basket.legs }, emptyAndPriced, true, basket.accounts);
+      return runInvestTick({ connection, program, vault, crank: TURN_CRANK, crankLamports: 10_000_000_000n, live: true, protocolPaused: false });
+    };
+
+    const pair = await turnWith(400);
+    expect(pair.outcome).toBe("REFUSED");
+    expect(pair.detail.startsWith(UNROUTABLE_BASKET_REFUSAL)).toBe(true);
+    expect(isUnmeasuredRefusal(pair.detail)).toBe(false);
+    expect(pair.detail).toContain("Jupiter answered HTTP 400");
+    // THE SAME ANSWER WITH A 503 IS JUPITER DOWN: every vault meets it, and it stays upstream.
+    const down = await turnWith(503);
+    expect(down.outcome).toBe("REFUSED");
+    expect(isUnmeasuredRefusal(down.detail)).toBe(true);
+    expect(down.detail).toContain("Jupiter answered HTTP 503");
   });
 
   // ── the venue the owner signed, at the moment the money would move ─────────

@@ -35,7 +35,7 @@ import { NO_TRANSFER_FEE, SLIPPAGE_BPS, type TransferFeeTerms } from "./min-out.
 // startup, in --preflight, rather than as `undefined.equals(...)` inside the
 // venue comparison below on a live turn. Importing the id from the package here
 // would take a SECOND path into the same module and quietly skip that check.
-import { JUPITER_PROGRAM, feeRiseCanLand } from "./program-scripts.js";
+import { JUPITER_PROGRAM, JupiterRouteRefusal, feeRiseCanLand } from "./program-scripts.js";
 import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythPriceUpdate } from "./pyth.js";
 
 /**
@@ -50,6 +50,40 @@ export const UNMEASURED_BASKET_REFUSAL = "the venues this basket would trade aga
 
 /** Whether a REFUSED turn's detail is UNMEASURED_BASKET_REFUSAL's: upstream, not the vault's own. */
 export const isUnmeasuredRefusal = (detail: string): boolean => detail.startsWith(UNMEASURED_BASKET_REFUSAL);
+
+/**
+ * How a REFUSED invest turn's detail begins when the measurement could not be
+ * taken for THIS basket's own reason: Jupiter refused its pair (a 400 —
+ * COULD_NOT_FIND_ANY_ROUTE, a venue it will not build for — or another 4xx
+ * about the request), or the route builder refused the route Jupiter gave it.
+ * Every other vault still buys, so it pages on the vault's own key, as any
+ * refusal for the vault's own reason does (src/worker-alerts.ts).
+ */
+export const UNROUTABLE_BASKET_REFUSAL = "the route this basket would trade along was refused: ";
+
+/**
+ * Whether a measurement that threw failed for a cause every vault buying at
+ * that moment shares (UNMEASURED_BASKET_REFUSAL) rather than for this basket's
+ * own (UNROUTABLE_BASKET_REFUSAL).
+ *
+ * THE VAULT'S OWN ONLY ON EVIDENCE THAT NAMES IT: the builder's own refusal of
+ * the route, or a Jupiter answer whose status is about the request — any 4xx
+ * but the four that are about the caller or the service: 401 and 403 (a key
+ * it does not accept), 408 (it timed out) and 429 (the organisation's budget).
+ * Those, a 5xx, and everything that is not an answer at all — a request nobody
+ * answered, a timeout, an RPC that failed, the pacer's backoff — are upstream.
+ * A pair's 400 counted as upstream was held at a warn on its vault's key, paged
+ * as "Jupiter or the RPC not answering" with no vault named, and kept the one
+ * shared key raised, so a real outage behind it was paged up to 30 minutes late.
+ */
+export function measurementFailedUpstream(error: unknown): boolean {
+  if (error instanceof JupiterRouteRefusal) return false;
+  const status = /Jupiter answered HTTP (\d{3})\b/.exec(error instanceof Error ? error.message : String(error))?.[1];
+  if (status === undefined) return true;
+  const code = Number(status);
+  const aboutTheRequest = code >= 400 && code < 500 && code !== 401 && code !== 403 && code !== 408 && code !== 429;
+  return !aboutTheRequest;
+}
 
 /** USDC on mainnet: the only in-asset the keeper has routes for. */
 export const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
