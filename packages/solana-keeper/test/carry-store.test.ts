@@ -790,14 +790,17 @@ describe("on's gate asks the chain with no transaction open (review, 2026-10-12)
 
   it("through DurableCarries: a nonce that never comes is the gate's refusal within the budget, nothing is written then or later, and the pool stays usable", async () => {
     const pool = new OneConnectionPool([theOldContainers]);
-    const carries = new DurableCarries("on", new PgCarryStore(pool, "me"), hooks(), 40);
+    // A 200 ms BUDGET, not 40: the nonce gets half of it, and at 40 a loaded image
+    // build (2026-10-28) took 43 ms to hand back a 20 ms refusal. The detail below,
+    // not the clock, is what tells the gate's refusal from the store's own timeout.
+    const carries = new DurableCarries("on", new PgCarryStore(pool, "me"), hooks(), 200);
     const book: CarryBook = new Map();
     const startedAt = Date.now();
     const write = await carries.recordCarry(book, link, 900n, LOSS, MODE_PROFIT, { currentSlot: 1_000n, validUntilSlot: 1_150n, nonceNow: never });
-    expect(Date.now() - startedAt).toBeLessThan(40);
+    expect(Date.now() - startedAt).toBeLessThan(200);
     // THE LINK'S OWN BUSINESS, not the store being down: its wallet's ladder counts it.
     expect(write.kind === "refused" && write.detail).toMatch(/the link's nonce could not be read to tell whether it landed or may still land/);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(pool.statements).toEqual(["BEGIN", "SELECT", "SELECT", "ROLLBACK", "BEGIN", "SELECT", "SELECT", "ROLLBACK"]);
     expect(await carries.carryFor(book, linkAt(5n, 900n), MODE_PROFIT)).toEqual({ carry: null });
     expect(carries.status()).toMatchObject({ refusedAtGate: 1, writeFailures: 0, readFailures: 0 });
