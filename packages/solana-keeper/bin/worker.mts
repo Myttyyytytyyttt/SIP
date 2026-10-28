@@ -3,11 +3,12 @@
 // plan P3a Q3). The job is src/worker-job.ts, the loop src/worker-loop.ts, the
 // fence src/fenced-sender.ts.
 //
-// DARK. Production never starts this file: the Dockerfile's CMD is
-// bin/keeper.mts, for both legacy roles, and test/dispatch-dark.test.ts holds
-// that nothing those roles load reaches a dispatcher module. And even started,
-// it does nothing until SIP_SOLANA_DISPATCH names a mode: unset is `off`, and an
-// `off` worker says so and exits 0 before it opens a connection.
+// STARTED ONLY BY ITS OWN SERVICE: sip-solana-worker's Custom Start Command
+// (runbook §10.1). The Dockerfile's CMD stays bin/keeper.mts for the legacy
+// roles, and test/dispatch-dark.test.ts holds that nothing those roles load
+// reaches a dispatcher module. And even started, it does nothing until
+// SIP_SOLANA_DISPATCH names a mode: unset is `off`, and an `off` worker says so
+// and exits 0 before it opens a connection.
 //
 //   SIP_SOLANA_DISPATCH=shadow   keyless and dry; every would-be send gated as a
 //                                'shadow' intent and nothing sent (plan P3b);
@@ -28,6 +29,16 @@
 //
 // SIGTERM: stop claiming, drain sends in flight for up to SIGTERM_DRAIN_MS, then
 // release every vault still held (due now), close the worker row, exit 0.
+//
+// ITS HEALTH GATE, ONLY WITH PORT (src/worker-health.ts): GET and HEAD /health,
+// 503 while it starts, 200 once its row is registered and its first claim has
+// answered, 503 again from the first line of the shutdown. It listens only after
+// every refusal below and before its row is written: a configuration this
+// worker refuses never answers at all, so with the service's Healthcheck Path
+// at /health Railway keeps the worker before it (runbook §10.1), and a
+// registration that fails exits 1 having answered only 503. A server that
+// cannot listen exits 1, before the row is written. Without PORT nothing
+// listens, as before.
 //
 // ITS ALERTS (P3c's preconditions, 2026-10-27): the legacy sweep's per-wallet and
 // per-vault ladder, applied to each completed job (src/worker-alerts.ts: the same
@@ -92,6 +103,7 @@ import { keeperEnvOf, readWorkerSettings, workerRefusals, type WorkerSettings } 
 import { jobLogFields, runVaultJob, workerCarryReads, type JobKeys, type JobShared } from "../src/worker-job.js";
 import { INVEST_REFUSED_UPSTREAM_ALERT_KEY, UpstreamRefusals, jobAlerts } from "../src/worker-alerts.js";
 import { SchedulerStaleWatch } from "../src/fleet-alerts.js";
+import { WorkerHealthGate, listenForHealth } from "../src/worker-health.js";
 import { WorkerLoop } from "../src/worker-loop.js";
 
 const log = createKeeperLogger();
@@ -154,8 +166,11 @@ if (config.doorbellSecret !== null) {
 
 const workerId = `worker:${hostname()}:${randomUUID()}`;
 const version = process.env["RAILWAY_GIT_COMMIT_SHA"]?.slice(0, 40) ?? "local";
+const startedAt = Date.now();
 const programId = new PublicKey(config.programId);
 const world = settings.mode === "shadow" ? "shadow" : "live";
+/** The deploy's health gate (src/worker-health.ts), only with PORT: built here, listening only once nothing below can refuse. */
+const health = config.port === null ? null : { port: config.port, gate: new WorkerHealthGate({ version, startedAt, slots: settings.slots }) };
 
 // ── its alerts: the keeper's destination, told apart in the one chat ─────────
 const alerter = createAlerter({
@@ -375,6 +390,13 @@ const loop = new WorkerLoop({
   store,
   slots: settings.slots,
   onJobEnd,
+  // THE FIRST CLAIM THAT ANSWERS IS THIS WORKER SERVING: /health turns 200 on it, and Railway may retire the one before.
+  onClaimAnswered:
+    health === null
+      ? undefined
+      : () => {
+          if (health.gate.ready()) log.info("worker ready", fields({ port: health.port, health: "200: its row is registered and its first claim answered" }));
+        },
   log: (level, message, extra) => log[level](message, fields(extra)),
   runJob: async (claimed, control) => {
     const chain = createJobChain({
@@ -437,6 +459,27 @@ const loop = new WorkerLoop({
     await collector.flush(usageFeed);
   },
 });
+
+// ── its health gate, listening only now ───────────────────────────────────────
+// Past every refusal above and everything built from them, so a configuration
+// this worker refuses never answers (src/worker-health.ts); and before its row
+// is written, so a server that cannot listen leaves no row behind. That one
+// exits 1, as the scheduler's does: the deploy fails and says why, where a
+// worker nobody can check would only hold it until Railway's timeout. /health
+// says 503 until the first claim answers.
+if (health !== null) {
+  const port = health.port;
+  try {
+    await listenForHealth(health.gate, port, (error) =>
+      log.warn("worker: the health server failed after listening; the worker goes on", fields({ port, detail: summarizeUpstreamError(error) })),
+    );
+  } catch (error) {
+    log.error("worker: health server failed", fields({ port, detail: summarizeUpstreamError(error) }));
+    await pool.end().catch(() => undefined);
+    process.exit(1);
+  }
+  log.info("worker: listening for /health", fields({ port, phase: health.gate.phase }));
+}
 
 await store.registerProcess("worker", version, settings.slots);
 log.info("worker starting", fields({
@@ -526,6 +569,8 @@ let stopping = false;
 const shutdown = async (signal: string): Promise<void> => {
   if (stopping) return;
   stopping = true;
+  // 503 FROM HERE, BEFORE THE DRAIN: this process is on its way out, whatever it still finishes.
+  health?.gate.stopping();
   if (authorizationKeyTimer !== null) clearInterval(authorizationKeyTimer);
   log.info("worker stopping", fields({ signal, busy: loop.busy }));
   const drained = await loop.stop();

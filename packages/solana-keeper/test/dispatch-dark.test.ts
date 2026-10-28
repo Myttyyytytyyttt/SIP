@@ -45,11 +45,12 @@ const DISPATCHER_MODULES = [
   "src/scheduler-config.ts",
   "src/scheduler-board.ts",
   "src/lamports-filter.ts",
-  // Q3, the workers: the job, its loop, its fence, its takeover, its chain, its config, and the modules a job picks from.
+  // Q3, the workers: the job, its loop, its fence, its takeover, its chain, its config, its deploy gate, and the modules a job picks from.
   "src/worker-job.ts",
   "src/worker-loop.ts",
   "src/worker-takeover.ts",
   "src/worker-config.ts",
+  "src/worker-health.ts",
   "src/fenced-sender.ts",
   "src/job-chain.ts",
   "src/settle-modules.ts",
@@ -157,9 +158,9 @@ describe("DARK: no entry point production can start reaches a dispatcher module"
     }
   });
 
-  it("walks the worker's graph too: bin/worker.mts loads the store, the job, the loop and the fence", () => {
+  it("walks the worker's graph too: bin/worker.mts loads the store, the job, the loop, the fence and its deploy gate", () => {
     const worker = reach(resolve(KEEPER, "bin/worker.mts"));
-    for (const module of ["src/dispatch-store.ts", "src/worker-job.ts", "src/worker-loop.ts", "src/fenced-sender.ts", "src/job-chain.ts"]) {
+    for (const module of ["src/dispatch-store.ts", "src/worker-job.ts", "src/worker-loop.ts", "src/fenced-sender.ts", "src/job-chain.ts", "src/worker-health.ts"]) {
       expect(worker.has(resolve(KEEPER, module)), module).toBe(true);
     }
   });

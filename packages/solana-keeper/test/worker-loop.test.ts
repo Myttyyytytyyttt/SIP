@@ -73,6 +73,37 @@ describe("the claim loop", () => {
     expect(loop.stats().jobsLast10Min).toBe(5);
   });
 
+  it("tells its owner of every claim the database answered — none handed over included — and of none that threw (bin/worker.mts's /health)", async () => {
+    let answered = 0;
+    const { db, loop, logs } = setup(0, async (claimed) => complete(claimed), { onClaimAnswered: () => void (answered += 1) });
+    db.down = true;
+    const started = loop.start();
+    await until(() => logs.filter((line) => line === "the claim failed; trying again shortly").length >= 2);
+    expect(answered).toBe(0);
+    db.down = false;
+    await until(() => answered > 0);
+    await loop.stop();
+    await started;
+  });
+
+  it("goes on claiming and running jobs when the hook it tells throws", async () => {
+    const seen: string[] = [];
+    const { loop, logs } = setup(2, async (claimed) => (seen.push(claimed.vault), complete(claimed)), {
+      onClaimAnswered: () => {
+        throw new Error("the probe broke");
+      },
+    });
+    const started = loop.start();
+    await until(() => seen.length === 2 && loop.busy === 0);
+    await loop.stop();
+    await started;
+    expect([...seen].sort()).toEqual(["vault-0", "vault-1"]);
+    // SWALLOWED, NOT CAUGHT AS THE CLAIM'S: the hook runs inside the claim's try,
+    // after the vaults are in hand, so a throw that got out would still start the
+    // jobs — and be logged as a claim that failed.
+    expect(logs).not.toContain("the claim failed; trying again shortly");
+  });
+
   it("survives a claim that throws (the database away), and claims once it is back", async () => {
     const seen: string[] = [];
     const { db, loop, logs } = setup(1, async (claimed) => (seen.push(claimed.vault), complete(claimed)));

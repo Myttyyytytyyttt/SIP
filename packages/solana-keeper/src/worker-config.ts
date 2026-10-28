@@ -221,8 +221,10 @@ export function workerRefusals(
   // A LIVE WORKER SIGNING THROUGH PRIVY NAMES ITS SEAT AND ITS POLICY. Without
   // the signer id every Privy wallet resolves as signable, and without the policy
   // id a seat with no policy of its own is not told apart: the legacy keeper pages
-  // that at boot (seatCheckNotice); a new service has no healthcheck to keep
-  // alive, so a worker refuses instead.
+  // that at boot (seatCheckNotice), because it had to start before the policy
+  // existed; a worker refuses instead. Refused, it never answers /health
+  // (src/worker-health.ts), so with the service's Healthcheck Path the deploy
+  // fails and Railway keeps the worker before it running.
   if (settings.mode === "on" && config.signing?.privy != null) {
     const missing = [config.privySignerId == null ? "SIP_SOLANA_PRIVY_SIGNER_ID" : null, config.privyPolicyId == null ? "SIP_SOLANA_PRIVY_POLICY_ID" : null].filter((name): name is string => name !== null);
     if (missing.length > 0) {

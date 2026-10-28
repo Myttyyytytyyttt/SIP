@@ -35,8 +35,15 @@
 // verdict. Railway asks /health only at deploy time (ADR §3.11, RT-11); the
 // watchdog's self-exit is what acts on the same verdict afterwards.
 //
-// DARK. Nothing in the legacy keepers imports this file: the scheduler and
-// worker entry points (Q2, Q3) are to construct the reader and serve the view.
+// A WORKER SERVES NOT THIS RULE BUT A DEPLOY GATE (src/worker-health.ts:
+// starting, ready, stopping). Railway reads /health only until the first 2xx;
+// inside that window this rule's ten minutes could only say ok, and a worker has
+// no watchdog to act on it afterwards. A worker's stopped heartbeat shows here
+// instead, as its row's age in fleet.workers.
+//
+// DARK. Nothing in the legacy keepers imports this file: the scheduler's entry
+// point (Q2) constructs the reader and serves the view; the worker's (Q3)
+// serves no page, only its deploy gate.
 // The snapshot is read from Q1's tables (sql/sip_solana.sql, through
 // src/fleet-pg.ts), and a worker's row is written by Q1's store
 // (src/dispatch-store.ts: its stats and the quota age on every beat).
@@ -52,9 +59,12 @@ import { healthStaleAfterMs, type HealthReport } from "./status.js";
 export type FleetRole = "scheduler" | "worker";
 
 /**
- * What /health watches on each kind, as a table and not a ternary — L0's rule
- * (src/role-registry.ts): a third kind without a row does not compile, where a
- * `role === "scheduler" ? … : …` would hand it the worker's answer in silence.
+ * What decideFleetHealth watches on each kind, as a table and not a ternary —
+ * L0's rule (src/role-registry.ts): a third kind without a row does not
+ * compile, where a `role === "scheduler" ? … : …` would hand it the worker's
+ * answer in silence. Only the scheduler's /health serves it: the worker's row is
+ * the rule its loop would be judged by, and a worker's own /health is its deploy
+ * gate (src/worker-health.ts; the header says why).
  */
 export const FLEET_ROLE_HEALTH = {
   scheduler: { loop: "tick" },
@@ -82,7 +92,7 @@ export const FLEET_STATUS_READ_BUDGET_MS = 5_000;
 /** A worker whose heartbeat is older than this is dead: two minutes (ADR §3.8, reap). */
 export const WORKER_DEAD_AFTER_MS = 2 * 60_000;
 
-/** The worker's heartbeat interval (ADR §3.7): the loop /health watches on a worker. */
+/** The worker's heartbeat interval (ADR §3.7): the loop decideFleetHealth watches on a worker (whose own /health is its deploy gate, src/worker-health.ts). */
 export const WORKER_HEARTBEAT_MS = 10_000;
 
 /** The job ceiling (ADR §3.7): a lease claimed longer ago than this is a job the heartbeat no longer renews. */
@@ -605,7 +615,9 @@ export interface FleetHealthInput {
 }
 
 /**
- * What /health answers for a dispatcher process.
+ * What a scheduler's /health answers (bin/scheduler.mts), and the verdict a
+ * worker's loop would get: a worker's own /health is its deploy gate
+ * (src/worker-health.ts), not this.
  *
  * THE BOUND IS TODAY'S: max(3 × interval, 10 min) (healthStaleAfterMs,
  * src/status.ts). On a worker that is ten minutes for a ten-second loop, which

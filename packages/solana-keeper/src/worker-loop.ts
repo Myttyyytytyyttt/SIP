@@ -7,7 +7,9 @@
 // THE CLAIM LOOP. While a slot is free and the process is not stopping, CLAIM up
 // to that many due vaults (FOR UPDATE SKIP LOCKED, fence + 1, a 45 s lease) and
 // start a job for each. Nothing claimed: wait CLAIM_IDLE_MS, or less if a job
-// ends first. A claim that fails is logged and waited out the same way.
+// ends first. A claim that fails is logged and waited out the same way; one that
+// answers, empty or not, is told to the loop's owner (onClaimAnswered), and the
+// first is when bin/worker.mts's /health turns ready.
 //
 // THE HEARTBEAT, EVERY HEARTBEAT_EVERY_MS ON ITS OWN TIMER, never behind a step a
 // job is awaiting (ADR §3.7). One statement renews every (vault, fence) this
@@ -90,6 +92,14 @@ export interface WorkerLoopOptions {
    * that fails that way every time is noticed.
    */
   readonly onJobEnd?: (vault: string, how: "complete" | "threw" | "aborted", detail: string) => void;
+  /**
+   * Told after every claim the database ANSWERED, whatever it handed over —
+   * nothing included — and never after one that threw. The first is the process
+   * serving: its row is registered and the queue is being read, which is when
+   * bin/worker.mts turns /health to ready (src/worker-health.ts). Its throw is
+   * swallowed: a probe never costs the loop a claim.
+   */
+  readonly onClaimAnswered?: () => void;
 }
 
 /** The counters a worker's beat writes into its row (src/fleet-status.ts, WORKER_STATS_KEYS). */
@@ -169,6 +179,7 @@ export class WorkerLoop {
         let claimed: readonly ClaimedVault[] = [];
         try {
           claimed = await this.#options.store.claim(free);
+          this.#claimAnswered();
         } catch (error) {
           this.#options.log("warn", "the claim failed; trying again shortly", { detail: summarizeUpstreamError(error) });
         }
@@ -278,6 +289,15 @@ export class WorkerLoop {
       this.#jobs.delete(claimed.vault);
       this.#jobTimes.push(this.#now());
       this.#wake?.();
+    }
+  }
+
+  /** Tells the owner of the loop that a claim answered (bin/worker.mts's /health). Never throws. */
+  #claimAnswered(): void {
+    try {
+      this.#options.onClaimAnswered?.();
+    } catch {
+      // A probe that cannot be told never costs the loop a claim.
     }
   }
 
