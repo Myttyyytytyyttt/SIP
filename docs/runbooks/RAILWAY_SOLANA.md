@@ -1017,7 +1017,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
    - **Comprobar**: su `/status` → `carryStore.mode` = `on`, `carryStore.notReady` = `null`, y sigue `mode` = `live`
      con `missingLiveCondition` = `null`. En `flota`, su recibo nuevo dice «pérdidas en la base: on». Marca el del
      contenedor que sustituyó cuando Railway ya no lo enseñe: `"$F" marcar-ido <id>` (o, pasados 15 min,
-     `marcar-idos-viejos`).
+     `marcar-idos-viejos`). `flota` lo nombra así («Siguiente:» y la línea de ese recibo), y hasta que lo marques
+     `traspasar` se niega por él: no vuelvas a poner la variable, que ya está.
    - **Deshacer**: antes del paso 4, quitar la variable (otro redespliegue). Después, no: **nunca vuelvas a `off`** con
      vaults de beneficio en la cola o recién devueltos (10.5).
 

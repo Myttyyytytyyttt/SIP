@@ -773,14 +773,36 @@ function carryStoreProblems(db: FleetDb, why: string): string[] {
   const problems: string[] = [];
   for (const entry of db.processes) {
     if (!carryStoreNotOn(entry)) continue;
+    const newer = supersededBy(db, entry);
     problems.push(
-      `${keeperWords(entry.role)} (id ${entry.processId}) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=${entry.carryStore ?? "off"}): ${why}. ` +
-        "Ponle SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío)" +
-        (receiptState(entry) === "viejo" ? `; si su despliegue (${entry.deployment ?? "?"}) ya no existe en Railway: «marcar-ido ${entry.processId}»` : ""),
+      newer !== null
+        ? `${keeperWords(entry.role)} (id ${entry.processId}, SIP_SOLANA_CARRY_STORE=${entry.carryStore ?? "off"}) es el contenedor que un redespliegue sustituyó: ` +
+            `el nuevo (id ${newer.processId}) ya lleva on, pero este, sin marcar como ido, sigue contando: ${why}. ` +
+            `Cuando Railway ya no enseñe su despliegue (${entry.deployment ?? "?"}): «marcar-ido ${entry.processId}»${goneWait(entry)}`
+        : `${keeperWords(entry.role)} (id ${entry.processId}) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=${entry.carryStore ?? "off"}): ${why}. ` +
+            "Ponle SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío)" +
+            (receiptState(entry) === "viejo" ? `; si su despliegue (${entry.deployment ?? "?"}) ya no existe en Railway: «marcar-ido ${entry.processId}»` : ""),
     );
   }
   return problems;
 }
+
+/**
+ * The newer receipt of the same role, not marked gone and running the carry
+ * store `on`, that makes this `off` one the container a redeploy replaced —
+ * 10.8 step 3 sets the variable, Railway starts a new container under a new
+ * receipt, and nothing marks the old one. Its remedy is «marcar-ido» once
+ * Railway no longer shows it, not "set SIP_SOLANA_CARRY_STORE=on" (it already
+ * is, and another redeploy only leaves one more receipt to mark). Null when
+ * none: the variable itself is what is missing.
+ */
+function supersededBy(db: FleetDb, entry: ProcessEntry): ProcessEntry | null {
+  if (!carryStoreNotOn(entry)) return null;
+  return db.processes.find((other) => other !== entry && other.goneAt === null && other.role === entry.role && other.carryStore === "on" && other.ageMs < entry.ageMs) ?? null;
+}
+
+/** What to add to a «marcar-ido» goneTargets would still refuse: a receipt younger than FRESH_READ_MS is not marked. */
+const goneWait = (entry: ProcessEntry): string => (entry.ageMs < FRESH_READ_MS ? " (dentro de unos minutos: acaba de leer, y antes no lo marco)" : "");
 
 /**
  * Why `volver <vault>` may not start, before the rollback takes it out of the
@@ -1213,6 +1235,9 @@ function receiptLines(db: FleetDb): string[] {
     const carry = entry.carryStore === null ? "" : ` · pérdidas en la base: ${entry.carryStore}`;
     lines.push(`  keeper de ${roleWords(entry.role)}: ${state} · leyó ${agoWords(entry.ageMs)} · ${acting}${carry} · id ${entry.processId}`);
     if (state === "viejo") lines.push(`    si su despliegue (${entry.deployment ?? "?"}) ya no existe en Railway: «marcar-ido ${entry.processId}»`);
+    else if (supersededBy(db, entry) !== null) {
+      lines.push(`    es el contenedor de antes del redespliegue (el nuevo ya lleva on): cuando Railway ya no enseñe su despliegue (${entry.deployment ?? "?"}), «marcar-ido ${entry.processId}»${goneWait(entry)}`);
+    }
   }
   if (gone > 0) lines.push(`  idos (marcados): ${gone}`);
   return lines;
@@ -1304,13 +1329,19 @@ export function nextSteps(view: FlotaView): string[] {
   }
   if (legacy.length > 0) {
     // THE CARRY STORE FIRST (10.8 step 3): «traspasar» refuses a PROFIT vault while the profit keeper does not run it `on`.
-    const storeOff = db.processes.some(carryStoreNotOn);
+    // A RECEIPT A NEWER `on` ONE HAS SUPERSEDED is the container step 3 replaced: its remedy is «marcar-ido», not the variable again.
+    const notOn = db.processes.filter(carryStoreNotOn);
+    const replaced = notOn.filter((entry) => supersededBy(db, entry) !== null);
+    const storeOff = notOn.length > replaced.length;
+    const carriers = legacy.some((entry) => mayCarryLosses(db, entry.vault));
     steps.push(
       !legacyReading
         ? `Quedan ${legacy.length} con los keepers de siempre, y esos keepers no están leyendo: enciéndelos en Railway antes de traspasar.`
-        : storeOff && legacy.some((entry) => mayCarryLosses(db, entry.vault))
+        : storeOff && carriers
           ? `Quedan ${legacy.length} con los keepers de siempre. Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper (10.8 paso 3, cuando su /status diga pendingCarries vacío); luego «traspasar-todos».`
-          : `Quedan ${legacy.length} con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>».`,
+          : replaced.length > 0 && carriers
+            ? `Quedan ${legacy.length} con los keepers de siempre. Antes de traspasar: «marcar-ido ${replaced.map((entry) => entry.processId).join(" ")}», el contenedor que el redespliegue del paso 3 sustituyó, cuando Railway ya no lo enseñe${replaced.some((entry) => entry.ageMs < FRESH_READ_MS) ? " (dentro de unos minutos)" : ""}; luego «traspasar-todos».`
+            : `Quedan ${legacy.length} con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>».`,
     );
     return steps;
   }

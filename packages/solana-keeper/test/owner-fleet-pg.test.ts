@@ -224,8 +224,10 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
       expect(ran.out).toContain("cobro: sin operaciones nuevas (2 carteras) · compra: nada que comprar");
       expect(ran.out).toContain("OJO: lleva 3 compras rechazadas seguidas");
       expect(ran.out).toContain("su trabajo se cortó 5 veces seguidas sin terminar");
-      // THE OLD CONTAINER'S RECEIPT RUNS THE CARRY STORE dual, not on: step 3 of 10.8 first.
-      expect(ran.out).toContain("Quedan 3 con los keepers de siempre. Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper");
+      // THE OLD CONTAINER'S RECEIPT RUNS THE CARRY STORE dual, and the profit keeper reading now runs on: the old
+      // one is the container a redeploy replaced, and what is asked is «marcar-ido», not the variable again.
+      expect(ran.out).toContain(`Quedan 3 con los keepers de siempre. Antes de traspasar: «marcar-ido ${OLD_PROCESS}», el contenedor que el redespliegue del paso 3 sustituyó`);
+      expect(ran.out).not.toContain("Antes de traspasar: SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper");
     } else {
       expect(ran.out).toContain("Vaults (2):");
       // AN OLDER CLI does not say a vault is parked: it is shown as the queue's, and not as parked.
@@ -259,8 +261,9 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
     expect(ran.code, ran.out).toBe(1);
     expect(ran.out).toContain(`con id ${OLD_PROCESS} no lee desde hace 60 min y no ha soltado este vault`);
     expect(ran.out).toContain(`«marcar-ido ${OLD_PROCESS}»`);
-    // ... AND ITS CARRY STORE IS dual: a PROFIT vault waits for every profit receipt on `on` (10.8 step 3).
-    expect(ran.out).toContain(`(id ${OLD_PROCESS}) no guarda en la base las pérdidas (SIP_SOLANA_CARRY_STORE=dual)`);
+    // ... AND ITS CARRY STORE IS dual: a PROFIT vault waits for every profit receipt on `on` (10.8 step 3) —
+    // here the container a redeploy replaced, beside the profit keeper reading now with on.
+    expect(ran.out).toContain(`(id ${OLD_PROCESS}, SIP_SOLANA_CARRY_STORE=dual) es el contenedor que un redespliegue sustituyó`);
     expect(ran.out).toContain("No he tocado nada.");
     expect(await system(LEGACY_A)).toBe("legacy");
   }, 30_000);

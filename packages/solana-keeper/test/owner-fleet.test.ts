@@ -658,7 +658,7 @@ describe("volver and the new-vault flag: never to nobody", () => {
     const stale = fleet({ processes: [...fleet().processes, receipt("p-old", "profit", { carryStore: null, ageMs: 3_600_000 })] });
     const problems = returnProblems(stale, LEGACY_A, false);
     expect(problems).toHaveLength(1);
-    expect(problems[0]).toContain("(SIP_SOLANA_CARRY_STORE=off)");
+    expect(problems[0]).toContain("(id p-old, SIP_SOLANA_CARRY_STORE=off) es el contenedor que un redespliegue sustituyó");
     expect(problems[0]).toContain("«marcar-ido p-old»");
     // A VOLUME VAULT (the owner's) carries no losses: it may go back.
     expect(returnProblems(off, OWNER_VAULT, false)).toEqual([]);
@@ -985,6 +985,32 @@ describe("flota: the screen", () => {
     // STEP 3 DONE AND THE OLD CONTAINER MARKED: the next step is the move itself.
     const afterStep3 = { ...db, processes: [receipt("p-profit", "profit"), receipt("p-volume", "volume")] };
     expect(nextSteps(view(afterStep3))).toEqual(["Quedan 2 con los keepers de siempre: «traspasar-todos» (uno detrás de otro) o «traspasar <vault>»."]);
+  });
+
+  it("after step 3's redeploy, names the replaced container's receipt for «marcar-ido» instead of asking again for the variable it already has", () => {
+    // THE NEW CONTAINER WRITES ITS OWN RECEIPT, `on`; the one it replaced stays unmarked and `off`. Asking
+    // for SIP_SOLANA_CARRY_STORE=on again sent the owner to redeploy a variable already set.
+    const replacedAt = (ageMs: number) =>
+      fleet({ processes: [receipt("p-new", "profit", { ageMs: 10_000 }), receipt("p-before", "profit", { ageMs, carryStore: "off" }), receipt("p-volume", "volume")] });
+    for (const ageMs of [90_000, 5 * 60_000]) {
+      const db = replacedAt(ageMs);
+      const steps = nextSteps(view(db));
+      expect(steps).toEqual([expect.stringContaining("Antes de traspasar: «marcar-ido p-before», el contenedor que el redespliegue del paso 3 sustituyó")]);
+      expect(steps.join(" ")).not.toContain("SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper");
+      // THE REFUSAL STAYS (release refuses on any unmarked receipt that is not `on`); only its words change.
+      const problems = moveProblems(db, LEGACY_A, false);
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.join(" ")).toContain("«marcar-ido p-before»");
+      expect(problems.join(" ")).not.toContain("Ponle SIP_SOLANA_CARRY_STORE=on");
+      expect(flotaLines(view(db)).join("\n")).toContain("es el contenedor de antes del redespliegue (el nuevo ya lleva on): cuando Railway ya no enseñe su despliegue (dep-p-before), «marcar-ido p-before»");
+    }
+    // AT 90 s marcar-ido WOULD STILL REFUSE IT (goneTargets): the words say to wait.
+    expect(nextSteps(view(replacedAt(90_000)))[0]).toContain("(dentro de unos minutos)");
+    expect(goneTargets(replacedAt(90_000), ["p-before"]).targets).toHaveLength(0);
+    expect(nextSteps(view(replacedAt(5 * 60_000)))[0]).not.toContain("(dentro de unos minutos)");
+    // NO NEWER `on` RECEIPT: the variable is what is missing, and it is still asked for.
+    const unset = fleet({ processes: [receipt("p-before", "profit", { carryStore: "off" }), receipt("p-volume", "volume")] });
+    expect(nextSteps(view(unset))[0]).toContain("SIP_SOLANA_CARRY_STORE=on en sip-solana-keeper");
   });
 
   it("marks what needs looking at on a queue vault: the outcome, its detail, a streak, attempts, a park", () => {
