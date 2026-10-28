@@ -283,10 +283,19 @@ export function loadSchedulerConfig(env: NodeJS.ProcessEnv, redactor: Redactor =
     warnings.push("SIP_SOLANA_AUTO_ARM is on under SIP_SOLANA_DISPATCH=shadow: a shadow scheduler arms nothing; it runs only under on.");
   }
   if (!autoArm && (env["SIP_SOLANA_LEGACY_ROLES"]?.trim() ?? "") !== "") {
+    // UNDER on THE LEGACY-ORPHANED ALERT READS EVERY VALUE, not only none
+    // (bin/scheduler.mts hands it config.legacyRoles): a list of one role
+    // watches that keeper alone, and saying "nothing reads it" there let a
+    // one-role value stay set as if inert while the other keeper went unwatched.
+    const others = KEEPER_ROLES.filter((role) => !legacyRoles.includes(role));
     warnings.push(
-      legacyRoles.length === 0 && dispatch === "on"
-        ? "SIP_SOLANA_LEGACY_ROLES is none but SIP_SOLANA_AUTO_ARM is off: only the legacy-orphaned alert reads it (the legacy keepers are retired), and no vault is armed."
-        : "SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it.",
+      dispatch !== "on"
+        ? "SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it."
+        : legacyRoles.length === 0
+          ? "SIP_SOLANA_LEGACY_ROLES is none but SIP_SOLANA_AUTO_ARM is off: only the legacy-orphaned alert reads it (the legacy keepers are retired), and no vault is armed."
+          : others.length === 0
+            ? `SIP_SOLANA_LEGACY_ROLES is ${legacyRoles.join(",")} but SIP_SOLANA_AUTO_ARM is off: only the legacy-orphaned alert reads it, and it watches every legacy keeper, as it does unset; no vault is armed.`
+            : `SIP_SOLANA_LEGACY_ROLES is ${legacyRoles.join(",")} but SIP_SOLANA_AUTO_ARM is off: only the legacy-orphaned alert reads it, and it watches only the ${legacyRoles.join(" and ")} keeper — the ${others.join(" and ")} keeper is not paged when it stops while vaults are still 'legacy'; no vault is armed.`,
     );
   }
   const jupiterCallsPerMinute = readCount(

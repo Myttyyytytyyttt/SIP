@@ -201,14 +201,21 @@ describe("SIP_SOLANA_AUTO_ARM and SIP_SOLANA_LEGACY_ROLES", () => {
     expect(problemsOf({ ...BASE, SIP_SOLANA_LEGACY_ROLES: "profit,profit" })).toEqual([expect.stringContaining("SIP_SOLANA_LEGACY_ROLES")]);
   });
 
-  it("runs only under SIP_SOLANA_DISPATCH=on, and says so under shadow; roles set with the step off are said to be unread", () => {
+  it("runs only under SIP_SOLANA_DISPATCH=on, and says so under shadow; a role list with the step off is said to narrow legacy-orphaned", () => {
     const shadow = load({ ...BASE, SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_AUTO_ARM: "on" });
     expect(shadow.autoArm).toBe(true);
     expect(autoArmRuns(shadow)).toBe(false);
     expect(shadow.warnings.join(" ")).toContain("SIP_SOLANA_AUTO_ARM is on under SIP_SOLANA_DISPATCH=shadow");
-    const unread = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_LEGACY_ROLES: "profit" });
-    expect(unread.legacyRoles).toEqual(["profit"]);
-    expect(unread.warnings.join(" ")).toContain("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off");
+    // ONE ROLE UNDER on: legacy-orphaned watches that keeper alone (bin/scheduler.mts hands it the list), so it is not "unread".
+    const narrowed = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_LEGACY_ROLES: "profit" });
+    expect(narrowed.legacyRoles).toEqual(["profit"]);
+    expect(narrowed.warnings.join(" ")).toContain("only the legacy-orphaned alert reads it, and it watches only the profit keeper — the volume keeper is not paged");
+    expect(narrowed.warnings.join(" ")).not.toContain("nothing on this scheduler reads it");
+    const both = load({ ...BASE, SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_LEGACY_ROLES: "profit,volume" });
+    expect(both.warnings.join(" ")).toContain("it watches every legacy keeper, as it does unset");
+    // UNDER shadow legacy-orphaned is not evaluated: nothing reads it.
+    const unread = load({ ...BASE, SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_LEGACY_ROLES: "profit" });
+    expect(unread.warnings.join(" ")).toContain("SIP_SOLANA_LEGACY_ROLES is set but SIP_SOLANA_AUTO_ARM is off: nothing on this scheduler reads it");
   });
 
   it("none with the step off is still read under on — by the legacy-orphaned alert — and said so; under shadow nothing reads it", () => {
