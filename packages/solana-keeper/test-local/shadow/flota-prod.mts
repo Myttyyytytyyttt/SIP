@@ -353,7 +353,11 @@ async function traspasarTodos(): Promise<number> {
   }
   const legacy = db.vaults.filter((entry) => entry.system === "legacy").map((entry) => entry.vault);
   // A VAULT LEFT «pasando» BY A STOPPED traspasar is nobody's, and is not 'legacy': named, never passed over in silence.
-  const halfway = db.vaults.filter((entry) => entry.system === "draining" && !autoArmable(entry));
+  // Nor is a new vault the scheduler enrolled, unless its page says it arms by itself (nextSteps' rule): with
+  // SIP_SOLANA_AUTO_ARM removed (10.8 step 5, «Deshacer»), or a page that did not answer, nobody is known to arm it.
+  const scheduler = await schedulerPage();
+  const autoArmOn = scheduler.answered && scheduler.page.autoArm?.enabled === true;
+  const halfway = db.vaults.filter((entry) => entry.system === "draining" && !(autoArmOn && autoArmable(entry)));
   for (const entry of halfway) {
     say(`OJO: ${short(entry.vault)} sigue «pasando» y nadie lo sirve: «traspasar ${entry.vault.slice(0, 8)}» para acabar, o «volver ${entry.vault.slice(0, 8)}».`);
   }

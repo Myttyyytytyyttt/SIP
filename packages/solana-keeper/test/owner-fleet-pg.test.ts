@@ -426,6 +426,29 @@ describe.skipIf(!usable)("flota-prod on Postgres 16, rehearsed (needs KEEPER_TES
     }
   }, 90_000);
 
+  it("traspasar-todos names a new vault the scheduler enrolled when the scheduler does not arm by itself, rather than «nada que hacer»", async () => {
+    if (!newCli) return;
+    // 10.8 STEP 5 UNDONE: new vaults back to the legacy keepers, SIP_SOLANA_AUTO_ARM removed — and a vault the
+    // scheduler had enrolled (draining, system_at NULL, fence 0) left behind, which nobody will arm.
+    await db.query("UPDATE sip_solana.vault_work SET system = 'draining', system_at = NULL WHERE vault_addr = $1", [LEGACY_B]);
+    await db.query("UPDATE sip_solana.vault_work SET system = 'queue' WHERE vault_addr = $1", [LEGACY_C]);
+    try {
+      setScheduler({ enabled: false, legacyRoles: ["profit", "volume"], pending: [], lastArmedAt: null, lastResults: [], lastError: null });
+      const off = await tool(["traspasar-todos"]);
+      expect(off.code, off.out).toBe(1);
+      expect(off.out).toContain(`OJO: ${short(LEGACY_B)} sigue «pasando» y nadie lo sirve`);
+      expect(off.out).not.toContain("Nada que hacer");
+      // WHILE IT ARMS BY ITSELF, the vault is the scheduler's to move: passed over, as before.
+      setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: 1, lastArmedAt: null, lastResults: [], lastError: null });
+      const on = await tool(["traspasar-todos"]);
+      expect(on.code, on.out).toBe(0);
+      expect(on.out).toContain("Nada que hacer");
+    } finally {
+      await db.query("UPDATE sip_solana.vault_work SET system = 'legacy', system_at = NULL WHERE vault_addr = ANY($1::text[])", [[LEGACY_B, LEGACY_C]]);
+      setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: [], lastArmedAt: null, lastResults: [], lastError: null });
+    }
+  }, 60_000);
+
   it("flota, with a scheduler that arms by itself: only its own untouched enrolment is «the scheduler's»; one the owner left half way is nobody's", async () => {
     setScheduler({ enabled: true, legacyRoles: ["profit", "volume"], pending: 1, lastArmedAt: null, lastResults: [], lastError: null });
     // LEGACY_B AS THE SCHEDULER ENROLS A NEW VAULT (draining, system_at NULL, fence 0); LEGACY_C AS A «traspasar» THAT STOPPED HALF WAY (drain stamps system_at).

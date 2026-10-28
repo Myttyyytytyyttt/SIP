@@ -1052,7 +1052,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
      últimos 2 min y medio o su `/status` no dice que actúan) y, si
      quieres, quita después `SIP_SOLANA_AUTO_ARM`. En ese orden: con los nuevos yendo a la cola y el auto-arm apagado, un
      vault nuevo se queda «pasando» sin que nadie lo sirva. Si `nuevos-a-los-de-siempre` nombra un vault que sigue
-     «pasando», termínalo con `traspasar` o `volver`.
+     «pasando», termínalo con `traspasar` o `volver`; con el auto-arm ya quitado, `traspasar-todos` y `flota` también lo
+     nombran (sin auto-arm nadie lo pasa solo).
 
 6. **Pruébalo con un vault nuevo de verdad, desde OTRA cuenta.** Cada wallet de login tiene exactamente un vault (su
    dirección sale de `["vault", dueño]`), así que con la tuya no se puede crear otro. Entra en la web con otra wallet de
