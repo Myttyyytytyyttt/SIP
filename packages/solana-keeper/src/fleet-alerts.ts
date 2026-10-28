@@ -76,9 +76,9 @@
 // sweeping is every legacy user without a buy, and a dead keeper cannot page
 // about itself. The roles watched are the scheduler's SIP_SOLANA_LEGACY_ROLES
 // (both when unset). It warns at once and pages once it has lasted 30 minutes,
-// timed from a silent role's last read (the database's clock: since then nobody
-// has done that role's work), and from this process's first sight of it
-// otherwise. Only the lock
+// timed from a silent role's last read WHILE ACTING (the database's clock: since
+// then nobody has done that role's work), and from this process's first sight
+// of it otherwise. Only the lock
 // holder raises it, only under SIP_SOLANA_DISPATCH=on (bin/scheduler.mts hands
 // the evaluator `legacy` there alone): a shadow scheduler's database is not the
 // one users are served from, and has no legacy keeper writing receipts to it.
@@ -445,16 +445,22 @@ export function legacyOrphaned(legacy: FleetLegacy, retired: boolean, roles: rea
 
 /**
  * How long the condition has lasted, or null when it does not hold: since the
- * last read of a silent role (of any keeper, when they are retired and none
- * reads) — nobody has done that role's work since — and never less than
- * `observedForMs`, what this evaluator has watched: the only clock while keepers
- * declared retired are still reading, or when a silent role never read.
+ * last read of a silent role made while acting (of any keeper, when they are
+ * retired and none reads) — nobody has done that role's work since — and never
+ * less than `observedForMs`, what this evaluator has watched: the only clock
+ * while keepers declared retired are still reading, or when a silent role never
+ * read while acting.
  *
  * A VAULT THAT BECOMES 'legacy' AFTER THE KEEPERS WENT SILENT PAGES AT ONCE, on
- * purpose: measured from the last read, the clock survives a scheduler restart
- * (a long orphan does not start again at a warn), and a vault handed to keepers
- * that stopped reading long ago is nobody's from the moment it is handed. The
- * page says which clock is which (legacyOrphanedAlert).
+ * purpose: measured from the last read while acting, the clock survives a
+ * scheduler restart (a long orphan does not start again at a warn), and a vault
+ * handed to keepers that stopped reading long ago is nobody's from the moment it
+ * is handed. A new container that reads WITHOUT acting does not reset it (its
+ * reads are not counted, fleet-pg.ts), but one PROCESS that goes from acting to
+ * not acting overwrites its own receipt's read and `live` (LEGACY_SELECT_SQL), so
+ * its last acting read is lost and only `observedForMs` times it — a restart
+ * then does start it again at a warn. The page says which clock is which
+ * (legacyOrphanedAlert).
  */
 export function legacyOrphanedForMs(input: {
   readonly legacy: FleetLegacy;
@@ -513,7 +519,7 @@ export function legacyOrphanedAlert(input: {
   const lastRead = legacy.lastReadAgeMs === null ? "none ever has" : `the last read was ${minutes(legacy.lastReadAgeMs)} min ago`;
   const roleLastRead = (role: string): string => {
     const age = legacy.roles?.[role]?.lastReadAgeMs ?? null;
-    return age === null ? "it never read" : `its last read was ${minutes(age)} min ago`;
+    return age === null ? "it never read while acting" : `its last read while acting was ${minutes(age)} min ago`;
   };
   let why: string;
   let consequence: string;

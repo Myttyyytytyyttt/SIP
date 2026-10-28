@@ -480,6 +480,19 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(profitPage.map((alert) => alert.severity)).toEqual(["warn"]);
       expect(profitPage[0]!.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min");
       expect(profitPage[0]!.detail).toContain("the volume keeper (sip-solana-volume-keeper) still acts");
+      // THE ROLE'S CLOCK IS ITS LAST READ WHILE ACTING — p-up's, 20 min — not p-dry's 10 s:
+      // a container reading without acting does none of the role's work.
+      expect(Math.abs(profitDown.roles!["profit"]!.lastReadAgeMs! - 20 * 60_000)).toBeLessThan(5_000);
+      expect(profitPage[0]!.detail).toContain("its last read while acting was 20 min ago");
+      // 35 MIN SINCE THE LAST ACTING READ, SEEN BY A SCHEDULER THAT JUST RESTARTED (observedForMs 0): it
+      // pages. Timed from p-dry's 10 s it fell back to a warn after every restart, and paged 45 min in.
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '35 minutes' WHERE process_id = 'p-up'");
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '40 minutes' WHERE process_id = 'p-gone'");
+      const restartedFired: Alert[] = [];
+      const restarted = new FleetAlerts({ alerter: { fire: (alert) => restartedFired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false } });
+      const restartedReader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => restarted.observeSnapshot(snapshot, { acting: true }) });
+      expect(await restartedReader.refresh()).toBe(true);
+      expect(restartedFired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY).map((alert) => alert.severity)).toEqual(["critical"]);
       await db.query("DELETE FROM sip_solana.legacy_process WHERE process_id = 'p-dry'");
 
       // THE KEEPERS STOP: every receipt goes quiet, the newest 40 minutes ago. Not declared retired, it pages on their silence.

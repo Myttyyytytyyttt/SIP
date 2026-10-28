@@ -349,7 +349,7 @@ SELECT json_build_object(
                            FROM (SELECT q.role,
                                         count(*) FILTER (WHERE q.gone_at IS NULL AND q.live
                                                            AND q.read_at >= t.now - interval '${LEGACY_READ_FRESH_MS / 1000} seconds') AS acting,
-                                        round(extract(epoch FROM t.now - max(q.read_at)) * 1000) AS age_ms
+                                        round(extract(epoch FROM t.now - max(q.read_at) FILTER (WHERE q.live)) * 1000) AS age_ms
                                    FROM ${S}.legacy_process q GROUP BY q.role) r))
                FROM ${S}.legacy_process p)
 ) AS snapshot

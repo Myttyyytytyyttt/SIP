@@ -659,7 +659,7 @@ describe("legacy-orphaned by role: each watched role's keeper must be acting", (
     expect(legacyOrphanedAlert({ legacy: profitDown(20 * MIN), retired: false, observedForMs: 0 }).fire?.severity).toBe("warn");
     const page = legacyOrphanedAlert({ legacy: profitDown(LEGACY_ORPHANED_CRITICAL_MS + MIN), retired: false, observedForMs: 0 }).fire!;
     expect(page.severity).toBe("critical");
-    expect(page.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min (its last read was 31 min ago)");
+    expect(page.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min (its last read while acting was 31 min ago)");
     expect(page.detail).toContain("the volume keeper (sip-solana-volume-keeper) still acts, but for those users nobody buys, and nobody settles a PROFIT vault");
     expect(page.detail).not.toContain("the volume keeper (sip-solana-volume-keeper) has not read");
     expect(page.context).toMatchObject({ silentRoles: ["profit"], fresh: 1 });
