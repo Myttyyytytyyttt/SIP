@@ -360,7 +360,8 @@ export function vaultUnservedAlert(input: {
         "no worker claims one, so nothing is settled or bought for it. `dispatch-handover arm` moves it to the queue (twice, 150 " +
         "blocks apart); arm waits for a fresh receipt from every legacy role it requires, which stopped keepers never write. " +
         "`dispatch-handover release` gives it back to the legacy keepers instead, but only while they read: once they are stopped " +
-        "(SIP_SOLANA_LEGACY_ROLES=none) it hands the vault to nobody and legacy-orphaned pages — `flota-prod volver` refuses that. " +
+        "(SIP_SOLANA_LEGACY_ROLES=none) it hands the vault to nobody and legacy-orphaned pages — `flota-prod volver` refuses that " +
+        "unless both legacy keepers' pages say they act and each has read within 2.5 min. " +
         (autoArms ? "The scheduler arms this row by itself and pages a stall as auto-arm-stalled, so this one stays a warn. " : "") +
         "Read fleet.unserved on /status.",
       context: { vault, forMs, from, autoArmPages: autoArms },

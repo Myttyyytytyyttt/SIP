@@ -790,19 +790,54 @@ function carryStoreProblems(db: FleetDb, why: string): string[] {
  * loss for it — after the rollback, so the vault would wait «pasando», served by
  * nobody, until the variable changed. With every profit receipt `on` and one of
  * them reading (the roles' check), release's carry rule holds.
+ *
+ * READING MEANS WITHIN FRESH_READ_MS, as for `traspasar`, not the 15 minutes a
+ * receipt counts as «vivo»: nothing marks a receipt when its keeper stops, so a
+ * keeper stopped five minutes ago still had one, and a vault handed back to it
+ * was told «lo atienden desde su próxima vuelta» with nobody serving it — and
+ * legacy-orphaned paging only half an hour later. The keepers' own pages close
+ * the rest of the window (keepersUpProblems).
  */
 export function returnProblems(db: FleetDb, vault: string, rehearsal: boolean): string[] {
   const problems: string[] = [];
   const row = rowProblem(db, vault);
   if (row !== null) problems.push(row);
-  problems.push(...rolesReadingProblems(db, KEEPER_ROLES, LEGACY_READ_FRESH_MS, rehearsal, "devuelto, nadie lo serviría; enciéndelo primero"));
+  problems.push(...rolesReadingProblems(db, KEEPER_ROLES, FRESH_READ_MS, rehearsal, "devuelto, nadie lo serviría; enciéndelo primero"));
   if (mayCarryLosses(db, vault)) problems.push(...carryStoreProblems(db, "devuelto con una pérdida que guardó el sistema nuevo, cobraría de más; «volver» se quedaría esperando con el vault sin servir"));
   return problems;
 }
 
-/** Why `nuevos-a-los-de-siempre` may not flip the flag: a new vault would go to keepers that are not reading. */
+/** Why `nuevos-a-los-de-siempre` may not flip the flag: a new vault would go to keepers that are not reading (within FRESH_READ_MS, as returnProblems). */
 export function legacyNewVaultsProblems(db: FleetDb, rehearsal: boolean): string[] {
-  return rolesReadingProblems(db, KEEPER_ROLES, LEGACY_READ_FRESH_MS, rehearsal, "un vault nuevo se quedaría sin nadie; enciéndelo primero");
+  return rolesReadingProblems(db, KEEPER_ROLES, FRESH_READ_MS, rehearsal, "un vault nuevo se quedaría sin nadie; enciéndelo primero");
+}
+
+/**
+ * Why the legacy keepers' own pages say a vault handed to them now would not be
+ * served (empty: it would) — for `volver` and `nuevos-a-los-de-siempre`, beside
+ * the receipts. A receipt is the database's word and outlives its keeper by up
+ * to FRESH_READ_MS; the page is the keeper's own, and a page that does not
+ * answer is a keeper that is not running. Outside a rehearsal only: there the
+ * dry keepers' pages are stand-ins, or production's, and the receipts decide.
+ */
+export function keepersUpProblems(keepers: Readonly<Record<KeeperRole, PageRead<KeeperPageView>>>, rehearsal: boolean): string[] {
+  if (rehearsal) return [];
+  const problems: string[] = [];
+  for (const role of KEEPER_ROLES) {
+    const read = keepers[role];
+    if (!read.answered) {
+      problems.push(`${keeperWords(role)}: su página no contesta (${read.why}) — ¿parado en Railway? Enciéndelo primero (10.8 paso 9)`);
+      continue;
+    }
+    const page = read.page;
+    if (page.mode !== "live" || page.armed !== true) {
+      const state = page.mode === "live" ? "en vivo, sin armar" : page.mode === null ? "no dice su modo" : "en seco";
+      problems.push(`${keeperWords(role)}: su página dice que no está actuando (${state}); devuelto, nadie lo serviría: enciéndelo en vivo primero (10.8 paso 9)`);
+    } else if (page.dispatch === null) {
+      problems.push(`${keeperWords(role)}: su página dice que no tiene SIP_SOLANA_DISPATCH; ponle SIP_SOLANA_DISPATCH=on primero (10.8 paso 9)`);
+    }
+  }
+  return problems;
 }
 
 /** What happened after one call in a wait: moved, still waiting (and why), or a stop the owner must hear. */

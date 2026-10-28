@@ -27,6 +27,7 @@ import {
   flotaLines,
   goneTargets,
   isOlderCliRefusal,
+  keepersUpProblems,
   legacyNewVaultsProblems,
   modeWords,
   moveProblems,
@@ -614,9 +615,37 @@ describe("volver and the new-vault flag: never to nobody", () => {
     expect(returnProblems(fleet(), OWNER_VAULT, false)).toEqual([]);
     const noVolume = fleet({ processes: [receipt("p-profit", "profit")] });
     expect(returnProblems(noVolume, OWNER_VAULT, false)).toEqual([
-      "el keeper de volumen no ha leído la base en los últimos 15 min estando encendido y actuando: devuelto, nadie lo serviría; enciéndelo primero. ¿Está encendido en Railway, con SIP_SOLANA_DISPATCH=on?",
+      "el keeper de volumen no ha leído la base en los últimos 2 min y medio estando encendido y actuando: devuelto, nadie lo serviría; enciéndelo primero. ¿Está encendido en Railway, con SIP_SOLANA_DISPATCH=on?",
     ]);
     expect(returnProblems(noVolume, "Unknown1111111111111111111111111111111111111", false)).toHaveLength(2);
+  });
+
+  it("volver and nuevos-a-los-de-siempre count a keeper as reading only within 2.5 min, as traspasar does: one stopped 5 min ago is nobody", () => {
+    // RUNBOOK 8.2/8.3 THEN STRAIGHT TO 9: both keepers stopped five minutes ago. Nothing marks a receipt
+    // when its keeper stops, so both still read «vivo» (15 min) — and volver said «lo atienden desde su
+    // próxima vuelta» with nobody serving the vault.
+    const stopped = fleet({ processes: [receipt("p-profit", "profit", { ageMs: 5 * 60_000 }), receipt("p-volume", "volume", { ageMs: 5 * 60_000 })] });
+    expect(receiptState(stopped.processes[0]!)).toBe("vivo");
+    expect(returnProblems(stopped, OWNER_VAULT, false)).toEqual([
+      expect.stringContaining("el keeper de beneficios no ha leído la base en los últimos 2 min y medio"),
+      expect.stringContaining("el keeper de volumen no ha leído la base en los últimos 2 min y medio"),
+    ]);
+    expect(legacyNewVaultsProblems(stopped, false)).toHaveLength(2);
+  });
+
+  it("the keepers' own pages must say they act before a vault goes back to them: not answering, dry or unarmed, or without dispatch, refuses", () => {
+    const acting: PageRead<KeeperPageView> = { answered: true, page: { mode: "live", armed: true, lastSweepAgeMs: 30_000, dispatch: "on" } };
+    expect(keepersUpProblems({ profit: acting, volume: acting }, false)).toEqual([]);
+    const stopped = keepersUpProblems({ profit: { answered: false, why: "no contesta" }, volume: acting }, false);
+    expect(stopped).toEqual(["el keeper de beneficios: su página no contesta (no contesta) — ¿parado en Railway? Enciéndelo primero (10.8 paso 9)"]);
+    const dry = keepersUpProblems({ profit: acting, volume: { answered: true, page: { ...acting.page, mode: "dry", armed: false } } }, false);
+    expect(dry).toEqual([expect.stringContaining("el keeper de volumen: su página dice que no está actuando (en seco)")]);
+    const unarmed = keepersUpProblems({ profit: { answered: true, page: { ...acting.page, armed: false } }, volume: acting }, false);
+    expect(unarmed).toEqual([expect.stringContaining("(en vivo, sin armar)")]);
+    const noDispatch = keepersUpProblems({ profit: acting, volume: { answered: true, page: { ...acting.page, dispatch: null } } }, false);
+    expect(noDispatch).toEqual([expect.stringContaining("no tiene SIP_SOLANA_DISPATCH")]);
+    // A REHEARSAL'S DRY KEEPERS: their pages are stand-ins, and the receipts decide.
+    expect(keepersUpProblems({ profit: { answered: false, why: "no contesta" }, volume: { answered: false, why: "no contesta" } }, true)).toEqual([]);
   });
 
   it("volver refuses, before the rollback, a vault that may carry losses while a profit receipt does not run the carry store on", () => {

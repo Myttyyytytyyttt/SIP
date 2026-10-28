@@ -43,6 +43,7 @@ import {
   flotaLines,
   goneTargets,
   isOlderCliRefusal,
+  keepersUpProblems,
   legacyNewVaultsProblems,
   moveProblems,
   armProgress,
@@ -157,6 +158,12 @@ async function schedulerPage(): Promise<PageRead<SchedulerPageView>> {
 async function keeperPage(address: string): Promise<PageRead<KeeperPageView>> {
   const read = await getPage(address);
   return read.answered ? { answered: true, page: readKeeperPage(read.page, Date.now()) } : read;
+}
+
+/** Both legacy keepers' pages, for the checks that hand them a vault (keepersUpProblems). */
+async function keeperPages(): Promise<{ readonly profit: PageRead<KeeperPageView>; readonly volume: PageRead<KeeperPageView> }> {
+  const [profit, volume] = await Promise.all([keeperPage(pages.profit), keeperPage(pages.volume)]);
+  return { profit, volume };
 }
 
 /** The fleet as the database says: `status --all`, or plain `status` from an older dispatch-handover. Null (and said why) on failure. */
@@ -364,7 +371,7 @@ async function volver(typed: string): Promise<number> {
     say(`     ${short(vault)} ya es de los keepers de siempre. Nada que hacer.`);
     return 0;
   }
-  const problems = returnProblems(db, vault, rehearsal);
+  const problems = [...returnProblems(db, vault, rehearsal), ...keepersUpProblems(await keeperPages(), rehearsal)];
   if (problems.length > 0) {
     for (const problem of problems) say(`     NO: ${problem}.`);
     say("     No he tocado nada.");
@@ -429,7 +436,7 @@ async function nuevosALosDeSiempre(): Promise<number> {
     say("Los vaults nuevos ya van a los keepers de siempre. Nada que hacer.");
     return 0;
   }
-  const problems = legacyNewVaultsProblems(db, rehearsal);
+  const problems = [...legacyNewVaultsProblems(db, rehearsal), ...keepersUpProblems(await keeperPages(), rehearsal)];
   if (problems.length > 0) {
     for (const problem of problems) say(`NO: ${problem}.`);
     say("No he tocado nada.");

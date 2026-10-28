@@ -894,7 +894,9 @@ datos que no usa ningún vigilante de siempre (el ensayo en sombra).
 
 Con `flota-prod` es una palabra: **`"$F" volver <vault>`** hace los dos pasos de abajo y espera (hasta 15 min) a que
 el vault vuelva a ser de los vigilantes de siempre. Se niega antes de tocar nada si alguno de los dos vigilantes no ha
-leído la base, encendido y actuando, en los últimos 15 min: devuelto, nadie lo serviría. A mano:
+leído la base, encendido y actuando, en los últimos 2 min y medio, o si su `/status` no contesta o no dice que actúa
+(`live`, armado, con `SIP_SOLANA_DISPATCH`): devuelto, nadie lo serviría. Un vigilante parado hace 5 min aún tiene un
+recibo `vivo`, y nada lo marca al pararse. A mano:
 
 1. **`H rollback $V`** — `queue` → `draining`: ningún worker lo vuelve a coger; el que lo tenga termina su trabajo.
 2. **`H release $V`** — se niega mientras un worker lo tenga (como mucho 6 minutos desde que lo cogió) o mientras una
@@ -1044,7 +1046,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
       (`scheduler.autoArm.legacyRoles`: hoy los dos) no ha leído en 15 min, o si queda algún recibo `viejo` (entonces
       `marcar-idos-viejos` primero).
    - **Comprobar**: `flota` dice «Vaults nuevos: van al sistema nuevo (entran «pasando» y el scheduler los pasa solo).»
-   - **Deshacer**: `"$F" nuevos-a-los-de-siempre` (se niega si los dos vigilantes de siempre no están leyendo) y, si
+   - **Deshacer**: `"$F" nuevos-a-los-de-siempre` (se niega si los dos vigilantes de siempre no han leído en los
+     últimos 2 min y medio o su `/status` no dice que actúan) y, si
      quieres, quita después `SIP_SOLANA_AUTO_ARM`. En ese orden: con los nuevos yendo a la cola y el auto-arm apagado, un
      vault nuevo se queda «pasando» sin que nadie lo sirva. Si `nuevos-a-los-de-siempre` nombra un vault que sigue
      «pasando», termínalo con `traspasar` o `volver`.
@@ -1093,7 +1096,8 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
 
 9. **Volver atrás, desde cualquier paso.**
    - **Lo que tiene que estar antes**: `volver` y `nuevos-a-los-de-siempre` se niegan si los dos vigilantes de siempre
-     no han leído la base, encendidos y actuando, en los últimos 15 min; y sin `SIP_SOLANA_DISPATCH` no la leen (10.3).
+     no han leído la base, encendidos y actuando, en los últimos 2 min y medio, o si su `/status` no contesta o no dice
+     que actúa (los dos «actuando» en `flota`); y sin `SIP_SOLANA_DISPATCH` no la leen (10.3).
      Y un vault de beneficio solo vuelve con `sip-solana-keeper` en `SIP_SOLANA_CARRY_STORE=on` (10.5): `volver` se
      niega antes de sacarlo de la cola mientras algún recibo de beneficio sin marcar no lleve `on` (el de un contenedor
      que ya no existe: `marcar-ido`). Del paso 3 al 8, los dos están así.
