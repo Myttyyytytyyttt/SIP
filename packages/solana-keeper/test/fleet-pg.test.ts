@@ -26,6 +26,7 @@ import {
   FleetAlerts,
   LEASE_EXPIRED_ALERT_KEY,
   LEGACY_ORPHANED_ALERT_KEY,
+  LEGACY_ORPHANED_CRITICAL_MS,
   QUEUE_LAG_ALERT_KEY,
   SCHEDULER_STALE_ALERT_KEY,
   SchedulerStaleWatch,
@@ -480,19 +481,19 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(profitPage.map((alert) => alert.severity)).toEqual(["warn"]);
       expect(profitPage[0]!.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min");
       expect(profitPage[0]!.detail).toContain("the volume keeper (sip-solana-volume-keeper) still acts");
-      // THE ROLE'S CLOCK IS ITS LAST READ WHILE ACTING — p-up's, 20 min — not p-dry's 10 s:
-      // a container reading without acting does none of the role's work.
-      expect(Math.abs(profitDown.roles!["profit"]!.lastReadAgeMs! - 20 * 60_000)).toBeLessThan(5_000);
-      expect(profitPage[0]!.detail).toContain("its last read while acting was 20 min ago");
-      // 35 MIN SINCE THE LAST ACTING READ, SEEN BY A SCHEDULER THAT JUST RESTARTED (observedForMs 0): it
-      // pages. Timed from p-dry's 10 s it fell back to a warn after every restart, and paged 45 min in.
+      // THE ROLE'S CLOCK IS ITS NEWEST READ, ACTING OR NOT — p-dry's 10 s, not p-up's 20 min: p-dry's receipt
+      // cannot say whether it acted the sweep before, so only this scheduler's sight of it times it.
+      expect(Math.abs(profitDown.roles!["profit"]!.lastReadAgeMs! - 10_000)).toBeLessThan(5_000);
+      expect(profitPage[0]!.detail).toContain("(its last read was 0.2 min ago)");
+      // 35 MIN SINCE p-up's LAST ACTING READ, SEEN BY A SCHEDULER THAT JUST RESTARTED (observedForMs 0): a warn while
+      // p-dry still reads — timed from p-up it paged at once, which is false when p-dry acted until its last sweep.
       await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '35 minutes' WHERE process_id = 'p-up'");
       await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '40 minutes' WHERE process_id = 'p-gone'");
       const restartedFired: Alert[] = [];
       const restarted = new FleetAlerts({ alerter: { fire: (alert) => restartedFired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false } });
       const restartedReader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => restarted.observeSnapshot(snapshot, { acting: true }) });
       expect(await restartedReader.refresh()).toBe(true);
-      expect(restartedFired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY).map((alert) => alert.severity)).toEqual(["critical"]);
+      expect(restartedFired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY).map((alert) => alert.severity)).toEqual(["warn"]);
       await db.query("DELETE FROM sip_solana.legacy_process WHERE process_id = 'p-dry'");
 
       // THE KEEPERS STOP: every receipt goes quiet, the newest 40 minutes ago. Not declared retired, it pages on their silence.
@@ -515,6 +516,41 @@ describe.skipIf(!usable)("the fleet's statements on Postgres 16 (needs KEEPER_TE
       expect(await read()).toMatchObject({ vaults: 0, newVaultSystem: "queue" });
       expect(await reader.refresh()).toBe(true);
       expect(alerts.status().firing).not.toContain(LEGACY_ORPHANED_ALERT_KEY);
+    });
+
+    it("times a profit keeper whose one sweep was not live by this scheduler's sight of it, not by an older container's acting read: a warn, a page 30 min later if it keeps not acting, and its newest read once it stops", async () => {
+      await db.query("INSERT INTO sip_solana.keeper_link (link_addr, wallet_addr, vault_addr, epoch, settlement_nonce, frontier_slot, seen_slot) VALUES ('LK1', 'W1', 'L1-legacy', 0, 1, 1, 1)");
+      // THE PUSH LEFT p-old's LAST RECEIPT (acting, 3 h ago, since marked gone). p-cur has served ever since, and its
+      // receipt says its last sweep was not live (a claim session that dropped, a ProtocolConfig the RPC did not return).
+      await db.query(
+        `INSERT INTO sip_solana.legacy_process (process_id, role, dispatch, live, read_at, absent_is, gone_at) VALUES
+           ('p-old', 'profit', 'on', true,  clock_timestamp() - interval '3 hours',    'legacy', clock_timestamp() - interval '2 hours'),
+           ('p-cur', 'profit', 'on', false, clock_timestamp() - interval '10 seconds', 'legacy', NULL),
+           ('v-cur', 'volume', 'on', true,  clock_timestamp() - interval '10 seconds', 'legacy', NULL)`,
+      );
+      let now = 1_000_000;
+      const fired: Alert[] = [];
+      const alerts = new FleetAlerts({ alerter: { fire: (alert) => fired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false }, now: () => now });
+      const reader = new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => alerts.observeSnapshot(snapshot, { acting: true }) });
+      const orphaned = (): Alert[] => fired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY);
+      expect(await reader.refresh()).toBe(true);
+      // BEFORE: critical at once, "its last read while acting was 180 min ago" — p-old's, hours older than p-cur's last act.
+      expect(orphaned().map((alert) => alert.severity)).toEqual(["warn"]);
+      expect(orphaned()[0]!.detail).toContain("the profit keeper (sip-solana-keeper) has not read while acting in 15 min (its last read was 0.2 min ago)");
+      expect(orphaned()[0]!.detail).not.toContain("180 min");
+      // STILL READING WITHOUT ACTING, 30 MIN OF THIS SCHEDULER WATCHING: it pages.
+      now += LEGACY_ORPHANED_CRITICAL_MS;
+      expect(await reader.refresh()).toBe(true);
+      expect(orphaned().map((alert) => alert.severity)).toEqual(["warn", "critical"]);
+      // p-cur STOPS: no profit receipt read in 15 min. Its newest read, 35 min ago, times it — a scheduler that just
+      // restarted pages at once, and names p-cur's read, not p-old's.
+      await db.query("UPDATE sip_solana.legacy_process SET read_at = clock_timestamp() - interval '35 minutes' WHERE process_id = 'p-cur'");
+      const restartedFired: Alert[] = [];
+      const restarted = new FleetAlerts({ alerter: { fire: (alert) => restartedFired.push(alert), clear: () => undefined }, windowMs: 60_000, legacy: { retired: false } });
+      expect(await new FleetStatusReader({ source: new PgFleetStore(db), onSnapshot: (snapshot) => restarted.observeSnapshot(snapshot, { acting: true }) }).refresh()).toBe(true);
+      const stopped = restartedFired.filter((alert) => alert.key === LEGACY_ORPHANED_ALERT_KEY);
+      expect(stopped.map((alert) => alert.severity)).toEqual(["critical"]);
+      expect(stopped[0]!.detail).toContain("(its last read was 35 min ago)");
     });
 
     it("counts a shadow world's unresolved intents as open, its resolved ones not, however old they are", async () => {

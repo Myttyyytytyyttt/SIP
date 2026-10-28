@@ -246,11 +246,16 @@ export interface FleetLegacy {
    * decides by: one role's keeper down is its vaults unserved however fresh the
    * other's receipt is. `acting`: receipts not marked gone that read within
    * LEGACY_READ_FRESH_MS while acting (`live`); `lastReadAgeMs`: the role's newest
-   * read WHILE ACTING, gone or not — null when none acted — because a keeper that
-   * reads without acting (its carry store not ready, its claim not held) rewrites
-   * its receipt every sweep and does none of the role's work. A role that never
-   * wrote a receipt is absent. Null when the statement returned no such block (no
-   * evidence, never a role of zeros).
+   * read, acting or not, gone or not. NOT ONLY THE ACTING READS: a container
+   * rewrites its one receipt every sweep, `live` included, so a receipt that says
+   * "not acting" hides whether that container acted the sweep before — one whose
+   * claim dropped for a sweep after hours of acting looks exactly like one that
+   * never acted, and the newest acting read is then an older container's, hours
+   * old. The newest read is the newest moment the role may still have acted; a
+   * container that reads without acting keeps it fresh, and only the reader's own
+   * sight of it times that (src/fleet-alerts.ts, legacyOrphanedForMs). A role
+   * that never wrote a receipt is absent. Null when the statement returned no
+   * such block (no evidence, never a role of zeros).
    */
   readonly roles: Readonly<Record<string, LegacyRoleReads>> | null;
 }

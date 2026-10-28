@@ -1156,15 +1156,18 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   cadena sin contestar (lo dice `lastError`).
 - **`legacy-orphaned`** («[scheduler]», aviso al momento, crítica a los 30 min): queda algún vault de los vigilantes de
   siempre con un enlace vivo, o los vaults nuevos siguen yendo a ellos, y esos vigilantes están retirados
-  (`SIP_SOLANA_LEGACY_ROLES=none`) o uno de ellos lleva 15 min sin leer la base actuando. El aviso dice cuál, y qué deja
-  de hacerse: sin el de beneficio (`sip-solana-keeper`) nadie compra para esos usuarios ni liquida sus vaults de
-  beneficio, aunque el de volumen siga leyendo; sin el de volumen, nadie liquida sus vaults de volumen. Si los dos están
-  parados, nadie cobra ni compra para ellos. Con `none` y los dos todavía leyendo, aún los sirven: el aviso es de lo que
-  pasará cuando paren. Lo que ve está en `fleet.legacy`. **Primero**: `flota`. Si los paraste a propósito, termina el
-  traspaso: `"$F" nuevos-a-la-cola` y `"$F" traspasar-todos`; `traspasar` necesita a los dos vigilantes encendidos, así
-  que enciéndelos para eso (paso 9) y vuelve a pararlos después (paso 8). Si no querías pararlos, o estás volviendo
-  atrás, quita `SIP_SOLANA_LEGACY_ROLES` del scheduler y, si alguno está parado o falla, vuelve a arrancar
-  `sip-solana-keeper` o `sip-solana-volume-keeper` (sus *Deploy Logs* dicen por qué no lee).
+  (`SIP_SOLANA_LEGACY_ROLES=none`) o uno de ellos lleva 15 min sin leer la base actuando. Los 30 min cuentan desde la
+  última lectura de ese vigilante, actuando o no («its last read was N min ago»), o desde que este scheduler lo vio si
+  fue antes; mientras un contenedor suyo siga leyendo sin actuar, solo desde que este scheduler lo vio, así que un
+  reinicio del scheduler vuelve a empezar en aviso. El aviso dice cuál, y qué deja de hacerse: sin el de beneficio
+  (`sip-solana-keeper`) nadie compra para esos usuarios ni liquida sus vaults de beneficio, aunque el de volumen siga
+  leyendo; sin el de volumen, nadie liquida sus vaults de volumen. Si los dos están parados, nadie cobra ni compra para
+  ellos. Con `none` y los dos todavía leyendo, aún los sirven: el aviso es de lo que pasará cuando paren. Lo que ve está
+  en `fleet.legacy`. **Primero**: `flota`. Si los paraste a propósito, termina el traspaso: `"$F" nuevos-a-la-cola` y
+  `"$F" traspasar-todos`; `traspasar` necesita a los dos vigilantes encendidos, así que enciéndelos para eso (paso 9) y
+  vuelve a pararlos después (paso 8). Si no querías pararlos, o estás volviendo atrás, quita `SIP_SOLANA_LEGACY_ROLES`
+  del scheduler y, si alguno está parado o falla, vuelve a arrancar `sip-solana-keeper` o `sip-solana-volume-keeper`
+  (sus *Deploy Logs* dicen por qué no lee).
 - **`job-failing:<vault>`** («[worker]», aviso el primero, crítica al tercero seguido): los trabajos del worker en ese
   vault revientan antes de terminar o pasan su techo de 6 min; mientras dure, nadie cobra ni compra para ese vault. Se
   apaga con el primer trabajo que termine. **Primero**: la línea del vault en `flota` y los *Deploy Logs* de

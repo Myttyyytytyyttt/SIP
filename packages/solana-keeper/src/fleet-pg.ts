@@ -198,9 +198,12 @@ RETURNING old.full_pass_reason AS reason`;
  * — where fleet.new_vault_system sends a new vault, and the legacy keepers'
  * receipts: those not marked gone, those of them read within
  * LEGACY_READ_FRESH_MS (the complement of `dispatch-handover gone --stale`), and
- * the newest read of any; and the same per role, counting only the receipts that
- * read while acting (`live`) — the rule decides by role, since the volume keeper
- * reading says nothing of whether anybody buys (src/fleet-alerts.ts). One more
+ * the newest read of any; and the same per role, counting as acting only the
+ * receipts that read while acting (`live`) — the rule decides by role, since the
+ * volume keeper reading says nothing of whether anybody buys
+ * (src/fleet-alerts.ts) — with the role's newest read, acting or not, gone or
+ * not: the newest moment one of its containers may still have acted
+ * (FleetLegacy.roles says why not only the acting reads). One more
  * count over vault_work, each 'legacy' row checked against keeper_link (indexed
  * by vault for its live links); legacy_process holds one row per legacy
  * container, so its two scans are a handful of rows.
@@ -349,7 +352,7 @@ SELECT json_build_object(
                            FROM (SELECT q.role,
                                         count(*) FILTER (WHERE q.gone_at IS NULL AND q.live
                                                            AND q.read_at >= t.now - interval '${LEGACY_READ_FRESH_MS / 1000} seconds') AS acting,
-                                        round(extract(epoch FROM t.now - max(q.read_at) FILTER (WHERE q.live)) * 1000) AS age_ms
+                                        round(extract(epoch FROM t.now - max(q.read_at)) * 1000) AS age_ms
                                    FROM ${S}.legacy_process q GROUP BY q.role) r))
                FROM ${S}.legacy_process p)
 ) AS snapshot
