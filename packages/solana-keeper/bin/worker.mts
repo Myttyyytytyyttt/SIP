@@ -8,7 +8,8 @@
 // roles, and test/dispatch-dark.test.ts holds that nothing those roles load
 // reaches a dispatcher module. And even started, it does nothing until
 // SIP_SOLANA_DISPATCH names a mode: unset is `off`, and an `off` worker says so
-// and exits 0 before it opens a connection.
+// and exits 0 before it opens a connection — or, with `off` written out behind
+// its health gate, stays up answering /health and opens none (below).
 //
 //   SIP_SOLANA_DISPATCH=shadow   keyless and dry; every would-be send gated as a
 //                                'shadow' intent and nothing sent (plan P3b);
@@ -30,15 +31,25 @@
 // SIGTERM: stop claiming, drain sends in flight for up to SIGTERM_DRAIN_MS, then
 // release every vault still held (due now), close the worker row, exit 0.
 //
-// ITS HEALTH GATE, ONLY WITH PORT (src/worker-health.ts): GET and HEAD /health,
-// 503 while it starts, 200 once its row is registered and its first claim has
-// answered, 503 again from the first line of the shutdown. It listens only after
-// every refusal below and before its row is written: a configuration this
-// worker refuses never answers at all, so with the service's Healthcheck Path
-// at /health Railway keeps the worker before it (runbook §10.1), and a
+// ITS HEALTH GATE, ONLY WITH SIP_SOLANA_WORKER_HEALTH=on (src/worker-health.ts):
+// GET and HEAD /health on PORT. Opt-in, because PORT is set on every worker —
+// the image bakes 8080 and Railway injects its own — so unset, empty or off,
+// nothing listens, as before the gate (src/worker-config.ts). 503 while it
+// starts, 200 once its row is registered and its first claim has answered, 503
+// again from the first line of the shutdown. It listens only after every
+// refusal below and before its row is written: a configuration this worker
+// refuses never answers at all, so with the service's Healthcheck Path at
+// /health Railway keeps the worker before it (runbook §10.1), and a
 // registration that fails exits 1 having answered only 503. A server that
-// cannot listen exits 1, before the row is written. Without PORT nothing
-// listens, as before.
+// cannot listen exits 1, before the row is written.
+//
+// OFF BEHIND THE GATE: SIP_SOLANA_DISPATCH=off, written out, with the gate on.
+// The stop that survives pushes (src/worker-health.ts says why): right after
+// readWorkerSettings it listens and answers 200 'off', and it opens no database
+// or RPC connection, builds no alerter and starts no timer of its own; SIGTERM
+// or SIGINT turns it 503, closes the server and exits 0. A server that cannot
+// listen exits 1 there too. SIP_SOLANA_DISPATCH unset or empty beside the gate
+// is refused instead (exit 2): a lost variable is not a stop.
 //
 // ITS ALERTS (P3c's preconditions, 2026-10-27): the legacy sweep's per-wallet and
 // per-vault ladder, applied to each completed job (src/worker-alerts.ts: the same
@@ -54,6 +65,7 @@
 
 import "../src/console-bridge.js";
 import { randomUUID } from "node:crypto";
+import type { Server } from "node:http";
 import { hostname } from "node:os";
 import * as anchor from "@coral-xyz/anchor";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
@@ -131,16 +143,56 @@ process.on("unhandledRejection", (reason) => {
   process.exit(1);
 });
 
-// ── configuration: the worker's own four, then the keeper's ──────────────────
+// ── configuration: the worker's own, then the keeper's ───────────────────────
 const read = readWorkerSettings(process.env);
 if ("problems" in read) {
   log.error("configuration refused", fields({ problems: read.problems }));
   process.exit(2);
 }
 const settings: WorkerSettings = read.settings;
+const version = process.env["RAILWAY_GIT_COMMIT_SHA"]?.slice(0, 40) ?? "local";
+const startedAt = Date.now();
 if (settings.mode === "off") {
-  log.info("SIP_SOLANA_DISPATCH is off (unset is off): this worker claims nothing, opens no connection and exits", fields({}));
-  process.exit(0);
+  if (settings.health === null) {
+    log.info("SIP_SOLANA_DISPATCH is off (unset is off): this worker claims nothing, opens no connection and exits", fields({}));
+    process.exit(0);
+  }
+  // ── off behind the gate: listening, and nothing else (the header) ──────────
+  // No loadConfig, no pool, no RPC, no alerter, no timer of its own: the
+  // server's socket is all that keeps this process up, and a signal is all that
+  // ends it. Off was read with SIP_SOLANA_DISPATCH written out:
+  // readWorkerSettings refused an unset or empty one beside the gate (H3).
+  // ITS SIGNING SECRETS GO, as they do below after loadConfig: nothing here reads them, and process.env keeps none.
+  for (const name of SIGNING_SECRET_VARS) delete process.env[name];
+  const port = settings.health.port;
+  const gate = new WorkerHealthGate({ version, startedAt, slots: settings.slots }, "off");
+  let server: Server;
+  try {
+    server = await listenForHealth(gate, port, (error) =>
+      log.warn("worker: the health server failed after listening; the worker stays off", fields({ port, detail: summarizeUpstreamError(error) })),
+    );
+  } catch (error) {
+    log.error("worker: health server failed", fields({ port, detail: summarizeUpstreamError(error) }));
+    process.exit(1);
+  }
+  let leaving = false;
+  const leave = (signal: string): void => {
+    if (leaving) return;
+    leaving = true;
+    // 503 FROM HERE, then the server closes: an idle keep-alive at once, a request
+    // still arriving within the heartbeat server's timeouts (src/status.ts).
+    gate.stopping();
+    log.info("worker stopping", fields({ signal, dispatch: "off" }));
+    server.close(() => {
+      log.info("worker stopped", fields({ signal, dispatch: "off" }));
+      process.exit(0);
+    });
+  };
+  process.on("SIGTERM", () => leave("SIGTERM"));
+  process.on("SIGINT", () => leave("SIGINT"));
+  log.info("SIP_SOLANA_DISPATCH is off: this worker claims nothing and opens no connection; it answers /health 200 (off) until it is stopped", fields({ port, phase: gate.phase }));
+  // NOTHING BELOW EVER RUNS: this waits for good, and leave() is the only way out.
+  await new Promise<never>(() => undefined);
 }
 let config: KeeperConfig;
 try {
@@ -165,12 +217,15 @@ if (config.doorbellSecret !== null) {
 }
 
 const workerId = `worker:${hostname()}:${randomUUID()}`;
-const version = process.env["RAILWAY_GIT_COMMIT_SHA"]?.slice(0, 40) ?? "local";
-const startedAt = Date.now();
 const programId = new PublicKey(config.programId);
 const world = settings.mode === "shadow" ? "shadow" : "live";
-/** The deploy's health gate (src/worker-health.ts), only with PORT: built here, listening only once nothing below can refuse. */
-const health = config.port === null ? null : { port: config.port, gate: new WorkerHealthGate({ version, startedAt, slots: settings.slots }) };
+/**
+ * The deploy's health gate (src/worker-health.ts), only with
+ * SIP_SOLANA_WORKER_HEALTH=on and on the PORT readWorkerSettings read, never
+ * config.port alone (every worker has one): built here, listening only once
+ * nothing below can refuse.
+ */
+const health = settings.health === null ? null : { port: settings.health.port, gate: new WorkerHealthGate({ version, startedAt, slots: settings.slots }) };
 
 // ── its alerts: the keeper's destination, told apart in the one chat ─────────
 const alerter = createAlerter({

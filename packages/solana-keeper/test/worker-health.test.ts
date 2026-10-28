@@ -1,7 +1,8 @@
-// The worker's deploy gate (src/worker-health.ts): the three phases and the one
-// direction they move in, GET and HEAD /health and nothing else, a body of fixed
-// words and numbers, and the server bin/worker.mts listens with — the keeper's
-// heartbeat server, its timeouts set, rejecting a port it cannot have.
+// The worker's deploy gate (src/worker-health.ts): the four phases, the two it
+// may begin at and the one direction they move in, GET and HEAD /health and
+// nothing else, a body of fixed words and numbers, and the server bin/worker.mts
+// listens with — the keeper's heartbeat server, its timeouts set, rejecting a
+// port it cannot have.
 //
 // The handler is driven with a fake request and response, as test/status.test.ts
 // drives the keeper's, except where only a socket can answer: HEAD's missing body
@@ -13,7 +14,7 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { HEARTBEAT_HEADERS_TIMEOUT_MS, HEARTBEAT_REQUEST_TIMEOUT_MS } from "../src/status.js";
-import { WORKER_HEALTH_PATH, WorkerHealthGate, listenForHealth, workerHealthHandler } from "../src/worker-health.js";
+import { WORKER_HEALTH_PATH, WorkerHealthGate, listenForHealth, workerHealthHandler, type WorkerHealthStart } from "../src/worker-health.js";
 
 const STARTED = Date.UTC(2026, 9, 28, 12, 0, 0);
 const COMMIT = "cde91801a2b3c4d5e6f708192a3b4c5d6e7f8091";
@@ -39,7 +40,9 @@ function drive(
   return { status: response.statusCode, body, headers };
 }
 
-const gateOf = (version = COMMIT) => new WorkerHealthGate({ version, startedAt: STARTED, slots: 2 });
+const gateOf = (version = COMMIT, start: WorkerHealthStart = "starting") => new WorkerHealthGate({ version, startedAt: STARTED, slots: 2 }, start);
+/** What every phase's body says besides ok and phase. */
+const IDENTITY = { role: "worker", version: COMMIT, startedAt: "2026-10-28T12:00:00.000Z", slots: 2 } as const;
 
 /** Every server a test listened with, closed after it whatever it asserted. */
 const servers: Server[] = [];
@@ -47,28 +50,27 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((done) => server.close(() => done()))));
 });
 
-describe("the three phases", () => {
+describe("the four phases", () => {
   it("starts at 503 starting, is 200 only once ready, and 503 again once stopping, for good", () => {
     const gate = gateOf();
     const handler = workerHealthHandler(gate);
-    const identity = { role: "worker", version: COMMIT, startedAt: "2026-10-28T12:00:00.000Z", slots: 2 };
 
     const starting = drive(handler, "GET", "/health");
     expect(starting.status).toBe(503);
     expect(starting.headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(starting.body)).toEqual({ ok: false, phase: "starting", ...identity });
+    expect(JSON.parse(starting.body)).toEqual({ ok: false, phase: "starting", ...IDENTITY });
 
     expect(gate.ready()).toBe(true);
     const ready = drive(handler, "GET", "/health");
     expect(ready.status).toBe(200);
-    expect(JSON.parse(ready.body)).toEqual({ ok: true, phase: "ready", ...identity });
+    expect(JSON.parse(ready.body)).toEqual({ ok: true, phase: "ready", ...IDENTITY });
     // SAID ONCE: the step is starting → ready, and a second call is not one.
     expect(gate.ready()).toBe(false);
 
     gate.stopping();
     const stopping = drive(handler, "GET", "/health");
     expect(stopping.status).toBe(503);
-    expect(JSON.parse(stopping.body)).toEqual({ ok: false, phase: "stopping", ...identity });
+    expect(JSON.parse(stopping.body)).toEqual({ ok: false, phase: "stopping", ...IDENTITY });
     // A WORKER THAT HAS BEGUN ITS SHUTDOWN IS NEVER READY AGAIN.
     expect(gate.ready()).toBe(false);
     expect(drive(handler, "GET", "/health").status).toBe(503);
@@ -82,6 +84,40 @@ describe("the three phases", () => {
     expect(drive(workerHealthHandler(gate), "GET", "/health").status).toBe(503);
     expect(gate.answer().body).toMatchObject({ ok: false, phase: "stopping" });
   });
+
+  it("answers 200 off for a worker SIP_SOLANA_DISPATCH=off keeps idle — the stop that survives pushes — and off never turns ready", () => {
+    const gate = gateOf(COMMIT, "off");
+    const handler = workerHealthHandler(gate);
+    const off = drive(handler, "GET", "/health");
+    expect(off.status).toBe(200);
+    expect(off.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(off.body)).toEqual({ ok: true, phase: "off", ...IDENTITY });
+    // OFF CLAIMS NOTHING, SO NOTHING MAKES IT READY: the step is starting → ready only.
+    expect(gate.ready()).toBe(false);
+    expect(gate.phase).toBe("off");
+    expect(JSON.parse(drive(handler, "GET", "/health").body)).toEqual({ ok: true, phase: "off", ...IDENTITY });
+  });
+
+  it("goes from off to stopping at the signal: 503, for good, never off or ready again", () => {
+    const gate = gateOf(COMMIT, "off");
+    const handler = workerHealthHandler(gate);
+    expect(drive(handler, "GET", "/health").status).toBe(200);
+    gate.stopping();
+    const stopping = drive(handler, "GET", "/health");
+    expect(stopping.status).toBe(503);
+    expect(JSON.parse(stopping.body)).toEqual({ ok: false, phase: "stopping", ...IDENTITY });
+    expect(gate.ready()).toBe(false);
+    expect(gate.phase).toBe("stopping");
+    expect(drive(handler, "GET", "/health").status).toBe(503);
+  });
+
+  it("begins at starting or at off and nowhere else, whatever an untyped caller hands it", () => {
+    expect(gateOf().phase).toBe("starting");
+    expect(gateOf(COMMIT, "off").phase).toBe("off");
+    for (const start of ["ready", "stopping", "OFF", "", null]) {
+      expect(gateOf(COMMIT, start as unknown as WorkerHealthStart).phase, String(start)).toBe("starting");
+    }
+  });
 });
 
 describe("GET and HEAD /health, and nothing else", () => {
@@ -93,6 +129,10 @@ describe("GET and HEAD /health, and nothing else", () => {
     expect(drive(handler, "HEAD", "/health").status).toBe(200);
     gate.stopping();
     expect(drive(handler, "HEAD", "/health").status).toBe(503);
+    const off = gateOf(COMMIT, "off");
+    expect(drive(workerHealthHandler(off), "HEAD", "/health").status).toBe(200);
+    off.stopping();
+    expect(drive(workerHealthHandler(off), "HEAD", "/health").status).toBe(503);
   });
 
   it("reads the path without its query", () => {
@@ -163,8 +203,9 @@ describe("the body: fixed words and numbers", () => {
     return replies.map((reply) => `${reply.body} ${JSON.stringify(reply.headers)}`);
   }
 
-  it("carries exactly ok, phase, role, version, startedAt and slots", () => {
+  it("carries exactly ok, phase, role, version, startedAt and slots, off included", () => {
     expect(Object.keys(gateOf().answer().body).sort()).toEqual(["ok", "phase", "role", "slots", "startedAt", "version"]);
+    expect(Object.keys(gateOf(COMMIT, "off").answer().body).sort()).toEqual(["ok", "phase", "role", "slots", "startedAt", "version"]);
   });
 
   it("serves the commit only as a hex hash or 'local', and nothing that reached it in any other shape", () => {
@@ -191,7 +232,7 @@ describe("the body: fixed words and numbers", () => {
     const before = Object.fromEntries(Object.keys(planted).map((name) => [name, process.env[name]]));
     Object.assign(process.env, planted);
     try {
-      for (const served of lifetime(gateOf())) for (const secret of PLANTED) expect(served).not.toContain(secret);
+      for (const gate of [gateOf(), gateOf(COMMIT, "off")]) for (const served of lifetime(gate)) for (const secret of PLANTED) expect(served).not.toContain(secret);
     } finally {
       for (const [name, value] of Object.entries(before)) {
         if (value === undefined) delete process.env[name];

@@ -1,9 +1,11 @@
 // What a dispatcher worker reads beyond the keeper's config (src/worker-config.ts):
-// strictly, off unless named, and three refusals only a worker has.
+// strictly, off unless named, its deploy gate only when asked for, and three
+// refusals only a worker has.
 
 import { Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { Keypair } from "@solana/web3.js";
+import { readPort } from "../src/config.js";
 import {
   DEFAULT_WORKERS_MAX,
   DEFAULT_WORKER_SLOTS,
@@ -11,6 +13,7 @@ import {
   keeperEnvOf,
   readDispatchMode,
   readExtraModes,
+  readWorkerHealth,
   readWorkerSettings,
   workerRefusals,
 } from "../src/worker-config.js";
@@ -34,12 +37,12 @@ describe("SIP_SOLANA_DISPATCH", () => {
 
 describe("the worker's numbers", () => {
   it("default to 2 slots, r_max 2 and Developer's 50 requests a second", () => {
-    expect(readWorkerSettings({})).toEqual({ settings: { mode: "off", slots: DEFAULT_WORKER_SLOTS, workersMax: DEFAULT_WORKERS_MAX, planRps: 50, extraModes: null } });
+    expect(readWorkerSettings({})).toEqual({ settings: { mode: "off", slots: DEFAULT_WORKER_SLOTS, workersMax: DEFAULT_WORKERS_MAX, planRps: 50, extraModes: null, health: null } });
   });
 
   it("take whole numbers in range only, and every problem at once", () => {
     expect(readWorkerSettings({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_SLOTS: "4", SIP_SOLANA_WORKERS_MAX: "3", SIP_SOLANA_PLAN_RPS: "200" })).toEqual({
-      settings: { mode: "shadow", slots: 4, workersMax: 3, planRps: 200, extraModes: null },
+      settings: { mode: "shadow", slots: 4, workersMax: 3, planRps: 200, extraModes: null, health: null },
     });
     const read = readWorkerSettings({ SIP_SOLANA_DISPATCH: "maybe", SIP_SOLANA_WORKER_SLOTS: "0", SIP_SOLANA_WORKERS_MAX: "2.5", SIP_SOLANA_PLAN_RPS: "-1" });
     expect("problems" in read && read.problems).toHaveLength(4);
@@ -57,20 +60,22 @@ describe("the worker's numbers", () => {
 });
 
 describe("the keeper's own config, without the worker's names", () => {
-  it("hands loadConfig the environment minus exactly these eight, so it does not call them misspellings", () => {
+  it("hands loadConfig the environment minus exactly these nine, so it does not call them misspellings — PORT stays, loadConfig reads it too", () => {
     const env = {
       SIP_SOLANA_DISPATCH: "on",
       SIP_SOLANA_WORKER_SLOTS: "2",
       SIP_SOLANA_WORKERS_MAX: "2",
       SIP_SOLANA_PLAN_RPS: "50",
+      SIP_SOLANA_WORKER_HEALTH: "on",
       SIP_SOLANA_EXTRA_MODES: "roundup",
       SIP_SOLANA_EXTRA_MODES_VAULTS: "*",
       SIP_SOLANA_EXTRA_MODES_LIVE: "0",
       SIP_SOLANA_EXTRA_MODES_FROM_SLOT: "1",
       SIP_SOLANA_PROGRAM_ID: "p",
+      PORT: "8080",
       OTHER: "x",
     };
-    expect(keeperEnvOf(env)).toEqual({ SIP_SOLANA_PROGRAM_ID: "p", OTHER: "x" });
+    expect(keeperEnvOf(env)).toEqual({ SIP_SOLANA_PROGRAM_ID: "p", PORT: "8080", OTHER: "x" });
     expect(env.SIP_SOLANA_DISPATCH).toBe("on");
     expect([...WORKER_VARS].sort()).toEqual([
       "SIP_SOLANA_DISPATCH",
@@ -80,7 +85,92 @@ describe("the keeper's own config, without the worker's names", () => {
       "SIP_SOLANA_EXTRA_MODES_VAULTS",
       "SIP_SOLANA_PLAN_RPS",
       "SIP_SOLANA_WORKERS_MAX",
+      "SIP_SOLANA_WORKER_HEALTH",
       "SIP_SOLANA_WORKER_SLOTS",
+    ]);
+  });
+});
+
+describe("SIP_SOLANA_WORKER_HEALTH (the deploy gate, src/worker-health.ts): opt-in", () => {
+  const problems = (env: Record<string, string>): readonly string[] => {
+    const read = readWorkerSettings(env);
+    return "problems" in read ? read.problems : [];
+  };
+  const healthOf = (env: Record<string, string>): { readonly port: number } | null => {
+    const read = readWorkerSettings(env);
+    if ("problems" in read) throw new Error(`refused: ${read.problems.join(" | ")}`);
+    return read.settings.health;
+  };
+
+  it("is no gate when unset, empty or off, whatever PORT holds: every worker has a PORT, so PORT alone is no switch", () => {
+    for (const value of [undefined, "", "  ", "off", " off "]) {
+      const env = { SIP_SOLANA_DISPATCH: "shadow", PORT: "8080", ...(value === undefined ? {} : { SIP_SOLANA_WORKER_HEALTH: value }) };
+      expect(healthOf(env), JSON.stringify(value)).toBeNull();
+    }
+    // AND WITHOUT THE GATE NOTHING MORE IS ASKED: no PORT, a PORT only loadConfig
+    // refuses, SIP_SOLANA_DISPATCH unset — none of them is the gate's to refuse.
+    expect(healthOf({ SIP_SOLANA_WORKER_HEALTH: "off" })).toBeNull();
+    expect(healthOf({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "off", PORT: "80a" })).toBeNull();
+    expect(readWorkerHealth({})).toEqual({ health: null });
+  });
+
+  it("is a gate on PORT with on", () => {
+    expect(healthOf({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" })).toEqual({ port: 8080 });
+    expect(healthOf({ SIP_SOLANA_DISPATCH: "on", SIP_SOLANA_WORKER_HEALTH: " on ", PORT: " 3000 " })).toEqual({ port: 3000 });
+    expect(readWorkerHealth({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" })).toEqual({ health: { port: 8080 } });
+  });
+
+  it("accepts on beside SIP_SOLANA_DISPATCH=off written out: the idle worker that answers 200, the stop that survives pushes", () => {
+    expect(readWorkerSettings({ SIP_SOLANA_DISPATCH: "off", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" })).toEqual({
+      settings: { mode: "off", slots: DEFAULT_WORKER_SLOTS, workersMax: DEFAULT_WORKERS_MAX, planRps: 50, extraModes: null, health: { port: 8080 } },
+    });
+    expect(healthOf({ SIP_SOLANA_DISPATCH: " off ", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" })).toEqual({ port: 8080 });
+  });
+
+  it("H1: refuses any value but on or off, naming the variable and the value's length, never the value", () => {
+    for (const value of ["ON", "Off", "true", "1", "yes", "on,off", "HealthSecretValue"]) {
+      const said = problems({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: value, PORT: "8080" });
+      expect(said, value).toEqual([`SIP_SOLANA_WORKER_HEALTH must be on or off (unset is off); it holds a ${value.length}-character value.`]);
+    }
+    expect(problems({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "HealthSecretValue", PORT: "8080" }).join(" ")).not.toContain("HealthSecretValue");
+  });
+
+  it("H2: refuses on without a valid PORT, read by loadConfig's own rule (readPort), naming PORT and never its value", () => {
+    // NONE AT ALL: a gate with no port to answer on.
+    for (const env of [{}, { PORT: "" }, { PORT: "   " }] as Record<string, string>[]) {
+      expect(problems({ ...env, SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "on" }), JSON.stringify(env)).toEqual([
+        "SIP_SOLANA_WORKER_HEALTH=on answers /health on PORT, and PORT is not set: the port the healthcheck calls, an integer from 1 to 65535.",
+      ]);
+    }
+    // ONE THAT IS NOT A PORT, refused in loadConfig's own words.
+    for (const port of ["80a", "0", "65536", "-1", "8080.0", "PortSecretValue"]) {
+      const rule = readPort(port);
+      expect("problem" in rule, port).toBe(true);
+      expect(problems({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "on", PORT: port }), port).toEqual([
+        `SIP_SOLANA_WORKER_HEALTH=on answers /health on PORT: ${"problem" in rule ? rule.problem : ""}`,
+      ]);
+    }
+    expect(problems({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "PortSecretValue" }).join(" ")).not.toContain("PortSecretValue");
+  });
+
+  it("H3: refuses on with SIP_SOLANA_DISPATCH unset or empty: unset reads as off, and a variable lost in an edit would deploy green and idle", () => {
+    for (const env of [{}, { SIP_SOLANA_DISPATCH: "" }, { SIP_SOLANA_DISPATCH: "   " }] as Record<string, string>[]) {
+      expect(problems({ ...env, SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" }), JSON.stringify(env)).toEqual([
+        expect.stringContaining("SIP_SOLANA_WORKER_HEALTH=on with SIP_SOLANA_DISPATCH unset or empty: that reads as off"),
+      ]);
+    }
+    // WITHOUT THE GATE THE SAME UNSET DISPATCH IS TODAY'S OFF: nothing refused, and bin/worker.mts exits 0.
+    expect(readWorkerSettings({ PORT: "8080" })).toMatchObject({ settings: { mode: "off", health: null } });
+    // A DISPATCH THAT IS NOT A MODE is readDispatchMode's refusal, not H3's.
+    expect(problems({ SIP_SOLANA_DISPATCH: "maybe", SIP_SOLANA_WORKER_HEALTH: "on", PORT: "8080" })).toEqual([expect.stringContaining("SIP_SOLANA_DISPATCH must be one of")]);
+  });
+
+  it("reports its refusals together with every other one, at once", () => {
+    expect(problems({ SIP_SOLANA_WORKER_HEALTH: "on", SIP_SOLANA_WORKER_SLOTS: "0", SIP_SOLANA_EXTRA_MODES_LIVE: "1" })).toEqual([
+      expect.stringContaining("SIP_SOLANA_WORKER_SLOTS must be"),
+      expect.stringContaining("set without SIP_SOLANA_EXTRA_MODES"),
+      expect.stringContaining("PORT is not set"),
+      expect.stringContaining("SIP_SOLANA_DISPATCH unset or empty"),
     ]);
   });
 });
@@ -156,7 +246,14 @@ describe("SIP_SOLANA_EXTRA_MODES* (the per-trade modes, ADR §6.2 M4–M6)", () 
 
   it("reaches readWorkerSettings, whose refusal it joins", () => {
     expect(readWorkerSettings({ SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_EXTRA_MODES: "fixed", SIP_SOLANA_EXTRA_MODES_VAULTS: "*" })).toEqual({
-      settings: { mode: "shadow", slots: DEFAULT_WORKER_SLOTS, workersMax: DEFAULT_WORKERS_MAX, planRps: 50, extraModes: { modes: new Set([3]), vaults: "*", live: false, fromSlot: null } },
+      settings: {
+        mode: "shadow",
+        slots: DEFAULT_WORKER_SLOTS,
+        workersMax: DEFAULT_WORKERS_MAX,
+        planRps: 50,
+        extraModes: { modes: new Set([3]), vaults: "*", live: false, fromSlot: null },
+        health: null,
+      },
     });
     expect(readWorkerSettings({ SIP_SOLANA_EXTRA_MODES: "fixed" })).toHaveProperty("problems");
   });

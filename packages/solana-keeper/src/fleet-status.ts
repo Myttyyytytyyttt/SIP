@@ -35,15 +35,16 @@
 // verdict. Railway asks /health only at deploy time (ADR §3.11, RT-11); the
 // watchdog's self-exit is what acts on the same verdict afterwards.
 //
-// A WORKER SERVES NOT THIS RULE BUT A DEPLOY GATE (src/worker-health.ts:
-// starting, ready, stopping). Railway reads /health only until the first 2xx;
-// inside that window this rule's ten minutes could only say ok, and a worker has
-// no watchdog to act on it afterwards. A worker's stopped heartbeat shows here
-// instead, as its row's age in fleet.workers.
+// A WORKER SERVES NOT THIS RULE BUT A DEPLOY GATE, AND ONLY WITH
+// SIP_SOLANA_WORKER_HEALTH=on (src/worker-health.ts: starting, ready, off,
+// stopping). Railway reads /health only until the first 2xx; inside that window
+// this rule's ten minutes could only say ok, and a worker has no watchdog to act
+// on it afterwards. A worker's stopped heartbeat shows here instead, as its
+// row's age in fleet.workers.
 //
 // DARK. Nothing in the legacy keepers imports this file: the scheduler's entry
 // point (Q2) constructs the reader and serves the view; the worker's (Q3)
-// serves no page, only its deploy gate.
+// serves no page, only its deploy gate, when that is on.
 // The snapshot is read from Q1's tables (sql/sip_solana.sql, through
 // src/fleet-pg.ts), and a worker's row is written by Q1's store
 // (src/dispatch-store.ts: its stats and the quota age on every beat).

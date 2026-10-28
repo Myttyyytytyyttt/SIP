@@ -1,5 +1,11 @@
 // THE WORKER'S DEPLOY GATE: GET and HEAD /health, and nothing else, served by
-// bin/worker.mts when PORT is set (runbook §10.1).
+// bin/worker.mts on PORT, and only with SIP_SOLANA_WORKER_HEALTH=on
+// (src/worker-config.ts; runbook §10.1).
+//
+// OPT-IN, BECAUSE PORT IS NO SWITCH. The image bakes PORT=8080 (Dockerfile) and
+// Railway injects its own, so every worker has a PORT, whether or not its
+// service waits for a healthcheck. Unset, empty or off, nothing listens: the
+// worker is the one from before this gate.
 //
 // WHY A WORKER ANSWERS ANYTHING. sip-solana-worker opened no port and had no
 // Healthcheck Path, and Railway marks a deployment without one Active as soon
@@ -14,20 +20,35 @@
 // (docs.railway.com/reference/healthchecks,
 // docs.railway.com/guides/roll-back-bad-deploy).
 //
-// THREE PHASES, IN ONE DIRECTION:
+// FOUR PHASES, IN ONE DIRECTION:
 //   starting  503  listening, past every refusal, not serving yet;
 //   ready     200  its row registered AND its claim loop's first claim ANSWERED
 //                  (WorkerLoop's onClaimAnswered), whatever the queue held: the
 //                  one thing a worker is for, seen working against this
 //                  database's tables before Railway retires the worker before it;
+//   off       200  SIP_SOLANA_DISPATCH=off, written out: listening and nothing
+//                  else, no database, no RPC, no claim (below);
 //   stopping  503  from the first line of the shutdown (SIGTERM, SIGINT), before
-//                  the drain. Never ready again.
+//                  the drain.
+// A gate starts at starting or at off. starting moves to ready or to stopping,
+// ready and off only to stopping, and stopping is final: off never becomes
+// ready, and nothing is ready or off again once it is stopping.
+//
+// OFF IS THE STOP THAT SURVIVES PUSHES. On a service whose deploys wait for
+// /health, a worker that exited when off would fail its deploy, and the one
+// before it would go on serving; a deployment Removed by hand comes back with
+// the next push. A worker that is off and answers 200 passes its healthcheck and
+// replaces the one before it, which drains and goes, and every later push
+// redeploys it still off. Only `off` written out does this: SIP_SOLANA_DISPATCH
+// left unset or empty beside the gate is refused at boot (H3,
+// src/worker-config.ts), so a variable lost in an edit fails its deploy rather
+// than pass for a stop.
 //
 // A REFUSED CONFIGURATION NEVER ANSWERS AT ALL, not even 503: bin/worker.mts
-// listens only after readWorkerSettings, the DISPATCH-off exit, loadConfig,
+// listens only after readWorkerSettings and, unless it is off, after loadConfig,
 // workerRefusals and the price tape's columns, and after everything it builds
 // from them. A server that cannot listen exits 1 (bin/scheduler.mts's rule),
-// before the worker's row is written: a worker nobody can check would only hold
+// before any worker row is written: a worker nobody can check would only hold
 // the deploy until the timeout, and this says why at once.
 //
 // READY DOES NOT FALL BACK TO 503 WHEN THE HEARTBEAT STOPS, on purpose. Railway
@@ -54,7 +75,10 @@ import { createHeartbeatServer } from "./status.js";
 export const WORKER_HEALTH_PATH = "/health";
 
 /** Where the worker stands, in the one direction it moves (the header's table). */
-export type WorkerHealthPhase = "starting" | "ready" | "stopping";
+export type WorkerHealthPhase = "starting" | "ready" | "off" | "stopping";
+
+/** Where a gate begins: starting, for a worker on its way to serving; off, for one SIP_SOLANA_DISPATCH=off keeps idle. */
+export type WorkerHealthStart = Extract<WorkerHealthPhase, "starting" | "off">;
 
 /** What the gate says about the process, fixed at boot. */
 export interface WorkerHealthIdentity {
@@ -84,12 +108,14 @@ const VERSION_SHAPE = /^(?:[0-9a-f]{7,40}|local)$/;
 
 /** The phase, and the answer it gives. bin/worker.mts moves it; the handler only reads it. */
 export class WorkerHealthGate {
-  #phase: WorkerHealthPhase = "starting";
+  #phase: WorkerHealthPhase;
   readonly #version: string | null;
   readonly #startedAt: string | null;
   readonly #slots: number | null;
 
-  constructor(identity: WorkerHealthIdentity) {
+  constructor(identity: WorkerHealthIdentity, start: WorkerHealthStart = "starting") {
+    // ONE OF THE TWO, whatever an untyped caller hands it: a gate never begins ready or stopping.
+    this.#phase = start === "off" ? "off" : "starting";
     this.#version = VERSION_SHAPE.test(identity.version) ? identity.version : null;
     const started = new Date(identity.startedAt);
     this.#startedAt = Number.isNaN(started.getTime()) ? null : started.toISOString();
@@ -102,8 +128,9 @@ export class WorkerHealthGate {
 
   /**
    * starting → ready. True only on that step, so the caller says it once; a gate
-   * already ready, or stopping, is left as it is: a worker that has begun its
-   * shutdown is never ready again.
+   * already ready, off or stopping is left as it is: a worker kept off claims
+   * nothing to be ready for, and one that has begun its shutdown is never ready
+   * again.
    */
   ready(): boolean {
     if (this.#phase !== "starting") return false;
@@ -116,9 +143,9 @@ export class WorkerHealthGate {
     this.#phase = "stopping";
   }
 
-  /** What /health answers now: 200 only while ready. */
+  /** What /health answers now: 200 while ready or off, 503 while starting or stopping. */
   answer(): { readonly status: 200 | 503; readonly body: WorkerHealthBody } {
-    const ok = this.#phase === "ready";
+    const ok = this.#phase === "ready" || this.#phase === "off";
     return {
       status: ok ? 200 : 503,
       body: { ok, phase: this.#phase, role: "worker", version: this.#version, startedAt: this.#startedAt, slots: this.#slots },

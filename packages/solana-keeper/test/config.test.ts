@@ -17,6 +17,7 @@ import {
   SIGNING_SECRET_VARS,
   loadConfig,
   parsePools,
+  readPort,
   shape,
   type KeeperConfig,
 } from "../src/config.js";
@@ -420,6 +421,25 @@ describe("endpoints, cadence, pools and credentials", () => {
     expect(loadConfig(dry({ PORT: "18080" }), new Redactor()).port).toBe(18_080);
     expect(refusal(dry({ PORT: "80a" })).message).toContain("PORT");
     expect(refusal(dry({ PORT: "70000" })).message).toContain("PORT");
+  });
+
+  it("reads PORT by readPort, the one rule the dispatcher worker's health gate reads it by too (src/worker-config.ts)", () => {
+    expect(readPort(undefined)).toEqual({ port: null });
+    expect(readPort("  ")).toEqual({ port: null });
+    expect(readPort(" 8080 ")).toEqual({ port: 8080 });
+    expect(readPort("1")).toEqual({ port: 1 });
+    expect(readPort("65535")).toEqual({ port: 65_535 });
+    expect(loadConfig(dry({}), new Redactor()).port).toBeNull();
+    for (const raw of ["0", "65536", "80a", "-1", "8080.0", "1e3", "99999999999999999999"]) {
+      const read = readPort(raw);
+      expect("problem" in read, raw).toBe(true);
+      // LOADCONFIG REFUSES IN THE SAME WORDS: one rule, not two that agree today.
+      expect(refusal(dry({ PORT: raw })).problems, raw).toContain("problem" in read ? read.problem : "");
+    }
+    const planted = readPort("SecretPortValue");
+    const said = "problem" in planted ? planted.problem : "";
+    expect(said).toBe("PORT must be an integer from 1 to 65535; it holds a 15-character free-form value.");
+    expect(said).not.toContain("SecretPortValue");
   });
 
   it("reads SIP_SOLANA_PRIVY_POLICY_ID as an optional public id, and starts armed without it", () => {

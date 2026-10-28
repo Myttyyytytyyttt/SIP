@@ -4,10 +4,12 @@
 //
 //   SIP_SOLANA_DISPATCH     off | shadow | on. UNSET IS OFF, and a worker that is
 //                           off does nothing at all: bin/worker.mts says so and
-//                           exits 0 before it opens a connection. `shadow` runs
-//                           every job keyless and dry, writing 'shadow' intents
-//                           and sending nothing (plan P3a design detail 1);
-//                           `on` sends, through the fence.
+//                           exits 0 before it opens a connection. Behind its
+//                           health gate (below) `off` must be written out, and
+//                           then the worker stays up answering /health, opening
+//                           nothing. `shadow` runs every job keyless and dry,
+//                           writing 'shadow' intents and sending nothing (plan
+//                           P3a design detail 1); `on` sends, through the fence.
 //   SIP_SOLANA_WORKER_SLOTS jobs one process runs at once: 1 to 8, default 2
 //                           (ADR §3.11, "start 2").
 //   SIP_SOLANA_WORKERS_MAX  r_max: the most worker processes the fleet may run.
@@ -37,14 +39,25 @@
 //                                     REQUIRED for LIVE=1, so the first live
 //                                     window starts fresh.
 //
+// AND ITS DEPLOY GATE (src/worker-health.ts), OPT-IN:
+//   SIP_SOLANA_WORKER_HEALTH  on or off; unset or empty is off. OFF SERVES
+//                             NOTHING, WHATEVER PORT HOLDS: the image bakes
+//                             PORT=8080 (Dockerfile) and Railway injects its
+//                             own, so PORT is set on every worker and cannot say
+//                             whether its service waits for a healthcheck. `on`
+//                             answers GET /health on PORT (readWorkerHealth says
+//                             what it refuses). With it, SIP_SOLANA_DISPATCH=off
+//                             written out is a worker that answers 200 'off' and
+//                             does nothing else: the stop that survives pushes.
+//
 // THE REST OF THE KEEPER'S CONFIG IS READ BY loadConfig (src/config.ts) AS FOR
-// ANY KEEPER, with these four names taken out first so it does not call them
-// misspellings. And then three refusals only a worker has (workerRefusals): a
-// shadow worker holds no key, a worker that is `on` holds one, and every worker
-// needs its database.
+// ANY KEEPER, with this file's names (WORKER_VARS) taken out first so it does
+// not call them misspellings. And then three refusals only a worker has
+// (workerRefusals): a shadow worker holds no key, a worker that is `on` holds
+// one, and every worker needs its database.
 
 import { PublicKey } from "@solana/web3.js";
-import type { KeeperConfig } from "./config.js";
+import { readPort, type KeeperConfig } from "./config.js";
 import { DISPATCH_MODES, readDispatchMode, type DispatchMode } from "./cuts.js";
 import { HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS } from "./rpc-quota.js";
 
@@ -58,8 +71,8 @@ export { DISPATCH_MODES, readDispatchMode, type DispatchMode };
 /** The per-trade modes' four variables (readExtraModes). */
 export const EXTRA_MODES_VARS = ["SIP_SOLANA_EXTRA_MODES", "SIP_SOLANA_EXTRA_MODES_VAULTS", "SIP_SOLANA_EXTRA_MODES_LIVE", "SIP_SOLANA_EXTRA_MODES_FROM_SLOT"] as const;
 
-/** The variables this file reads; loadConfig is handed the environment without them. */
-export const WORKER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_WORKER_SLOTS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_RPS", ...EXTRA_MODES_VARS] as const;
+/** The variables this file reads; loadConfig is handed the environment without them. PORT is not one: loadConfig reads it too, by the same rule (readPort). */
+export const WORKER_VARS = ["SIP_SOLANA_DISPATCH", "SIP_SOLANA_WORKER_SLOTS", "SIP_SOLANA_WORKERS_MAX", "SIP_SOLANA_PLAN_RPS", "SIP_SOLANA_WORKER_HEALTH", ...EXTRA_MODES_VARS] as const;
 
 /** SIP_SOLANA_EXTRA_MODES's names, and the skim_mode byte each serves. */
 export const EXTRA_MODE_NAMES: Readonly<Record<string, number>> = Object.freeze({ roundup: 2, fixed: 3 });
@@ -85,6 +98,8 @@ export interface WorkerSettings {
   readonly planRps: number;
   /** The per-trade modes this worker serves, or null: none (every SIP_SOLANA_EXTRA_MODES* unset). */
   readonly extraModes: ExtraModesSettings | null;
+  /** Its deploy gate's port (src/worker-health.ts), or null: no gate, nothing listens (SIP_SOLANA_WORKER_HEALTH unset, empty or off). */
+  readonly health: { readonly port: number } | null;
 }
 
 const U64_MAX = (1n << 64n) - 1n;
@@ -167,6 +182,37 @@ function wholeIn(raw: string, min: number, max: number): number | null {
   return value >= min && value <= max ? value : null;
 }
 
+/**
+ * SIP_SOLANA_WORKER_HEALTH, strictly (the header says why it, and not PORT, is
+ * the switch): unset, empty or exactly `off` is no gate; exactly `on` is a gate
+ * on PORT, read by loadConfig's own rule (readPort, src/config.ts) because a
+ * worker kept off never reaches loadConfig. Refused, by name and never by value:
+ *   H1  any other value;
+ *   H2  `on` without a valid PORT: a gate with no port to answer on;
+ *   H3  `on` with SIP_SOLANA_DISPATCH unset or empty. readDispatchMode reads that
+ *       as off (src/cuts.ts), and a gated worker that is off answers 200, so a
+ *       variable lost in a Duplicate or an edit would deploy green and serve
+ *       nothing. Only `off` written out is that stop (bin/worker.mts).
+ */
+export function readWorkerHealth(env: NodeJS.ProcessEnv): { readonly health: { readonly port: number } | null } | { readonly problems: readonly string[] } {
+  const value = trimmed(env["SIP_SOLANA_WORKER_HEALTH"]);
+  if (value === undefined || value === "off") return { health: null };
+  if (value !== "on") return { problems: [`SIP_SOLANA_WORKER_HEALTH must be on or off (unset is off); it holds a ${value.length}-character value.`] };
+  const problems: string[] = [];
+  const portRead = readPort(env["PORT"]);
+  const port = "port" in portRead ? portRead.port : null;
+  if ("problem" in portRead) problems.push(`SIP_SOLANA_WORKER_HEALTH=on answers /health on PORT: ${portRead.problem}`);
+  else if (port === null) problems.push("SIP_SOLANA_WORKER_HEALTH=on answers /health on PORT, and PORT is not set: the port the healthcheck calls, an integer from 1 to 65535.");
+  if (trimmed(env["SIP_SOLANA_DISPATCH"]) === undefined) {
+    problems.push(
+      "SIP_SOLANA_WORKER_HEALTH=on with SIP_SOLANA_DISPATCH unset or empty: that reads as off, and a gated worker that is off passes its " +
+        "healthcheck serving nothing. Set SIP_SOLANA_DISPATCH to shadow or on, or to off to keep this worker stopped on purpose.",
+    );
+  }
+  if (port === null || problems.length > 0) return { problems };
+  return { health: { port } };
+}
+
 /** Every worker variable, strictly. */
 export function readWorkerSettings(env: NodeJS.ProcessEnv): { readonly settings: WorkerSettings } | { readonly problems: readonly string[] } {
   const problems: string[] = [];
@@ -185,8 +231,10 @@ export function readWorkerSettings(env: NodeJS.ProcessEnv): { readonly settings:
   const planRps = read("SIP_SOLANA_PLAN_RPS", HELIUS_DEVELOPER_RPS, MIN_PLAN_RPS, MAX_PLAN_RPS);
   const extra = readExtraModes(env);
   if ("problems" in extra) problems.push(...extra.problems);
-  if (problems.length > 0 || "problem" in mode || "problems" in extra) return { problems };
-  return { settings: { mode: mode.mode, slots, workersMax, planRps, extraModes: extra.extraModes } };
+  const health = readWorkerHealth(env);
+  if ("problems" in health) problems.push(...health.problems);
+  if (problems.length > 0 || "problem" in mode || "problems" in extra || "problems" in health) return { problems };
+  return { settings: { mode: mode.mode, slots, workersMax, planRps, extraModes: extra.extraModes, health: health.health } };
 }
 
 /** The environment loadConfig is handed: the same, without the worker's own names. */

@@ -194,6 +194,22 @@ export function readRole(raw: string | undefined): { readonly role: KeeperRole }
 }
 
 /**
+ * PORT, read strictly: unset or blank is null (no server), and anything else is
+ * an integer from 1 to 65535, digits only, or a problem that names PORT and says
+ * only the shape of what it holds. loadConfig's rule, and the one the dispatcher
+ * worker reads its health gate's port by (src/worker-config.ts): a worker kept
+ * idle by SIP_SOLANA_DISPATCH=off behind that gate still listens, and never
+ * calls loadConfig.
+ */
+export function readPort(raw: string | undefined): { readonly port: number | null } | { readonly problem: string } {
+  const value = trimmed(raw);
+  if (value === undefined) return { port: null };
+  const parsed = /^[0-9]+$/.test(value) ? Number(value) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65_535) return { problem: `PORT must be an integer from 1 to 65535; it holds ${shape(value)}.` };
+  return { port: parsed };
+}
+
+/**
  * The shortest SIP_SOLANA_DOORBELL_SECRET that switches the doorbell on.
  *
  * THE SECRET IS THE WHOLE AUTHENTICATION of POST /hooks/helius, a route on a
@@ -947,16 +963,9 @@ export function loadConfig(env: NodeJS.ProcessEnv, redactor: Redactor = sharedRe
     }
   }
 
-  let port: number | null = null;
-  const portRaw = trimmed(env["PORT"]);
-  if (portRaw !== undefined) {
-    const parsed = /^[0-9]+$/.test(portRaw) ? Number(portRaw) : Number.NaN;
-    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 65_535) {
-      problems.push(`PORT must be an integer from 1 to 65535; it holds ${shape(portRaw)}.`);
-    } else {
-      port = parsed;
-    }
-  }
+  const portRead = readPort(env["PORT"]);
+  const port = "port" in portRead ? portRead.port : null;
+  if ("problem" in portRead) problems.push(portRead.problem);
 
   // Public ids. Legible on purpose, like the worker's PRIVY_SIGNER_ID.
   const privyAppId = trimmed(env["SIP_SOLANA_PRIVY_APP_ID"]) ?? null;
