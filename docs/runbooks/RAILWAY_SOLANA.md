@@ -1177,16 +1177,18 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   cesta que no cabe en la cuota de Jupiter del worker, o Jupiter rechazando las llamadas. Sin timbre en el scheduler,
   la tercera llega unos 2 min después de la primera; mientras siga, se repite cada 30 min. Se apaga con un turno que
   compre o que falle. Si el detalle empieza por «the venues this basket would trade against could not be measured»
-  (Jupiter o el RPC no contestaron, o Jupiter contestó 429, 401/403, 408 o 5xx), se queda en aviso: es la causa de
-  todos los vaults a la vez, y despierta una sola vez como `invest-refused-upstream`. Si empieza por «the route this
-  basket would trade along was refused» (Jupiter rechaza el par de ese vault —un 400 u otro 4xx— o el vigilante rechaza
-  la ruta que dio), es de ese vault y sí llega a crítica. **Primero**: lee el detalle (en el aviso y en `flota`). Si
-  lleva `Jupiter answered HTTP …`, mira la entrada de Jupiter; si no, pásamelo con la hora.
+  (Jupiter o el RPC no contestaron o tardaron tanto que la ruta caducó —`route-age`—, o Jupiter contestó 429, 401/403,
+  404/410, 408 o 5xx), se queda en aviso: es la causa de todos los vaults a la vez, y despierta una sola vez como
+  `invest-refused-upstream`. Si empieza por «the route this basket would trade along was refused» (Jupiter rechaza el
+  par de ese vault —un 400 u otro 4xx— o el vigilante rechaza la forma de la ruta que dio), es de ese vault y sí llega
+  a crítica. **Primero**: lee el detalle (en el aviso y en `flota`). Si lleva `Jupiter answered HTTP …`, mira la
+  entrada de Jupiter; si no, pásamelo con la hora.
 - **`invest-refused-upstream`** («[worker]», crítica): las cestas de uno o más vaults llevan tres turnos o más
-  rechazadas porque no se pudieron medir sus mercados (Jupiter o el RPC sin contestar, o Jupiter contestando 429,
-  401/403, 408 o 5xx). Un solo aviso para todos, con cuántos vaults, cuáles (con el botón del vault si es uno solo) y el
-  último detalle; se repite cada 30 min y se apaga cuando esos vaults vuelven a comprar (o se olvidan tras 2 h sin
-  noticias suyas). **Primero**: el detalle; si lleva `Jupiter answered HTTP …`, la entrada de Jupiter.
+  rechazadas porque no se pudieron medir sus mercados (Jupiter o el RPC sin contestar o tan lentos que la ruta caducó, o
+  Jupiter contestando 429, 401/403, 404/410, 408 o 5xx). Un solo aviso para todos, con cuántos vaults, cuáles (con el
+  botón del vault si es uno solo) y el último detalle; se repite cada 30 min y se apaga cuando esos vaults vuelven a
+  comprar (o se olvidan tras 2 h sin noticias suyas). **Primero**: el detalle; si lleva `Jupiter answered HTTP …`, la
+  entrada de Jupiter.
 - **Jupiter, con su código HTTP**: el detalle de una compra que Jupiter rechazó lleva `Jupiter answered HTTP <código>`
   (en el aviso, en `flota` y en `fleet.vaults` del `/status` del scheduler). **429**: demasiadas llamadas; **401**:
   Jupiter no acepta la clave; **400**: rechaza ese par; **5xx**: Jupiter está caído. Con `jupiter-key`, tras un 429 el

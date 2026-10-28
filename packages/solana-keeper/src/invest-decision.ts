@@ -40,11 +40,12 @@ import { olderPublishTime, pythPublishAgeSeconds, solUsdcPythRateWad, type PythP
 
 /**
  * How a REFUSED invest turn's detail begins when the basket's venues could not
- * be measured at all — Jupiter or the RPC did not answer, or answered an error
- * (invest-tick.ts, the measurement's catch) — rather than measured and found
- * wanting. That cause is upstream and shared: every vault buying at that moment
- * meets it, so a worker pages it once for all of them (src/worker-alerts.ts,
- * UpstreamRefusals) and not once per vault.
+ * be measured at all — Jupiter or the RPC did not answer, answered an error,
+ * or answered too slowly for the route to be fresh (invest-tick.ts, the
+ * measurement's catch) — rather than measured and found wanting. That cause is
+ * upstream and shared: every vault buying at that moment meets it, so a worker
+ * pages it once for all of them (src/worker-alerts.ts, UpstreamRefusals) and
+ * not once per vault.
  */
 export const UNMEASURED_BASKET_REFUSAL = "the venues this basket would trade against could not be measured: ";
 
@@ -55,9 +56,9 @@ export const isUnmeasuredRefusal = (detail: string): boolean => detail.startsWit
  * How a REFUSED invest turn's detail begins when the measurement could not be
  * taken for THIS basket's own reason: Jupiter refused its pair (a 400 —
  * COULD_NOT_FIND_ANY_ROUTE, a venue it will not build for — or another 4xx
- * about the request), or the route builder refused the route Jupiter gave it.
- * Every other vault still buys, so it pages on the vault's own key, as any
- * refusal for the vault's own reason does (src/worker-alerts.ts).
+ * about the request), or the route builder refused the shape of the route
+ * Jupiter gave it. Every other vault still buys, so it pages on the vault's own
+ * key, as any refusal for the vault's own reason does (src/worker-alerts.ts).
  */
 export const UNROUTABLE_BASKET_REFUSAL = "the route this basket would trade along was refused: ";
 
@@ -66,22 +67,30 @@ export const UNROUTABLE_BASKET_REFUSAL = "the route this basket would trade alon
  * that moment shares (UNMEASURED_BASKET_REFUSAL) rather than for this basket's
  * own (UNROUTABLE_BASKET_REFUSAL).
  *
- * THE VAULT'S OWN ONLY ON EVIDENCE THAT NAMES IT: the builder's own refusal of
- * the route, or a Jupiter answer whose status is about the request — any 4xx
- * but the four that are about the caller or the service: 401 and 403 (a key
- * it does not accept), 408 (it timed out) and 429 (the organisation's budget).
- * Those, a 5xx, and everything that is not an answer at all — a request nobody
- * answered, a timeout, an RPC that failed, the pacer's backoff — are upstream.
+ * THE VAULT'S OWN ONLY ON EVIDENCE THAT NAMES IT: the builder's refusal of the
+ * route's shape, or a Jupiter answer whose status is about the request — any
+ * 4xx but the six that are about the caller or the service: 401 and 403 (a key
+ * it does not accept), 404 and 410 (a path it no longer serves), 408 (it timed
+ * out) and 429 (the organisation's budget). Those, a 5xx, and everything that is
+ * not an answer at all — a request nobody answered, a timeout, an RPC that
+ * failed, the pacer's backoff — are upstream. So is the builder's `route-age`:
+ * a quote older than ROUTE_MAX_AGE_MS (invest-tick.ts) by the time the leg was
+ * checked is time spent waiting on Jupiter's /swap-instructions and the RPC's
+ * account reads — the builder says its refusal cannot tell that from a market
+ * that moved (jupiter-route.ts) — and every vault buying at that moment waits
+ * on the same two. Filed as each vault's own, one slow Jupiter or RPC paged
+ * once per vault.
  * A pair's 400 counted as upstream was held at a warn on its vault's key, paged
  * as "Jupiter or the RPC not answering" with no vault named, and kept the one
  * shared key raised, so a real outage behind it was paged up to 30 minutes late.
  */
 export function measurementFailedUpstream(error: unknown): boolean {
-  if (error instanceof JupiterRouteRefusal) return false;
+  if (error instanceof JupiterRouteRefusal) return error.condition === "route-age";
   const status = /Jupiter answered HTTP (\d{3})\b/.exec(error instanceof Error ? error.message : String(error))?.[1];
   if (status === undefined) return true;
   const code = Number(status);
-  const aboutTheRequest = code >= 400 && code < 500 && code !== 401 && code !== 403 && code !== 408 && code !== 429;
+  const aboutTheService = code === 401 || code === 403 || code === 404 || code === 408 || code === 410 || code === 429;
+  const aboutTheRequest = code >= 400 && code < 500 && !aboutTheService;
   return !aboutTheRequest;
 }
 

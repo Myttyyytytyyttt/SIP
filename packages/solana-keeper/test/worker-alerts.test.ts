@@ -15,7 +15,7 @@ import {
 import { JupiterBackoffError } from "../src/jupiter-pacer.js";
 import { JupiterRouteRefusal } from "../src/program-scripts.js";
 import { SETTLE_RETRY_CRITICAL_AFTER } from "../src/settle-decision.js";
-import { Secret } from "@sip/solana-log";
+import { Secret, summarizeUpstreamError } from "@sip/solana-log";
 import { createAlerter, type AlertSeverity } from "../src/alerts.js";
 import {
   INVEST_REFUSED_CRITICAL_STREAK,
@@ -354,7 +354,7 @@ describe("a refusal the upstream caused: the basket's venues could not be measur
 
   it("counts as upstream only what every vault meets: a pair's 400 or the builder's refusal is the vault's own, and pages on its key", () => {
     const answered = (status: number) => new Error(`Jupiter answered HTTP ${status} at api.jup.ag/swap/v1/quote: {"error":"Could not find any route"}`);
-    for (const status of [400, 404, 422]) expect(measurementFailedUpstream(answered(status))).toBe(false);
+    for (const status of [400, 422]) expect(measurementFailedUpstream(answered(status))).toBe(false);
     expect(measurementFailedUpstream(new JupiterRouteRefusal("platform-fee", "the route carries a platform fee"))).toBe(false);
     for (const status of [401, 403, 408, 429, 500, 503]) expect(measurementFailedUpstream(answered(status))).toBe(true);
     expect(measurementFailedUpstream(new JupiterBackoffError(60_000, 0))).toBe(true);
@@ -376,6 +376,35 @@ describe("a refusal the upstream caused: the basket's venues could not be measur
       [2, `invest-refused:${FUNDED[0]!}`],
       [7, INVEST_REFUSED_UPSTREAM_ALERT_KEY],
     ]);
+  });
+
+  it("counts a route too old (route-age) and a 404 or 410 as upstream: one stalled RPC or Jupiter pages once for every vault, not once per vault", () => {
+    // invest-tick.ts measures every leg with maxAge 30 s, and the builder says a route-age refusal cannot tell a moved
+    // market from its own stalled round trips (jupiter-route.ts) — every funded vault meets the same stall.
+    const stale = new JupiterRouteRefusal(
+      "route-age",
+      "the quote is 41000 ms old, past the 30000 ms this caller allows; 39000 ms of that age is this builder's own post-quote round trips (/swap-instructions and the vault-account read), not price movement",
+    );
+    expect(measurementFailedUpstream(stale)).toBe(true);
+    // A path Jupiter retired answers every vault the same.
+    for (const status of [404, 410]) expect(measurementFailedUpstream(new Error(`Jupiter answered HTTP ${status} at api.jup.ag/swap/v1/quote: Not Found`))).toBe(true);
+    // A ROUTE THE BUILDER REFUSES FOR ITS SHAPE IS STILL THIS BASKET'S OWN.
+    for (const condition of ["venue-program", "extra-instructions", "unmeasured-vault-account"] as const) {
+      expect(measurementFailedUpstream(new JupiterRouteRefusal(condition, "the route is not one this keeper signs"))).toBe(false);
+    }
+
+    // FOUR FUNDED VAULTS REFUSED FOR THE SAME STALL, the detail as invest-tick.ts writes it: one page, on the shared key.
+    const STALE = `${measurementFailedUpstream(stale) ? UNMEASURED_BASKET_REFUSAL : UNROUTABLE_BASKET_REFUSAL}${summarizeUpstreamError(stale)} — refusing the whole basket`;
+    const w = worker();
+    for (let minute = 0; minute <= 3; minute++) {
+      w.at(minute);
+      for (const vault of FUNDED) w.job(vault, { outcome: "REFUSED", detail: STALE });
+    }
+    expect(w.posted.map((page) => [page.at, page.key])).toEqual([[2, INVEST_REFUSED_UPSTREAM_ALERT_KEY]]);
+    const upstream = new UpstreamRefusals({ now: () => 0 });
+    expect(upstream.observe(FUNDED[0]!, { streak: INVEST_REFUSED_CRITICAL_STREAK, detail: STALE }).fire?.detail).toContain(
+      "One cause upstream (Jupiter or the RPC not answering, or not in time)",
+    );
   });
 
   it("names the vaults it stops, and carries the vault's button when there is one", () => {

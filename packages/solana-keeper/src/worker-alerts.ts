@@ -13,7 +13,8 @@
 // turns critical on the third REFUSED job in a row (investRefusedAlert says
 // why). The legacy keeper's stays a warn. AND ONE CAUSE PAGES ONCE: a refusal
 // because the basket's venues could not be measured at all — Jupiter or the
-// RPC not answering, or Jupiter answering 5xx, 429 or a key it refuses — is the
+// RPC not answering, answering too slowly for the route to be fresh, or Jupiter
+// answering 5xx, 429, a key it refuses or a path it no longer serves — is the
 // upstream's, and every vault buying at that moment meets it. Paged per vault,
 // one Jupiter outage was one critical per funded vault two minutes in and again
 // every 30 minutes; so such a refusal stays a warn on the vault's own key, and
@@ -278,7 +279,7 @@ export class UpstreamRefusals {
         detail:
           `${n} vault${n === 1 ? "'s basket is" : "s' baskets are"} refused because the venues could not be measured, ` +
           `${persistent === n ? (n === 1 ? "for" : "each for") : `${persistent} of them for`} ${INVEST_REFUSED_CRITICAL_STREAK} turns or more in a row; nothing is bought ` +
-          `(${shown}). One cause upstream (Jupiter or the RPC not answering), paged once here; each vault's invest-refused stays a warn. ` +
+          `(${shown}). One cause upstream (Jupiter or the RPC not answering, or not in time), paged once here; each vault's invest-refused stays a warn. ` +
           `Latest: ${latest.detail}`,
         context: { vaults: n, persistent, ...(named.length === 1 ? { vault: named[0] } : {}) },
       },
