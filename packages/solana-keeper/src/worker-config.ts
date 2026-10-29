@@ -269,11 +269,13 @@ const JUPITER_KEY_VARS = ["SIP_SOLANA_JUPITER_API_KEY", "SIP_SOLANA_JUPITER_CALL
  *   G1  `on`, the jupiter-key cut, and no SIP_SOLANA_JUPITER_API_KEY. The cut's
  *       reader answers no key and no problem (readJupiterKeySettings), and every
  *       quote goes keyless to lite-api.jup.ag, where a buy was refused on a 429
- *       nobody saw (2026-10-27). `on` ONLY: a shadow worker holds no key of any
- *       kind (test-local/shadow/harness.ts starts its workers without a Jupiter
- *       key either), because Jupiter counts the budget per organisation, and a
- *       shadow on the production key would spend the live worker's minute on
- *       buys it never sends; keyless, a shadow moves nothing.
+ *       nobody saw (2026-10-27). `on` ONLY: a shadow sends nothing, so a keyless
+ *       shadow costs no buy; and a shadow is meant to run keyless
+ *       (test-local/shadow/harness.ts starts its workers without a Jupiter key),
+ *       because Jupiter counts the budget per organisation and a shadow on the
+ *       production key would spend the live worker's minute on buys it never
+ *       sends. Nothing refuses a shadow that carries the cut and its key
+ *       (test/worker-health-boot.test.ts boots one).
  *   G2  SIP_SOLANA_JUPITER_API_KEY or SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set
  *       without the cut, which loadConfig only warns is unused. A worker's
  *       refusal: the scheduler reads the rate as its own number, without the

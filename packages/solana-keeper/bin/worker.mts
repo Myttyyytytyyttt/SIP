@@ -49,11 +49,11 @@
 // /health Railway keeps the worker before it (runbook §10.1), and a
 // registration that fails exits 1 having answered only 503. A server that
 // cannot listen exits 1, before the row is written. Behind the gate a worker
-// also refuses what elsewhere only warns (G1–G3, src/worker-config.ts): `on`
-// with the jupiter-key cut and no Jupiter key, that key or its rate without the
-// cut, and `on` with no alert webhook. Every worker's banner says the gate (off,
-// or on and its port), Jupiter and where alerts go, as words, booleans and
-// numbers.
+// also refuses what elsewhere only warns about or does not mention (G1–G3,
+// src/worker-config.ts): `on` with the jupiter-key cut and no Jupiter key, that
+// key or its rate without the cut, and `on` with no alert webhook. Every
+// worker's banner says the gate (off, or on and its port), Jupiter and where
+// alerts go, as words, booleans and numbers.
 //
 // OFF BEHIND THE GATE: SIP_SOLANA_DISPATCH=off, written out, with the gate on.
 // The stop that survives pushes (src/worker-health.ts says why): right after

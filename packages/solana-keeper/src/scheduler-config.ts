@@ -120,10 +120,11 @@ export const SCHEDULER_IGNORED_VARS = [
   "SIP_SOLANA_PRIVY_APP_ID",
   "SIP_SOLANA_PRIVY_SIGNER_ID",
   "SIP_SOLANA_PRIVY_POLICY_ID",
-  // A WORKER'S OWN TWO — its deploy gate (src/worker-config.ts) and the modes a
-  // rail serves: said, never read and never a refusal, as the rest of this
-  // list. A legacy keeper refuses both (bin/keeper.mts), where they would pass
-  // for a worker.
+  // A WORKER'S OWN TWO — its deploy gate (src/worker-config.ts) and
+  // SIP_SOLANA_WORKER_MODES, which no process reads yet (a worker warns it is
+  // unknown; the per-mode rails that read it come in the next push): said,
+  // never read and never a refusal, as the rest of this list. A legacy keeper
+  // refuses both already (bin/keeper.mts), where they would pass for a worker.
   "SIP_SOLANA_WORKER_HEALTH",
   "SIP_SOLANA_WORKER_MODES",
 ] as const;
