@@ -760,18 +760,21 @@ borra**, ni siquiera cuando se pare (10.8, paso 8).
   `200`: si no lo hace a tiempo, lo marca *Failed* y **el anterior sigue trabajando**
   ([healthchecks](https://docs.railway.com/reference/healthchecks),
   [despliegue malo](https://docs.railway.com/guides/roll-back-bad-deploy)). Si no puede abrir el puerto, sale con 1
-  (`worker: health server failed`). **La variable y el *Healthcheck Path* van juntos**: la variable sola no protege
-  nada (Railway no espera a nadie), y el *Healthcheck Path* sin la variable hace que cada despliegue acabe *Failed* (el
-  worker no escucha). Railway solo lo mira al desplegar: si el worker se para después, lo dicen `fleet.workers` y
-  `queue-lag` (10.9), no `/health`. **Solo protege de lo que el worker rechaza al arrancar** (una variable que falta,
-  sobra o no tiene forma) y de una base que no contesta: una URL o una llave bien escrita pero equivocada arranca,
-  sustituye al anterior y lo dicen después sus alertas (`settle-key-mismatch`, la authorization key,
-  `job-failing:<vault>`…: 10.9).
+  (`worker: health server failed`). **La variable y el *Healthcheck Path* van juntos, y se quitan juntos**: la variable
+  sola puede ser peor que nada, porque con ella el worker se niega a arrancar con los tres ajustes de Jupiter y
+  alertas de abajo, que sin ella solo avisan o ni eso, y sin *Healthcheck Path* Railway quita igual el anterior: la
+  cola se queda sin worker. El *Healthcheck Path* sin la variable hace que cada despliegue acabe *Failed* (el worker no
+  escucha). Railway solo lo mira al desplegar: si el worker se para después, lo dicen `fleet.workers` y `queue-lag`
+  (10.9), no `/health`. **Solo protege de lo que el worker rechaza al arrancar** (una variable que falta, sobra o no
+  tiene forma) y de una base que no contesta: una URL o una llave bien escrita pero equivocada arranca, sustituye al
+  anterior y lo dicen después sus alertas (`settle-key-mismatch`, la authorization key, `job-failing:<vault>`…: 10.9).
 
   **Para activarlo, en este orden:**
   1. **El push** que trae este código. No cambia lo que hace: sin la variable el worker no abre ningún puerto. Míralo
      igual: en *Deployments* de `sip-solana-worker` el activo es ese commit, y en sus *Deploy Logs* la línea
-     `worker starting` dice `"health":"off"`.
+     `worker starting` dice `"health":"off"`, en `jupiter` `"keyed":true` y en `alerts` `"kind":"telegram"`. Si dice
+     otra cosa, avísame antes del paso 2: con la puerta, un worker en `on` con `jupiter-key` y sin la clave de Jupiter,
+     o sin el webhook de alertas, no arranca (los tres ajustes de abajo).
   2. **Antes de tocar nada**, en `sip-solana-worker`:
      - *Variables*: ninguna `SIP_SOLANA_WORKER_…` aparte de `SIP_SOLANA_WORKER_SLOTS` (`SIP_SOLANA_WORKERS_MAX`, con
        S, es otra y se queda). Si hay otra, avísame antes de seguir: el worker no la lee, solo deja un aviso en su log.
@@ -815,14 +818,21 @@ borra**, ni siquiera cuando se pare (10.8, paso 8).
     `queue-lag`. Para volver: `on` → Deploy. **Con `SIP_SOLANA_DISPATCH` vacía o borrada no arranca** (acaba *Failed*
     y sigue el anterior): una variable que se pierde en una edición no pasa por una parada.
   - **Para quitarlo del todo**: *Deployments* → el activo → **Remove**, y *Settings → Source* → **Disconnect** (como en
-    10.8, paso 8.2). Solo *Remove* no basta: el siguiente push lo vuelve a desplegar.
+    10.8, paso 8.2). Solo *Remove* no basta: el siguiente push lo vuelve a desplegar. En la cola pasa lo mismo que con
+    `off`: `flota` dice «Trabajadores: 0 vivos» y, en cuanto un vault espere más de dos ticks, llega `queue-lag`. Para
+    volver: en *Settings → Source*, vuelve a conectar el mismo repositorio (rama `main`) y **Deploy**.
   - **Un despliegue durante una caída de la base acaba *Failed*** y se queda el anterior: vuelve a desplegarlo cuando
     pase. Un push puede acabar igual, con el worker en el código de antes, así que **un push no ha terminado hasta que
     el worker corre el commit nuevo**: en *Deployments* de `sip-solana-worker`, el *Active* es el del push (y en el
     `/status` del scheduler, la `version` de su fila en `fleet.workers` empieza por ese commit).
-  - **Para volver con *Rollback* a un despliegue sin la puerta** (de antes de este push, o de antes del paso 2), quita
-    antes el *Healthcheck Path*: ese worker no escucharía y acabaría *Failed*. Un *Rollback* devuelve también las
-    variables de aquel despliegue: después, revisa las del servicio.
+  - **Para volver con *Rollback* a un despliegue sin la puerta** (de antes de este push, o de antes del paso 2), primero
+    quita el *Healthcheck Path* y aplica ese cambio sin redesplegar: **Deploy** pulsado con la tecla **Alt** (10.9,
+    «Rotar un secreto»). Mira en *Settings → Deploy* que ya no lo tiene, y solo entonces haz el *Rollback*. Con el
+    *Healthcheck Path* aún puesto, ese worker no escucharía: el *Rollback* puede acabar *Failed* o, si Railway no lo
+    comprueba, dejar *Failed* cada push siguiente. Un *Rollback* devuelve también las variables de aquel despliegue:
+    después, revisa las del servicio (en uno de antes del paso 2 ya no están `SIP_SOLANA_WORKER_HEALTH=on` ni
+    `RAILWAY_HEALTHCHECK_TIMEOUT_SEC`). Para volver a la puerta, repite los pasos 2 y 3; si el *Rollback* fue a un
+    código de antes de este push, antes tiene que volver este código (lo trae el siguiente push: paso 1).
   - **Tampoco arranca con tres ajustes que sin la puerta solo avisan, o ni eso**: en `on`, con `jupiter-key` en
     `SIP_SOLANA_CUTS` y sin `SIP_SOLANA_JUPITER_API_KEY` (sin la puerta compraría sin clave por `lite-api.jup.ag`, sin
     decirlo); con `SIP_SOLANA_JUPITER_API_KEY` o `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` y sin `jupiter-key`; y en `on`
@@ -1329,15 +1339,17 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   - `could not be asked at boot` o `uncaught exception`: casi siempre, la base no contesta. Vuelve a desplegar cuando
     conteste.
   - `worker: health server failed`: no pudo abrir `PORT`.
-  - Repetida, `the claim failed`: no puede leer la cola.
+  - Repetida, `the claim failed` (en sus *Build Logs*, los intentos siguen en `status 503` hasta el final): escucha,
+    pero no puede leer la cola.
   - `"health":"off"` en la línea `worker starting`, o `SIP_SOLANA_DISPATCH is off (unset is off)`: a ese despliegue le
-    falta `SIP_SOLANA_WORKER_HEALTH=on` (y, en el segundo caso, `SIP_SOLANA_DISPATCH`); con *Healthcheck Path* y sin
-    ella no pasa ninguno (10.1).
+    falta `SIP_SOLANA_WORKER_HEALTH=on`; con *Healthcheck Path* y sin ella no pasa ninguno (10.1). En el segundo caso,
+    además, `SIP_SOLANA_DISPATCH` está sin poner, vacía o en `off`: para que sirva, ponla en `on` (con
+    `SIP_SOLANA_WORKER_HEALTH=on`); si querías dejarlo parado a propósito, ponla (o déjala) en `off` y basta con añadir
+    `SIP_SOLANA_WORKER_HEALTH=on`: contesta `200` «off» (10.1).
 
-  Si en cambio dice `worker ready`, el healthcheck no llega a su puerto: revisa en *Variables* `PORT` = `8080` y el
-  *Healthcheck Path* `/health` (10.1). Sus *Build Logs* lo confirman: si todos los intentos dicen `status 503`, el
-  worker escucha pero nunca queda listo (busca `the claim failed`); si todos dicen `service unavailable` aunque los
-  *Deploy Logs* digan `worker ready`, Railway no llega a su puerto. Arreglado, vuelve a desplegar.
+  Si en cambio dice `worker ready`, el healthcheck de Railway no llega a `/health`: revisa en *Variables* `PORT` =
+  `8080` y el *Healthcheck Path* `/health` (10.1). Sus *Build Logs* lo confirman: los intentos dicen `service
+  unavailable` (no llega a su puerto) o `status 404` (llama a otra ruta). Arreglado, vuelve a desplegar.
 - **Rotar un secreto** (la llave de cobro, la app secret o la authorization key de Privy, la clave de Jupiter, la URL de
   Telegram, la de la base…). Cada servicio coge el valor nuevo **solo cuando se despliega**; el que ya corre sigue con
   el viejo.
