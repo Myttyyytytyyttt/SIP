@@ -215,6 +215,35 @@ process.on("unhandledRejection", (reason) => {
 });
 
 /**
+ * A DISPATCHER WORKER'S OWN VARIABLES ARE NEVER A KEEPER'S, and a keeper that
+ * finds one refuses to start, before loadConfig and the way loadConfig refuses
+ * below ("configuration refused", exit 2). WHY: this file is the image's CMD,
+ * so a worker service whose Custom Start Command was lost boots it, with the
+ * worker's whole environment. Behind SIP_SOLANA_WORKER_HEALTH=on that service
+ * waits for /health on PORT, and this keeper's own /health answers 200 as soon
+ * as it listens, before its first sweep (decideHealth, src/status.ts): it would
+ * pass the worker's healthcheck, and Railway would put a legacy keeper where
+ * the worker was. Refused, it never listens, the deploy fails, and the worker
+ * before it keeps serving. Any value counts, `off` included: only a worker's
+ * service sets them at all. Read by name from the environment, importing
+ * nothing of the dispatcher's (test/dispatch-dark.test.ts).
+ */
+const WORKER_ONLY_VARS = ["SIP_SOLANA_WORKER_HEALTH", "SIP_SOLANA_WORKER_MODES"] as const;
+const workerVars = WORKER_ONLY_VARS.filter((name) => (process.env[name]?.trim() ?? "") !== "");
+if (workerVars.length > 0) {
+  const them = workerVars.length === 1 ? "it" : "them";
+  log.error("configuration refused", {
+    problems: [
+      `${workerVars.join(" and ")} set on a process that runs the legacy keeper (bin/keeper.mts, the image's CMD): ` +
+        `${workerVars.length === 1 ? "it is a dispatcher worker's" : "they are a dispatcher worker's"}. A worker service that lost its ` +
+        "Custom Start Command boots this file, and its /health would pass the worker's healthcheck. Set the start command back " +
+        `(node_modules/.bin/tsx bin/worker.mts), or delete ${them} from this keeper's service.`,
+    ],
+  });
+  process.exit(2);
+}
+
+/**
  * EXIT 2 IS "YOU HAVE TO CHANGE SOMETHING" (the worker's convention): a restart
  * loop over an environment variable fixes nothing, and the problem list says
  * exactly what to change without echoing a value.

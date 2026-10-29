@@ -31,6 +31,12 @@
 // last two, so it is never called. It listens once, answers 200 'off', and
 // exits 0 on SIGTERM or SIGINT; a PORT it cannot have exits 1.
 //
+// AND THE LEGACY KEEPER (bin/keeper.mts, the image's CMD), which a worker
+// service that lost its Custom Start Command boots instead: with a worker's own
+// SIP_SOLANA_WORKER_HEALTH or SIP_SOLANA_WORKER_MODES set, whatever it holds,
+// it exits 2 before loadConfig, by name, and never listens, so its own /health
+// cannot pass that worker's healthcheck. Empty or blank, neither is set.
+//
 // THE ONE BOOT FAILURE AFTER IT LISTENS, with no database either: a "database"
 // that takes the connection and never answers holds the worker at writing its
 // row, listening and 503 starting, until the pool's connection timeout throws
@@ -382,6 +388,42 @@ describe("off behind the gate: SIP_SOLANA_DISPATCH=off written out, with SIP_SOL
     } finally {
       await new Promise<void>((done) => holder.close(() => done()));
     }
+  }, 2 * WAIT_MS);
+});
+
+describe("the legacy keeper refuses a worker's own variables: a worker service that lost its start command boots the keeper, and must not pass for the worker", () => {
+  /** A dry keeper's whole configuration, which loadConfig accepts: a worker service's environment carries as much. */
+  const DRY_KEEPER: Readonly<Record<string, string>> = { SIP_SOLANA_RPC_URLS: DEAD_RPC, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID, PORT: REFUSED_PORT };
+  const SAYS = "set on a process that runs the legacy keeper (bin/keeper.mts, the image's CMD)";
+
+  it.each<{ way: string; env: Record<string, string>; names: string }>([
+    { way: "SIP_SOLANA_WORKER_HEALTH=on", env: { SIP_SOLANA_WORKER_HEALTH: "on" }, names: "SIP_SOLANA_WORKER_HEALTH" },
+    { way: "SIP_SOLANA_WORKER_HEALTH=off, as any value: only a worker's service sets it", env: { SIP_SOLANA_WORKER_HEALTH: "off" }, names: "SIP_SOLANA_WORKER_HEALTH" },
+    { way: "SIP_SOLANA_WORKER_MODES", env: { SIP_SOLANA_WORKER_MODES: "profit" }, names: "SIP_SOLANA_WORKER_MODES" },
+    { way: "both", env: { SIP_SOLANA_WORKER_HEALTH: " on ", SIP_SOLANA_WORKER_MODES: "volume" }, names: "SIP_SOLANA_WORKER_HEALTH and SIP_SOLANA_WORKER_MODES" },
+  ])("$way, beside a configuration loadConfig accepts: exits 2 naming it, and nothing ever listened", async ({ env, names }) => {
+    const keeper = start({ ...DRY_KEEPER, ...env }, ["bin/keeper.mts"]);
+    expect(await keeper.exit(), keeper.log).toBe(2);
+    expect(keeper.lines('"event":"configuration refused"', `${names} ${SAYS}`), keeper.log).toBe(1);
+    expect(keeper.log).not.toContain('"event":"heartbeat listening"');
+    expect(keeper.listened(), keeper.log).toEqual([]);
+  }, 2 * WAIT_MS);
+
+  it("refuses before loadConfig, by name and never by value", async () => {
+    // NO ENDPOINT AND NO PROGRAM: loadConfig would refuse both, and is never reached.
+    const keeper = start({ SIP_SOLANA_WORKER_HEALTH: "HealthValueNeverEchoed", SIP_SOLANA_WORKER_MODES: "ModesValueNeverEchoed", PORT: REFUSED_PORT }, ["bin/keeper.mts"]);
+    expect(await keeper.exit(), keeper.log).toBe(2);
+    expect(keeper.lines('"event":"configuration refused"', SAYS), keeper.log).toBe(1);
+    expect(keeper.log).not.toContain("SIP_SOLANA_RPC_URLS is required");
+    for (const value of ["HealthValueNeverEchoed", "ModesValueNeverEchoed"]) expect(keeper.log).not.toContain(value);
+    expect(keeper.listened(), keeper.log).toEqual([]);
+  }, 2 * WAIT_MS);
+
+  it("lets an empty or blank one through: what refuses here is then loadConfig's own", async () => {
+    const keeper = start({ SIP_SOLANA_WORKER_HEALTH: "", SIP_SOLANA_WORKER_MODES: "   ", PORT: REFUSED_PORT }, ["bin/keeper.mts"]);
+    expect(await keeper.exit(), keeper.log).toBe(2);
+    expect(keeper.log).toContain("SIP_SOLANA_RPC_URLS is required");
+    expect(keeper.log).not.toContain(SAYS);
   }, 2 * WAIT_MS);
 });
 

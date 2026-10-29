@@ -13,6 +13,7 @@ import { HELIUS_DEVELOPER_RPS } from "../src/rpc-quota.js";
 import { KEEPER_ROLES } from "../src/role-registry.js";
 import {
   DISPATCH_MODES as SCHEDULER_DISPATCH_MODES,
+  SCHEDULER_IGNORED_VARS,
   SCHEDULER_REFUSED_VARS,
   SCHEDULER_VARS,
   autoArmRuns,
@@ -115,6 +116,27 @@ describe("what a scheduler holds", () => {
     ] as const) {
       expect(problemsOf({ ...BASE, [name]: value }).join(" "), name).toContain(name);
     }
+  });
+
+  it("warns about a worker's own two, its deploy gate and its modes, and reads neither: a warning, never a refusal", () => {
+    const names = ["SIP_SOLANA_WORKER_HEALTH", "SIP_SOLANA_WORKER_MODES"];
+    expect(SCHEDULER_IGNORED_VARS).toEqual(expect.arrayContaining(names));
+    // NOT READ: a read of either value throws, and loadConfig is never handed them (no "not a variable this keeper reads").
+    const env = new Proxy(
+      { ...BASE, SIP_SOLANA_WORKER_HEALTH: "on", SIP_SOLANA_WORKER_MODES: "profit" },
+      {
+        get(target, prop) {
+          if (typeof prop === "string" && names.includes(prop)) throw new Error(`${prop}'s value was read`);
+          return Reflect.get(target, prop);
+        },
+      },
+    );
+    const config = load(env as unknown as Record<string, string>);
+    expect(config.dispatch).toBe("shadow");
+    expect(config.warnings).toEqual(["SIP_SOLANA_WORKER_HEALTH, SIP_SOLANA_WORKER_MODES: a worker's or a legacy keeper's setting; the scheduler does not read it."]);
+    // ANY VALUE, `off` included, and either alone.
+    expect(load({ ...BASE, SIP_SOLANA_WORKER_HEALTH: "off" }).warnings).toEqual([expect.stringContaining("SIP_SOLANA_WORKER_HEALTH: a worker's")]);
+    expect(problemsOf({ ...BASE, SIP_SOLANA_WORKER_MODES: "volume" })).toEqual([]);
   });
 });
 

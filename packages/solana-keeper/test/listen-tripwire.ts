@@ -1,5 +1,5 @@
 // A PRELOAD FOR A CHILD PROCESS, never imported by a test:
-// test/worker-health-boot.test.ts starts bin/worker.mts as
+// test/worker-health-boot.test.ts starts bin/worker.mts, and bin/keeper.mts, as
 // `node --import tsx --import test/listen-tripwire.ts bin/worker.mts`.
 //
 // EVERY listen() THE PROCESS CALLS IS WRITTEN DOWN BEFORE IT RUNS, synchronously,
