@@ -656,12 +656,30 @@ la [sección 8](#8-pon-al-día-la-política-viva-solo-settle_v2), después esta.
    comprobación lee Privy con la app secret, así que con una secret mala la línea `privy authorization key` diría
    `credentials-refused`. Si `sip-solana-keeper` sigue encendido, también su `/status`: `signing.authorizationKey` tiene
    que volver a decir `matches`, con `signing.authorizationKeyAt` posterior al reinicio.
-4. Solo entonces borra la secret vieja en el dashboard.
+4. Solo entonces borra la secret vieja en el dashboard, y vuelve a desplegar `sip-solana-worker` (y cada vigilante de
+   siempre que siga encendido). Ahora sí, `privy authorization key belongs to the signer quorum` prueba que usa la
+   nueva: antes de borrar la vieja, las dos daban esa línea. Si la línea `privy authorization key` dice
+   `credentials-refused`, ese servicio seguía con la vieja y no firma por ninguna wallet de Privy: cambia la secret
+   donde viva (paso 2) y despliégalo otra vez.
 
 **La llave del vigilante.** El único camino que trae esta guía es el de la
 [sección 7](#si-la-llave-privada-de-ese-quorum-se-ha-perdido): una llave nueva con un **signer id nuevo**, y por eso
-cada wallet sentada tiene que volver a sentarse (su dueño pulsa **Re-seat keeper**). Cuantas menos wallets haya
-sentadas, menos gente tiene que pulsar el botón: mejor antes de anunciar la importación que después.
+cada wallet sentada tiene que volver a sentarse (su dueño pulsa **Re-seat keeper**). Con `sip-solana-keeper` parado
+([RAILWAY_SOLANA.md](RAILWAY_SOLANA.md), 10.8, paso 8), lo que esa sección pide del vigilante cambia:
+
+- **Paso 2**: cambia `SIP_SOLANA_PRIVY_AUTHORIZATION_KEY` y `SIP_SOLANA_PRIVY_SIGNER_ID` donde vivan **sin desplegar
+  ese servicio** (RAILWAY_SOLANA.md, 10.9, «Rotar un secreto», paso 1) y despliega `sip-solana-worker`.
+- **Pasos 4, 7 y 8**: su `/status` no contesta. En el 4, mira en los *Deploy Logs* de `sip-solana-worker` la línea
+  `privy authorization key belongs to the signer quorum`, con el `signerId` nuevo; si en su lugar sale la línea
+  `privy authorization key`, para aquí: la tabla de la sección 7 dice qué es cada valor. En `flota`, el cobro de los
+  vaults con wallets de Privy dirá «no puede firmar por la cartera» hasta que el dueño de cada wallet la vuelva a
+  sentar: es lo normal. En el 7 y el 8, ese texto se va del cobro de ese vault en sus trabajos siguientes.
+- **La línea con `granted`** (pasos 4 y 8) solo la escribe el vigilante. Sin él, qué signers lleva una wallet lo dice
+  `privy-policy verify` ([sección 6](#6-verifica-que-rechaza-lo-que-debe)): si no lleva el del vigilante, su línea
+  `privy verify` dice `SIGNER_NOT_GRANTED` y enseña los que lleva en `granted`.
+
+Cuantas menos wallets haya sentadas, menos gente tiene que pulsar el botón: mejor antes de anunciar la importación que
+después.
 
 Hay otro camino que esta guía todavía no cubre y que ningún comando hace hoy: Privy tiene *Update key quorum*, que
 cambia las claves de un key quorum que ya existe, firmado por ese mismo quorum, es decir, con la llave que ya tiene (y

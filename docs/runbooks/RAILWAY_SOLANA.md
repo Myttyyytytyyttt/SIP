@@ -1353,9 +1353,12 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
   Si en cambio dice `worker ready`, el healthcheck de Railway no llega a `/health`: revisa en *Variables* `PORT` =
   `8080` y el *Healthcheck Path* `/health` (10.1). Sus *Build Logs* lo confirman: los intentos dicen `service
   unavailable` (no llega a su puerto) o `status 404` (llama a otra ruta). Arreglado, vuelve a desplegar.
-- **Rotar un secreto** (la llave de cobro, la app secret o la authorization key de Privy, la clave de Jupiter, la URL de
-  Telegram, la de la base…). Cada servicio coge el valor nuevo **solo cuando se despliega**; el que ya corre sigue con
-  el viejo.
+- **Rotar un secreto** (la llave de cobro, la app secret de Privy, la clave de Jupiter, la URL de Telegram, la de la
+  base…). **La authorization key de Privy no se rota así**: hoy es una llave nueva en Privy con un signer id nuevo, que
+  cambia también `SIP_SOLANA_PRIVY_SIGNER_ID` en Railway y en Vercel, y cada wallet se vuelve a sentar
+  ([PRIVY_SOLANA.md](PRIVY_SOLANA.md), sección 9, «La llave del vigilante»); cambiar solo la variable deja al worker sin
+  firmar por ninguna wallet de Privy. Cada servicio coge el valor nuevo **solo cuando se despliega**; el que ya corre
+  sigue con el viejo.
   1. Cámbialo donde vive: en *Variables* de `sip-solana-keeper` si el worker lo toma de allí por referencia (10.1), en
      una variable compartida del proyecto, o en el propio servicio. **Si `sip-solana-keeper` está parado** (10.8, paso
      8), **no lo despliegues**: podría volver a arrancar el vigilante de siempre, armado. Railway deja el cambio
@@ -1371,7 +1374,12 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
      en cuanto coinciden, el siguiente trabajo sigue solo. La wallet nueva paga las comisiones: mándale SOL antes
      (`crank-low`, arriba).
 
-  Luego, lo que diga [SECRETS.md](SECRETS.md) para la vieja.
+  Luego, lo que diga [SECRETS.md](SECRETS.md) para la vieja: revocarla donde se pueda. Hasta entonces una app secret o
+  una clave de Jupiter viejas siguen valiendo, y las líneas del paso 2 salen igual con cualquiera de las dos: revocada
+  la vieja, vuelve a desplegar cada servicio del paso 2 y míralas otra vez. Un servicio que se quedó con la vieja lo
+  dice ahí (Privy: la línea `privy authorization key` con `credentials-refused`) o en su siguiente compra (Jupiter:
+  `Jupiter answered HTTP 401`, en `flota`). **Deshacer**, mientras no hayas revocado la vieja: vuelve a poner el valor
+  viejo donde vive y despliega; la llave de cobro, antes otra vez en la cadena (paso 3: pídeme el paso).
 
 ## Si algo falla
 
