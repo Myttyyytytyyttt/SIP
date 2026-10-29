@@ -48,7 +48,12 @@
 // refuses never answers at all, so with the service's Healthcheck Path at
 // /health Railway keeps the worker before it (runbook §10.1), and a
 // registration that fails exits 1 having answered only 503. A server that
-// cannot listen exits 1, before the row is written.
+// cannot listen exits 1, before the row is written. Behind the gate a worker
+// also refuses what elsewhere only warns (G1–G3, src/worker-config.ts): `on`
+// with the jupiter-key cut and no Jupiter key, that key or its rate without the
+// cut, and `on` with no alert webhook. Every worker's banner says the gate (off,
+// or on and its port), Jupiter and where alerts go, as words, booleans and
+// numbers.
 //
 // OFF BEHIND THE GATE: SIP_SOLANA_DISPATCH=off, written out, with the gate on.
 // The stop that survives pushes (src/worker-health.ts says why): right after
@@ -211,7 +216,9 @@ try {
 }
 for (const name of SIGNING_SECRET_VARS) delete process.env[name];
 for (const warning of config.warnings) log.warn("configuration warning", fields({ detail: warning }));
-const refusals = workerRefusals(config, settings);
+// BEHIND THE HEALTH GATE, three more (G1–G3, src/worker-config.ts): of the
+// environment they ask only whether the two Jupiter settings are set.
+const refusals = workerRefusals(config, settings, process.env);
 if (refusals.length > 0) {
   log.error("configuration refused", fields({ problems: refusals }));
   process.exit(2);
@@ -245,6 +252,7 @@ const alerter = createAlerter({
   // THE BODY LEAVES THE BOX: what a log line passes, as every keeper alert (bin/keeper.mts).
   sanitize: (text) => scrubbedForExport(text),
 });
+// WITHOUT THE GATE ONLY SAID, as before it: behind the gate workerRefusals refused this above (G3).
 if (world === "live" && config.alertWebhook === null) {
   log.warn("armed with no alert destination: a failed settle or buy on a queue vault reaches only this log", fields({}));
 }
@@ -320,6 +328,7 @@ const transport = poolFetch(config.rpcUrls, (message, extra) => log.warn(message
 const jupiterFloorPerMinute = Math.max(1, floor.floorJupiterPerMinute ?? config.jupiterCallsPerMinute);
 const jupiter: JupiterAccess | null = jupiterKey
   ? {
+      // KEYLESS ONLY WITHOUT THE GATE, OR IN SHADOW: a gated worker that is `on` refused the cut without its key above (G1).
       baseUrl: config.jupiterApiKey === null ? LITE_API : KEYED_API,
       apiKey: config.jupiterApiKey,
       pacer: new JupiterPacer({ perMinute: config.jupiterCallsPerMinute }),
@@ -561,6 +570,17 @@ log.info("worker starting", fields({
           live: settings.extraModes.live,
           fromSlot: settings.extraModes.fromSlot?.toString() ?? null,
         },
+  // WHAT A DEPLOY IS READ FOR, IN FIXED WORDS, BOOLEANS AND NUMBERS: never a URL,
+  // a key, a token or a chat id. The gate and its port; Jupiter's key as whether
+  // there is one, the minute the pacer is built at (null: no pacer, the cut is
+  // off) and the host by name only; the alerts' destination by kind.
+  health: health === null ? "off" : { on: true, port: health.port },
+  jupiter: {
+    keyed: jupiter !== null && jupiter.apiKey !== null,
+    callsPerMinute: jupiter === null ? null : config.jupiterCallsPerMinute,
+    host: new URL(jupiter?.baseUrl ?? LITE_API).hostname,
+  },
+  alerts: { kind: config.alertWebhook === null ? "none" : config.alertChatId === null ? "webhook" : "telegram" },
 }));
 
 // ── the Privy authorization key, at boot and on a cadence (bin/keeper.mts's rule) ─

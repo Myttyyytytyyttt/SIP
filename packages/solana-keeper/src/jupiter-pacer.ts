@@ -106,7 +106,9 @@ export function minGapMsFor(perMinute: number): number {
  * READ ONLY UNDER THE TOKEN. Both are the `jupiter-key` cut's settings, so with
  * the token absent they are reported as unused — a WARNING, not a refusal.
  * Refusing would break the rollback: the owner sets the key, then the token, and
- * "remove the token" must still boot.
+ * "remove the token" must still boot. A worker behind its health gate refuses
+ * them all the same (G2, src/worker-config.ts): its refused deploy leaves the
+ * worker before it serving, so there the rollback takes both with the token.
  *
  * WITH THE TOKEN, A MALFORMED VALUE REFUSES TO START. A key with a space or a
  * newline in it is a paste that went wrong, and Jupiter would answer every call

@@ -49,12 +49,16 @@
 //                             what it refuses). With it, SIP_SOLANA_DISPATCH=off
 //                             written out is a worker that answers 200 'off' and
 //                             does nothing else: the stop that survives pushes.
+//                             And with it a worker refuses three settings that
+//                             without it only warn, or say nothing (G1–G3,
+//                             workerRefusals).
 //
 // THE REST OF THE KEEPER'S CONFIG IS READ BY loadConfig (src/config.ts) AS FOR
 // ANY KEEPER, with this file's names (WORKER_VARS) taken out first so it does
-// not call them misspellings. And then three refusals only a worker has
+// not call them misspellings. And then the refusals only a worker has
 // (workerRefusals): a shadow worker holds no key, a worker that is `on` holds
-// one, and every worker needs its database.
+// one and names its Privy seat and policy, and every worker needs its database;
+// behind its health gate, G1–G3 besides.
 
 import { PublicKey } from "@solana/web3.js";
 import { readPort, type KeeperConfig } from "./config.js";
@@ -244,6 +248,9 @@ export function keeperEnvOf(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return out;
 }
 
+/** The jupiter-key cut's two settings (readJupiterKeySettings, src/jupiter-pacer.ts): G2 asks only whether either is set, and quotes neither. */
+const JUPITER_KEY_VARS = ["SIP_SOLANA_JUPITER_API_KEY", "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE"] as const;
+
 /**
  * What a worker refuses to start with, whatever loadConfig accepted:
  *   * SHADOW WITH A KEY. A shadow worker is a dry run, and a dry run holds no
@@ -253,10 +260,35 @@ export function keeperEnvOf(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  *     and complete every one RETRY; it refuses instead, and says what is missing.
  *   * NO DATABASE. The lease, the fence and the gate are rows; without them a
  *     worker is not a worker.
+ *
+ * AND BEHIND ITS HEALTH GATE (settings.health), three that elsewhere only warn
+ * or say nothing. A gated deploy that starts replaces the worker before it, so
+ * what it starts with is what serves. Without the gate none of the three is
+ * asked: the worker starts as it did before the gate, and a keyless cut still
+ * falls back to lite-api.jup.ag without a word.
+ *   G1  `on`, the jupiter-key cut, and no SIP_SOLANA_JUPITER_API_KEY. The cut's
+ *       reader answers no key and no problem (readJupiterKeySettings), and every
+ *       quote goes keyless to lite-api.jup.ag, where a buy was refused on a 429
+ *       nobody saw (2026-10-27). `on` ONLY: a shadow worker holds no key of any
+ *       kind (test-local/shadow/harness.ts starts its workers without a Jupiter
+ *       key either), because Jupiter counts the budget per organisation, and a
+ *       shadow on the production key would spend the live worker's minute on
+ *       buys it never sends; keyless, a shadow moves nothing.
+ *   G2  SIP_SOLANA_JUPITER_API_KEY or SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set
+ *       without the cut, which loadConfig only warns is unused. A worker's
+ *       refusal: the scheduler reads the rate as its own number, without the
+ *       cut (src/scheduler-config.ts). Read from `env` by name and by whether it
+ *       is empty, as readJupiterKeySettings reads them, and never quoted. So
+ *       behind the gate the cut's rollback is the token with both settings:
+ *       the token alone is a refused deploy, and the worker before it serves on.
+ *   G3  `on` without SIP_SOLANA_ALERT_WEBHOOK, which bin/worker.mts only warns
+ *       about: every page of a failed settle or buy would reach this log alone.
  */
 export function workerRefusals(
-  config: Pick<KeeperConfig, "armed" | "databaseUrl"> & Partial<Pick<KeeperConfig, "signing" | "privySignerId" | "privyPolicyId">>,
-  settings: Pick<WorkerSettings, "mode">,
+  config: Pick<KeeperConfig, "armed" | "databaseUrl" | "cuts" | "jupiterApiKey" | "alertWebhook"> &
+    Partial<Pick<KeeperConfig, "signing" | "privySignerId" | "privyPolicyId">>,
+  settings: Pick<WorkerSettings, "mode" | "health">,
+  env: NodeJS.ProcessEnv,
 ): string[] {
   const problems: string[] = [];
   if (config.databaseUrl === null) problems.push("DATABASE_URL is required for a dispatcher worker: its leases, fences and send intents are rows.");
@@ -286,6 +318,30 @@ export function workerRefusals(
     problems.push(
       "SIP_SOLANA_DISPATCH=on needs an armed keeper (SIP_SOLANA_BROADCAST=1 and the exact SIP_SOLANA_ALLOW_BROADCAST sentence): " +
         "a worker that cannot sign would only claim vaults and hand them back. Use `shadow` for a keyless run.",
+    );
+  }
+  if (settings.health === null) return problems;
+  const cut = config.cuts.has("jupiter-key");
+  if (settings.mode === "on" && cut && config.jupiterApiKey === null) {
+    problems.push(
+      "SIP_SOLANA_CUTS names jupiter-key without SIP_SOLANA_JUPITER_API_KEY: behind its health gate a worker that is `on` does not " +
+        "buy keyless through lite-api.jup.ag, where a buy was refused on a 429 nobody saw (2026-10-27). Set " +
+        "SIP_SOLANA_JUPITER_API_KEY on this service, or take jupiter-key out of SIP_SOLANA_CUTS.",
+    );
+  }
+  const unused = JUPITER_KEY_VARS.filter((name) => trimmed(env[name]) !== undefined);
+  if (!cut && unused.length > 0) {
+    problems.push(
+      `${unused.join(" and ")} set without jupiter-key in SIP_SOLANA_CUTS: not used — every Jupiter call goes keyless to ` +
+        "lite-api.jup.ag, unpaced — and behind its health gate a worker refuses a setting that does nothing. Add jupiter-key " +
+        `to SIP_SOLANA_CUTS, or unset ${unused.length === 1 ? "it" : "them"}.`,
+    );
+  }
+  if (settings.mode === "on" && config.alertWebhook === null) {
+    problems.push(
+      "SIP_SOLANA_DISPATCH=on without SIP_SOLANA_ALERT_WEBHOOK: behind its health gate a worker that sends does not start with " +
+        "nowhere to page — a failed settle or buy would reach only this service's log. Reference it from " +
+        "sip-solana-keeper, as the signing secrets.",
     );
   }
   return problems;

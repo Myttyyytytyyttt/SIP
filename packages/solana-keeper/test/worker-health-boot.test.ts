@@ -13,7 +13,11 @@
 // it listens — readWorkerSettings (SIP_SOLANA_EXTRA_MODES_VAULTS left behind
 // without SIP_SOLANA_EXTRA_MODES; and the gate's own: H1 a value that is not on
 // or off, H2 no valid PORT, H3 SIP_SOLANA_DISPATCH unset or empty), loadConfig,
-// workerRefusals and, with a database, the price tape's columns — exits 2, and
+// workerRefusals (and what it refuses only behind the gate: G1 an armed `on`
+// worker with the jupiter-key cut and no Jupiter key, G2 the Jupiter rate set
+// without that cut, G3 an armed `on` worker with no alert webhook — the armed
+// ones with a settle key made for the run) and, with a database, the price
+// tape's columns — exits 2, and
 // test/listen-tripwire.ts writes down the child's every listen() BEFORE it runs:
 // an empty file is "it never listened", whatever a probe from outside could have
 // missed. The tripwire is shown seeing a listen that does happen, so an empty
@@ -73,6 +77,7 @@ import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { Keypair } from "@solana/web3.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { BROADCAST_ACK } from "../src/config.js";
 import { LIVE_WORKERS_SQL, WORKER_LEAVING_SQL, WORKER_STOPPED_SQL } from "../src/dispatch-store.js";
 import { WORKER_DEAD_AFTER_MS } from "../src/fleet-status.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
@@ -103,6 +108,20 @@ const OFF_GATED_LINE = '"event":"SIP_SOLANA_DISPATCH is off: this worker claims 
 const gated = (port: number | string): Record<string, string> => ({ SIP_SOLANA_WORKER_HEALTH: "on", PORT: String(port) });
 /** A shadow worker's endpoint and program, every one on the loopback or fixed: what loadConfig needs, and no database. */
 const SHADOW_NO_DATABASE: Readonly<Record<string, string>> = { SIP_SOLANA_DISPATCH: "shadow", SIP_SOLANA_RPC_URLS: DEAD_RPC, SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID };
+/** A database URL nothing answers on: loadConfig reads its shape, and a refused worker never connects. */
+const UNUSED_DATABASE = "postgres://worker:unused@127.0.0.1:9/sip?sslmode=disable";
+/** Throwaway, generated per run, never funded: it arms a child that is refused before it could sign anything. */
+const SETTLE_KEY = JSON.stringify(Array.from(Keypair.generate().secretKey));
+/** An armed `on` worker on the loopback: the settle key alone (no Privy), no Jupiter key, no alert webhook. */
+const ARMED_ON: Readonly<Record<string, string>> = {
+  SIP_SOLANA_DISPATCH: "on",
+  SIP_SOLANA_RPC_URLS: DEAD_RPC,
+  SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+  DATABASE_URL: UNUSED_DATABASE,
+  SIP_SOLANA_BROADCAST: "1",
+  SIP_SOLANA_ALLOW_BROADCAST: BROADCAST_ACK,
+  SIP_SOLANA_SETTLE_KEY: SETTLE_KEY,
+};
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 const scratch = mkdtempSync(join(tmpdir(), "sip-worker-health-"));
@@ -275,6 +294,17 @@ describe("a configuration the worker refuses never listens, with the gate on", (
     { way: "H3: the gate on, and SIP_SOLANA_DISPATCH empty", env: { ...GATE, SIP_SOLANA_DISPATCH: "" }, says: "SIP_SOLANA_WORKER_HEALTH=on with SIP_SOLANA_DISPATCH unset or empty" },
     { way: "loadConfig: no endpoint and no program", env: { ...GATE, SIP_SOLANA_DISPATCH: "shadow" }, says: "SIP_SOLANA_RPC_URLS is required" },
     { way: "workerRefusals: no DATABASE_URL", env: { ...GATE, ...SHADOW_NO_DATABASE }, says: "DATABASE_URL is required for a dispatcher worker" },
+    {
+      way: "G1: armed and on, the jupiter-key cut and no Jupiter key",
+      env: { ...GATE, ...ARMED_ON, SIP_SOLANA_CUTS: "jupiter-key", SIP_SOLANA_ALERT_WEBHOOK: "http://127.0.0.1:9/hook" },
+      says: "SIP_SOLANA_CUTS names jupiter-key without SIP_SOLANA_JUPITER_API_KEY",
+    },
+    {
+      way: "G2: the Jupiter rate set without the cut",
+      env: { ...GATE, ...SHADOW_NO_DATABASE, DATABASE_URL: UNUSED_DATABASE, SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "50" },
+      says: "SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set without jupiter-key in SIP_SOLANA_CUTS",
+    },
+    { way: "G3: armed and on with no alert webhook", env: { ...GATE, ...ARMED_ON }, says: "SIP_SOLANA_DISPATCH=on without SIP_SOLANA_ALERT_WEBHOOK" },
   ] as const;
 
   it.each(cases)("$way: exits 2, and nothing ever listened", async ({ env, says }) => {
@@ -284,6 +314,7 @@ describe("a configuration the worker refuses never listens, with the gate on", (
     expect(worker.log).toContain(says);
     expect(worker.listened(), worker.log).toEqual([]);
     expect(worker.log).not.toContain("listening for /health");
+    expect(worker.log).not.toContain(SETTLE_KEY);
   }, 2 * WAIT_MS);
 
   it("the tripwire sees a listen that does happen, before the process can exit in the same tick", async () => {
@@ -462,6 +493,13 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
   const holderOf = async (vault: string): Promise<string | null> =>
     (await db.query<{ holder: string | null }>("SELECT holder FROM sip_solana.vault_work WHERE vault_addr = $1", [vault])).rows[0]?.holder ?? null;
 
+  /** Its 'worker starting' banner, parsed: written once its row is, before its loop starts. */
+  const banner = (worker: Child): Record<string, unknown> => {
+    const line = worker.log.split("\n").find((entry) => entry.includes('"event":"worker starting"'));
+    if (line === undefined) throw new Error(`no banner yet:\n${worker.log.slice(-3_000)}`);
+    return JSON.parse(line) as Record<string, unknown>;
+  };
+
   it("refuses roundup over a database without the price tape's table: exit 2, and nothing ever listened", async () => {
     const worker = start({ ...shadow(bareUrl), ...gated(REFUSED_PORT), SIP_SOLANA_EXTRA_MODES: "roundup", SIP_SOLANA_EXTRA_MODES_VAULTS: "*" });
     expect(await worker.exit(), worker.log).toBe(2);
@@ -535,6 +573,8 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
       expect(await inHandOut()).toEqual([workerId]);
       expect(await probe(port, "HEAD")).toEqual({ status: 200, body: null });
       expect((await fetch(`http://127.0.0.1:${port}/status`)).status).toBe(404);
+      // ITS BANNER: the gate on its port, no cut so no pacer and today's keyless host, nowhere to page.
+      expect(banner(worker)).toMatchObject({ health: { on: true, port }, jupiter: { keyed: false, callsPerMinute: null, host: "lite-api.jup.ag" }, alerts: { kind: "none" } });
 
       // A JOB THAT WAITS AT ITS FIRST CHAIN READ: the vault claimed, the endpoint reached.
       const vault = await queueVault();
@@ -657,6 +697,28 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
     }
   }, 3 * WAIT_MS);
 
+  it("says in its banner the gate, Jupiter and where alerts go in fixed words, booleans and numbers — never the key or the webhook", async () => {
+    const port = await freePort();
+    const key = "JupiterKeyNeverLogged0123";
+    const token = "WebhookTokenNeverLogged";
+    const hook = `http://127.0.0.1:9/hooks/${token}`;
+    // A GATED SHADOW MAY CARRY THE CUT AND ITS KEY (G1 asks it of `on`, G2 of the key without the cut).
+    const worker = start({
+      ...shadow(databaseUrl),
+      ...gated(port),
+      SIP_SOLANA_CUTS: "jupiter-key",
+      SIP_SOLANA_JUPITER_API_KEY: key,
+      SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "500",
+      SIP_SOLANA_ALERT_WEBHOOK: hook,
+    });
+    // READY IS ITS LOOP RUNNING, so its SIGTERM handler is in place.
+    await until("/health to answer 200", worker, async () => ((await probe(port))?.status === 200 ? true : null));
+    expect(banner(worker)).toMatchObject({ health: { on: true, port }, jupiter: { keyed: true, callsPerMinute: 500, host: "api.jup.ag" }, alerts: { kind: "webhook" } });
+    worker.kill("SIGTERM");
+    expect(await worker.exit(), worker.log).toBe(0);
+    for (const secret of [key, token, hook]) expect(worker.log).not.toContain(secret);
+  }, 2 * WAIT_MS);
+
   it("listens on nothing without the gate, PORT set or not: registered, beating, in the hand-out through its drain and closed after it — as before the gate — and not one listen", async () => {
     const endpoint = await silentEndpoint();
     try {
@@ -668,6 +730,7 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
         return beat.rows[0]?.beat === true ? true : null;
       });
       const workerId = (await workerRows())[0]!.worker_id;
+      expect(banner(worker)).toMatchObject({ health: "off", jupiter: { keyed: false, callsPerMinute: null, host: "lite-api.jup.ag" }, alerts: { kind: "none" } });
       // A JOB THAT WAITS AT ITS FIRST CHAIN READ, so its drain lasts until the test lets it go.
       const vault = await queueVault();
       await until("its job to wait at its chain read", worker, async () => (endpoint.reached() && (await holderOf(vault)) === workerId ? true : null));

@@ -1,11 +1,13 @@
 // What a dispatcher worker reads beyond the keeper's config (src/worker-config.ts):
-// strictly, off unless named, its deploy gate only when asked for, and three
-// refusals only a worker has.
+// strictly, off unless named, its deploy gate only when asked for, and the
+// refusals only a worker has — three more behind that gate, and exactly
+// today's without it.
 
-import { Secret } from "@sip/solana-log";
+import { Redactor, Secret } from "@sip/solana-log";
 import { describe, expect, it } from "vitest";
 import { Keypair } from "@solana/web3.js";
-import { readPort } from "../src/config.js";
+import { loadConfig, readPort } from "../src/config.js";
+import { SIP_PROGRAM_ID } from "../src/idl.js";
 import {
   DEFAULT_WORKERS_MAX,
   DEFAULT_WORKER_SLOTS,
@@ -16,6 +18,7 @@ import {
   readWorkerHealth,
   readWorkerSettings,
   workerRefusals,
+  type DispatchMode,
 } from "../src/worker-config.js";
 import { MIN_PLAN_RPS, fleetQuotas } from "../src/rpc-quota.js";
 
@@ -176,30 +179,147 @@ describe("SIP_SOLANA_WORKER_HEALTH (the deploy gate, src/worker-health.ts): opt-
 });
 
 describe("workerRefusals", () => {
+  type RefusalConfig = Parameters<typeof workerRefusals>[0];
   const db = new Secret("postgres://127.0.0.1/x", "databaseUrl");
+  const webhook = new Secret("https://hooks.example.test/services/T0/B0/WebhookTokenNeverLogged", "alertWebhook");
+  const jupiterKey = new Secret("JupiterKeyValueNeverLogged", "jupiterApiKey");
+  const JUPITER_CUT: RefusalConfig["cuts"] = new Set(["jupiter-key"]);
+  /** None of what the gate's three read: no cut, no Jupiter key, no webhook. */
+  const config = (over: Partial<RefusalConfig> = {}): RefusalConfig => ({ armed: false, databaseUrl: db, cuts: new Set(), jupiterApiKey: null, alertWebhook: null, ...over });
+  /** Without the health gate: every worker before it, and every worker that does not ask for it. */
+  const ungated = (mode: DispatchMode) => ({ mode, health: null });
+  /** Behind it (SIP_SOLANA_WORKER_HEALTH=on). */
+  const gated = (mode: DispatchMode) => ({ mode, health: { port: 8080 } });
 
   it("refuses a shadow worker that holds a key: a shadow is a dry run, and a dry run reads no signing secret", () => {
-    expect(workerRefusals({ armed: true, databaseUrl: db }, { mode: "shadow" })).toEqual([expect.stringContaining("SIP_SOLANA_DISPATCH=shadow on an armed keeper")]);
-    expect(workerRefusals({ armed: false, databaseUrl: db }, { mode: "shadow" })).toEqual([]);
+    expect(workerRefusals(config({ armed: true }), ungated("shadow"), {})).toEqual([expect.stringContaining("SIP_SOLANA_DISPATCH=shadow on an armed keeper")]);
+    expect(workerRefusals(config(), ungated("shadow"), {})).toEqual([]);
   });
 
   it("refuses a worker that is `on` and cannot sign, and any worker without its database", () => {
-    expect(workerRefusals({ armed: false, databaseUrl: db }, { mode: "on" })).toEqual([expect.stringContaining("SIP_SOLANA_DISPATCH=on needs an armed keeper")]);
-    expect(workerRefusals({ armed: true, databaseUrl: db }, { mode: "on" })).toEqual([]);
-    expect(workerRefusals({ armed: false, databaseUrl: null }, { mode: "shadow" })).toEqual([expect.stringContaining("DATABASE_URL is required")]);
+    expect(workerRefusals(config(), ungated("on"), {})).toEqual([expect.stringContaining("SIP_SOLANA_DISPATCH=on needs an armed keeper")]);
+    expect(workerRefusals(config({ armed: true }), ungated("on"), {})).toEqual([]);
+    expect(workerRefusals(config({ databaseUrl: null }), ungated("shadow"), {})).toEqual([expect.stringContaining("DATABASE_URL is required")]);
   });
 
   it("refuses a live worker signing through Privy without its signer id or policy id: it could not tell a wallet's seat apart", () => {
-    const privy = { privy: {} } as unknown as NonNullable<Parameters<typeof workerRefusals>[0]["signing"]>;
-    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: null, privyPolicyId: "pol" }, { mode: "on" })).toEqual([
+    const privy = { privy: {} } as unknown as NonNullable<RefusalConfig["signing"]>;
+    expect(workerRefusals(config({ armed: true, signing: privy, privySignerId: null, privyPolicyId: "pol" }), ungated("on"), {})).toEqual([
       expect.stringContaining("without SIP_SOLANA_PRIVY_SIGNER_ID"),
     ]);
-    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: "sig", privyPolicyId: null }, { mode: "on" })).toEqual([
+    expect(workerRefusals(config({ armed: true, signing: privy, privySignerId: "sig", privyPolicyId: null }), ungated("on"), {})).toEqual([
       expect.stringContaining("without SIP_SOLANA_PRIVY_POLICY_ID"),
     ]);
-    expect(workerRefusals({ armed: true, databaseUrl: db, signing: privy, privySignerId: "sig", privyPolicyId: "pol" }, { mode: "on" })).toEqual([]);
+    expect(workerRefusals(config({ armed: true, signing: privy, privySignerId: "sig", privyPolicyId: "pol" }), ungated("on"), {})).toEqual([]);
     // WITHOUT PRIVY (local keypairs) there is no seat to check.
-    expect(workerRefusals({ armed: true, databaseUrl: db, signing: { privy: null } as unknown as NonNullable<Parameters<typeof workerRefusals>[0]["signing"]>, privySignerId: null, privyPolicyId: null }, { mode: "on" })).toEqual([]);
+    expect(workerRefusals(config({ armed: true, signing: { privy: null } as unknown as NonNullable<RefusalConfig["signing"]>, privySignerId: null, privyPolicyId: null }), ungated("on"), {})).toEqual([]);
+  });
+
+  describe("behind the health gate, G1–G3: what elsewhere only warns, or says nothing", () => {
+    it("G1: refuses a gated worker that is on with the jupiter-key cut and no Jupiter key; with the key, nothing; a gated shadow, keyless by design, is not refused", () => {
+      const keyless = config({ armed: true, cuts: JUPITER_CUT, alertWebhook: webhook });
+      expect(workerRefusals(keyless, gated("on"), {})).toEqual([
+        "SIP_SOLANA_CUTS names jupiter-key without SIP_SOLANA_JUPITER_API_KEY: behind its health gate a worker that is `on` does not " +
+          "buy keyless through lite-api.jup.ag, where a buy was refused on a 429 nobody saw (2026-10-27). Set " +
+          "SIP_SOLANA_JUPITER_API_KEY on this service, or take jupiter-key out of SIP_SOLANA_CUTS.",
+      ]);
+      expect(workerRefusals({ ...keyless, jupiterApiKey: jupiterKey }, gated("on"), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal() })).toEqual([]);
+      // A SHADOW CARRIES NO KEY OF ANY KIND (the local shadow starts its workers without one): the same cut, keyless, is its normal.
+      expect(workerRefusals(config({ cuts: JUPITER_CUT }), gated("shadow"), {})).toEqual([]);
+    });
+
+    it("G2: refuses a gated worker, shadow or on, with the Jupiter key or rate set and no cut, naming each one set and never what it holds; empty is unset", () => {
+      for (const mode of ["shadow", "on"] as const) {
+        const base = config({ armed: mode === "on", alertWebhook: webhook });
+        expect(workerRefusals(base, gated(mode), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal() }), mode).toEqual([
+          expect.stringMatching(/^SIP_SOLANA_JUPITER_API_KEY set without jupiter-key in SIP_SOLANA_CUTS: not used .* or unset it\.$/),
+        ]);
+        expect(workerRefusals(base, gated(mode), { SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: " 50 " }), mode).toEqual([
+          expect.stringMatching(/^SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set without jupiter-key in SIP_SOLANA_CUTS: .* or unset it\.$/),
+        ]);
+        expect(workerRefusals(base, gated(mode), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal(), SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "50" }), mode).toEqual([
+          expect.stringMatching(/^SIP_SOLANA_JUPITER_API_KEY and SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set without jupiter-key .* or unset them\.$/),
+        ]);
+        // EMPTY OR BLANK IS UNSET, as the cut's own reader has it (readJupiterKeySettings).
+        expect(workerRefusals(base, gated(mode), { SIP_SOLANA_JUPITER_API_KEY: "", SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "   " }), mode).toEqual([]);
+      }
+      expect(workerRefusals(config(), gated("shadow"), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal() }).join(" ")).not.toContain(jupiterKey.reveal());
+      // WITH THE CUT, BOTH ARE ITS OWN: nothing.
+      const cut = config({ armed: true, cuts: JUPITER_CUT, jupiterApiKey: jupiterKey, alertWebhook: webhook });
+      expect(workerRefusals(cut, gated("on"), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal(), SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "500" })).toEqual([]);
+    });
+
+    it("G3: refuses a gated worker that is on with no alert webhook; a gated shadow, which sends nothing, may have none", () => {
+      expect(workerRefusals(config({ armed: true }), gated("on"), {})).toEqual([
+        "SIP_SOLANA_DISPATCH=on without SIP_SOLANA_ALERT_WEBHOOK: behind its health gate a worker that sends does not start with " +
+          "nowhere to page — a failed settle or buy would reach only this service's log. Reference it from " +
+          "sip-solana-keeper, as the signing secrets.",
+      ]);
+      expect(workerRefusals(config({ armed: true, alertWebhook: webhook }), gated("on"), {})).toEqual([]);
+      expect(workerRefusals(config(), gated("shadow"), {})).toEqual([]);
+    });
+
+    it("are said together, after today's, in one start", () => {
+      expect(workerRefusals(config({ cuts: JUPITER_CUT }), gated("on"), {})).toEqual([
+        expect.stringContaining("SIP_SOLANA_DISPATCH=on needs an armed keeper"),
+        expect.stringContaining("SIP_SOLANA_CUTS names jupiter-key without SIP_SOLANA_JUPITER_API_KEY"),
+        expect.stringContaining("SIP_SOLANA_DISPATCH=on without SIP_SOLANA_ALERT_WEBHOOK"),
+      ]);
+    });
+
+    it("WITHOUT THE GATE, EXACTLY TODAY'S: the gate only adds G1–G3, and a keyless cut, an unused key or rate and a missing webhook are refused nowhere else", () => {
+      const G = /^(SIP_SOLANA_CUTS names jupiter-key without |SIP_SOLANA_JUPITER_[A-Z_]+ (and SIP_SOLANA_JUPITER_[A-Z_]+ )?set without jupiter-key |SIP_SOLANA_DISPATCH=on without SIP_SOLANA_ALERT_WEBHOOK)/;
+      const envs: NodeJS.ProcessEnv[] = [{}, { SIP_SOLANA_JUPITER_API_KEY: "k-value" }, { SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "50" }];
+      let refusedBehind = 0;
+      for (const mode of ["shadow", "on"] as const)
+        for (const armed of [false, true])
+          for (const cuts of [new Set(), JUPITER_CUT] as RefusalConfig["cuts"][])
+            for (const jupiterApiKey of [null, jupiterKey])
+              for (const alertWebhook of [null, webhook])
+                for (const env of envs) {
+                  const c = config({ armed, cuts, jupiterApiKey, alertWebhook });
+                  const without = workerRefusals(c, ungated(mode), env);
+                  const behind = workerRefusals(c, gated(mode), env);
+                  expect(without.filter((problem) => G.test(problem))).toEqual([]);
+                  expect(without).toEqual(behind.filter((problem) => !G.test(problem)));
+                  if (behind.length > without.length) refusedBehind += 1;
+                }
+      // THE PATTERN IS NOT VACUOUS: the gate does refuse some of these.
+      expect(refusedBehind).toBeGreaterThan(0);
+      // THE KEYLESS CUT IN PARTICULAR: armed, on, the cut and no key, no webhook — today nothing at all.
+      expect(workerRefusals(config({ armed: true, cuts: JUPITER_CUT }), ungated("on"), {})).toEqual([]);
+    });
+
+    it("reads what loadConfig read: a keyless cut is no problem and no warning there, an unused rate only a warning", () => {
+      const env = {
+        SIP_SOLANA_DISPATCH: "shadow",
+        SIP_SOLANA_WORKER_HEALTH: "on",
+        PORT: "8080",
+        SIP_SOLANA_RPC_URLS: "http://127.0.0.1:8899",
+        SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+        DATABASE_URL: "postgres://worker:unused@127.0.0.1:5432/db",
+      };
+      const loaded = (over: Record<string, string>) => {
+        const all = { ...env, ...over };
+        const read = readWorkerSettings(all);
+        if ("problems" in read) throw new Error(read.problems.join(" | "));
+        return { all, settings: read.settings, config: loadConfig(keeperEnvOf(all), new Redactor()) };
+      };
+      // G2: SIP_SOLANA_JUPITER_CALLS_PER_MINUTE without the cut is loadConfig's warning, and this refusal behind the gate.
+      const rate = loaded({ SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: "50" });
+      expect(rate.config.warnings.join(" ")).toContain("SIP_SOLANA_JUPITER_CALLS_PER_MINUTE: set, and not used");
+      expect(workerRefusals(rate.config, rate.settings, rate.all)).toEqual([expect.stringContaining("SIP_SOLANA_JUPITER_CALLS_PER_MINUTE set without jupiter-key")]);
+      expect(workerRefusals(rate.config, { ...rate.settings, health: null }, rate.all)).toEqual([]);
+      // G1: the cut without a key loads with no key, no problem and no warning about it ...
+      const keyless = loaded({ SIP_SOLANA_CUTS: "jupiter-key" });
+      expect(keyless.config.jupiterApiKey).toBeNull();
+      expect(keyless.config.warnings.join(" ")).not.toContain("JUPITER");
+      // ... a gated shadow keeps it; `on` (armed by hand: arming is loadConfig's own test) is refused behind the gate, and only there.
+      expect(workerRefusals(keyless.config, keyless.settings, keyless.all)).toEqual([]);
+      const on = { ...keyless.config, armed: true, alertWebhook: webhook };
+      expect(workerRefusals(on, { ...keyless.settings, mode: "on" }, keyless.all)).toEqual([expect.stringContaining("SIP_SOLANA_CUTS names jupiter-key without")]);
+      expect(workerRefusals(on, { mode: "on", health: null }, keyless.all)).toEqual([]);
+    });
   });
 });
 
