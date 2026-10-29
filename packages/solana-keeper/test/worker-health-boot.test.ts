@@ -4,8 +4,10 @@
 // THE GATE IS OPT-IN: SIP_SOLANA_WORKER_HEALTH=on (src/worker-config.ts). Every
 // worker in production has a PORT — the image bakes 8080 and Railway injects its
 // own — so a worker without the gate is shown here WITH a PORT, and listens on
-// nothing all the same: its two off exits, and a worker that registers, beats
-// and stops over a real database.
+// nothing all the same: its two off exits; past them, a worker held at writing
+// its row by a "database" that never answers, until the trap ends it (the one
+// the image's own run reaches, with no KEEPER_TEST_PG_URL); and a worker that
+// registers, beats and stops over a real database.
 //
 // THE PROPERTY THE GATE EXISTS FOR: a configuration the worker refuses never
 // answers on PORT at all, so a Railway deploy of it cannot pass its healthcheck
@@ -29,7 +31,11 @@
 // OFF BEHIND THE GATE: SIP_SOLANA_DISPATCH=off written out, with the gate on,
 // and no database, no endpoint and no program — loadConfig would refuse the
 // last two, so it is never called. It listens once, answers 200 'off', and
-// exits 0 on SIGTERM or SIGINT; a PORT it cannot have exits 1.
+// exits 0 on SIGTERM or SIGINT; a PORT it cannot have exits 1. And in
+// production's shape, where the service keeps DATABASE_URL, the endpoints and
+// the alert webhook while it is off — each here a loopback server that takes a
+// connection and never answers — it does the same, and none of the three is
+// ever connected to: an off worker opens no database, RPC or alerter.
 //
 // AND THE LEGACY KEEPER (bin/keeper.mts, the image's CMD), which a worker
 // service that lost its Custom Start Command boots instead: with a worker's own
@@ -82,7 +88,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { Keypair } from "@solana/web3.js";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { BROADCAST_ACK } from "../src/config.js";
 import { LIVE_WORKERS_SQL, WORKER_LEAVING_SQL, WORKER_STOPPED_SQL } from "../src/dispatch-store.js";
 import { WORKER_DEAD_AFTER_MS } from "../src/fleet-status.js";
@@ -189,6 +195,9 @@ async function silentEndpoint(): Promise<{ readonly url: string; reached(): bool
   };
 }
 
+/** A DATABASE_URL on a silentEndpoint(): the pool's connection is taken, and nothing is ever answered on it. */
+const databaseOn = (endpoint: { readonly url: string }): string => `postgres://worker:unused@127.0.0.1:${new URL(endpoint.url).port}/sip?sslmode=disable`;
+
 /**
  * A child of the package, `env -i`, offline but for the loopback, every listen()
  * it calls written to its own file first. NODE ITSELF with tsx as a loader, as
@@ -271,6 +280,18 @@ const until = async <T>(what: string, worker: Child, test: () => Promise<T | nul
   }
 };
 
+// EVERY CHILD A TEST STARTED IS GONE BEFORE THE NEXT TEST, pass or fail. A test
+// that fails with its worker still running would leave it beating and claiming
+// from the database the next tests share, and the next test's vault taken by it
+// would fail that test for a reason that is not its own; killed and waited for
+// here, it is gone before the next beforeEach's TRUNCATE.
+afterEach(async () => {
+  for (const child of children.splice(0)) {
+    child.kill("SIGKILL");
+    await child.exit(10_000).catch(() => undefined);
+  }
+}, WAIT_MS);
+
 afterAll(() => {
   for (const child of children) child.kill("SIGKILL");
   rmSync(scratch, { recursive: true, force: true });
@@ -341,6 +362,27 @@ describe("without the gate nothing listens, PORT or not", () => {
     expect(worker.listened(), worker.log).toEqual([]);
     expect(worker.log).not.toContain("/health");
   }, 2 * WAIT_MS);
+
+  it("past its off exits — shadow, PORT set — over a database that takes the connection and never answers: exits 1 through the trap, and nothing ever listened", async () => {
+    // AS FAR AS A WORKER WITHOUT THE GATE GETS WITH NO DATABASE: past every
+    // refusal and everything it builds, it waits at writing its row until the
+    // pool's connection timeout throws into the trap. A gate built from PORT
+    // alone would have listened before that wait, and of the cases the image
+    // runs (no KEEPER_TEST_PG_URL there) this is the only one that gets past the
+    // off exits without the gate.
+    const database = await silentEndpoint();
+    try {
+      const worker = start({ ...SHADOW_NO_DATABASE, DATABASE_URL: databaseOn(database), PORT: REFUSED_PORT });
+      expect(await worker.exit(), worker.log).toBe(1);
+      expect(worker.log).toContain('"event":"uncaught exception"');
+      // IT GOT THAT FAR: the "database" took its connection.
+      expect(database.reached(), worker.log).toBe(true);
+      expect(worker.listened(), worker.log).toEqual([]);
+      expect(worker.log).not.toContain("listening for /health");
+    } finally {
+      await database.letGo();
+    }
+  }, 2 * WAIT_MS);
 });
 
 describe("off behind the gate: SIP_SOLANA_DISPATCH=off written out, with SIP_SOLANA_WORKER_HEALTH=on", () => {
@@ -373,6 +415,38 @@ describe("off behind the gate: SIP_SOLANA_DISPATCH=off written out, with SIP_SOL
     },
     2 * WAIT_MS,
   );
+
+  it("in production's shape — a database, an endpoint and an alert webhook, each taking a connection and never answering — answers 200 off, exits 0 on SIGTERM, and never connects to any of them", async () => {
+    const database = await silentEndpoint();
+    const rpc = await silentEndpoint();
+    const webhook = await silentEndpoint();
+    const port = await freePort();
+    try {
+      // WHAT THE SERVICE KEEPS WHILE IT IS OFF. An off path that opened any of
+      // them would be counted below, and one that waited on it would never answer.
+      const worker = start({
+        SIP_SOLANA_DISPATCH: "off",
+        DATABASE_URL: databaseOn(database),
+        SIP_SOLANA_RPC_URLS: rpc.url,
+        SIP_SOLANA_PROGRAM_ID: SIP_PROGRAM_ID,
+        SIP_SOLANA_ALERT_WEBHOOK: webhook.url,
+        ...gated(port),
+      });
+      const off = await until("/health to answer", worker, () => probe(port));
+      expect(off).toMatchObject({ status: 200, body: { ok: true, phase: "off", role: "worker" } });
+      expect(worker.lines(OFF_GATED_LINE), worker.log).toBe(1);
+      expect(worker.log).not.toContain('"event":"worker starting"');
+
+      worker.kill("SIGTERM");
+      expect(await worker.exit(), worker.log).toBe(0);
+      expect(worker.lines('"event":"worker stopped"', '"signal":"SIGTERM"'), worker.log).toBe(1);
+      expect(worker.listened(), worker.log).toEqual([[port]]);
+      // NOT ONE CONNECTION, from its first line to its exit.
+      expect({ database: database.reached(), rpc: rpc.reached(), webhook: webhook.reached() }, worker.log).toEqual({ database: false, rpc: false, webhook: false });
+    } finally {
+      await Promise.all([database.letGo(), rpc.letGo(), webhook.letGo()]);
+    }
+  }, 2 * WAIT_MS);
 
   it("exits 1 when its PORT is taken, as a worker that serves does", async () => {
     const holder = createSocketServer();

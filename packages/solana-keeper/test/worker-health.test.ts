@@ -142,22 +142,30 @@ describe("GET and HEAD /health, and nothing else", () => {
   });
 
   it("answers any other path 404, whatever the method and the phase, and names the one it serves", () => {
-    const gate = gateOf();
-    gate.ready();
-    const handler = workerHealthHandler(gate);
-    for (const [method, url] of [
-      ["GET", "/"],
-      ["GET", "/status"],
-      ["GET", "/leaderboard"],
-      ["GET", "/health/"],
-      ["GET", "/healthz"],
-      ["HEAD", "/status"],
-      ["POST", "/hooks/helius"],
-      ["DELETE", "/"],
-    ] as const) {
-      const reply = drive(handler, method, url);
-      expect(reply.status, `${method} ${url}`).toBe(404);
-      expect(JSON.parse(reply.body), `${method} ${url}`).toEqual({ error: "not found", paths: [WORKER_HEALTH_PATH] });
+    const ready = gateOf();
+    ready.ready();
+    const stopping = gateOf();
+    stopping.ready();
+    stopping.stopping();
+    const gates = [gateOf(), ready, gateOf(COMMIT, "off"), stopping];
+    expect(gates.map((gate) => gate.phase)).toEqual(["starting", "ready", "off", "stopping"]);
+    // EVERY PHASE: the 404 is the path's, never the gate's answer (503 while starting or stopping, 200 ready or off).
+    for (const gate of gates) {
+      const handler = workerHealthHandler(gate);
+      for (const [method, url] of [
+        ["GET", "/"],
+        ["GET", "/status"],
+        ["GET", "/leaderboard"],
+        ["GET", "/health/"],
+        ["GET", "/healthz"],
+        ["HEAD", "/status"],
+        ["POST", "/hooks/helius"],
+        ["DELETE", "/"],
+      ] as const) {
+        const reply = drive(handler, method, url);
+        expect(reply.status, `${gate.phase}: ${method} ${url}`).toBe(404);
+        expect(JSON.parse(reply.body), `${gate.phase}: ${method} ${url}`).toEqual({ error: "not found", paths: [WORKER_HEALTH_PATH] });
+      }
     }
   });
 
