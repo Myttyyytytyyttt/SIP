@@ -901,9 +901,10 @@ La cuenta exacta la hace `dispatchConnections` (`src/dispatch-store.ts`): el sch
 | 3 | 9 | 14 | 28 |
 
 Sin los vigilantes de siempre, un push con 1, 2 o 3 workers llega a 10, 14 o 18. **El *Pool Size* del pooler de sesión
-de Supabase está en 30 desde el 28-oct** (el 25-oct se leyó 15), así que cabe toda la tabla: lo más justo es un push
-con 3 workers y los dos vigilantes de siempre encendidos, 28 de 30. Cada comando que abre la base por su cuenta suma 1
-mientras corre: el del traspaso (10.4), `flota-prod` y `setup-read-model`.
+de Supabase está en 30 desde el 28-oct** (el 25-oct se leyó 15). Con el margen de 5 que pide la sección 9 (hasta 25 de
+30) cabe toda la tabla menos un caso: un push con 3 workers y los dos vigilantes de siempre encendidos llega a 28. **Con
+3 workers, los vigilantes de siempre tienen que estar parados** (10.8, paso 8). Cada comando que abre la base por su
+cuenta suma 1 mientras corre: el del traspaso (10.4), `flota-prod` y `setup-read-model`.
 
 ### 10.3 Los vigilantes de siempre durante la migración (`SIP_SOLANA_DISPATCH` en ellos)
 
@@ -1066,9 +1067,11 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
 - **Luego, el worker**: `SIP_SOLANA_EXTRA_MODES=roundup,fixed` y `SIP_SOLANA_EXTRA_MODES_VAULTS=<el vault de prueba>`,
   con `SIP_SOLANA_EXTRA_MODES_LIVE=0`: el worker mide y anota cada operación (en la línea "job done", `perTrade`) y no
   envía nada (M4). Para cobrar de verdad (M5): `SIP_SOLANA_EXTRA_MODES_FROM_SLOT=<el slot de ahora>` y `LIVE=1`.
-- **Antes de actualizar el programa**: el worker que vaya a servir redondeo o fijo tiene que llevar ya esos modos, en
-  seco (`SIP_SOLANA_EXTRA_MODES_LIVE=0`), cuando la actualización se despliegue. Desde ese momento cualquier dueño de un
-  vault puede firmar el paso a esos modos: `set_policy_v3` solo pide su firma.
+- **Antes de actualizar el programa**, deja ya el worker con esos modos en seco (`SIP_SOLANA_EXTRA_MODES_LIVE=0`) y el
+  vault de prueba, como arriba. Desde que la actualización se despliega, cualquier dueño de un vault puede firmar el
+  paso a esos modos (`set_policy_v3` solo pide su firma), y un vault que no esté en `SIP_SOLANA_EXTRA_MODES_VAULTS` se
+  queda en reposo: no se le cobra nada, en `flota` su cobro dice «un modo que aún no se cobra» y a Telegram no llega
+  nada.
 - **El vault tiene que estar en la cola** (`vault_work.system = queue`, 10.4): la lista de vaults solo dice qué modos
   puede cobrar el worker que ya lo tiene.
 - **Si Pyth se queda parado**: una operación de redondeo sin muestra de la cinta a ±120 s se valora con la lectura de
