@@ -900,11 +900,12 @@ La cuenta exacta la hace `dispatchConnections` (`src/dispatch-store.ts`): el sch
 | 2 | 7 | 12 | 24 |
 | 3 | 9 | 14 | 28 |
 
-Sin los vigilantes de siempre, un push con 1, 2 o 3 workers llega a 10, 14 o 18. **El *Pool Size* del pooler de sesión
-de Supabase está en 30 desde el 28-oct** (el 25-oct se leyó 15). Con el margen de 5 que pide la sección 9 (hasta 25 de
-30) cabe toda la tabla menos un caso: un push con 3 workers y los dos vigilantes de siempre encendidos llega a 28. **Con
-3 workers, los vigilantes de siempre tienen que estar parados** (10.8, paso 8). Cada comando que abre la base por su
-cuenta suma 1 mientras corre: el del traspaso (10.4), `flota-prod` y `setup-read-model`.
+Sin los vigilantes de siempre, un push con 1, 2 o 3 workers llega a 10, 14 o 18, y la sección 9 pide quedar al menos 5
+por debajo del *Pool Size* del pooler de sesión de Supabase. **Con 15** (lo que se leyó el 25-oct) **cabe 1 worker y
+justo**: un push llega a 10. **Con 30** cabe toda la tabla menos un caso: un push con 3 workers y los dos vigilantes de
+siempre encendidos llega a 28, así que con 3 workers los vigilantes de siempre tienen que estar parados (10.8, paso 8).
+**Antes de crear un segundo worker, mira en Supabase que el *Pool Size* está en 30**, y súbelo si no. Cada comando que
+abre la base por su cuenta suma 1 mientras corre: el del traspaso (10.4), `flota-prod` y `setup-read-model`.
 
 ### 10.3 Los vigilantes de siempre durante la migración (`SIP_SOLANA_DISPATCH` en ellos)
 
@@ -1376,10 +1377,12 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
 
   Luego, lo que diga [SECRETS.md](SECRETS.md) para la vieja: revocarla donde se pueda. Hasta entonces una app secret o
   una clave de Jupiter viejas siguen valiendo, y las líneas del paso 2 salen igual con cualquiera de las dos: revocada
-  la vieja, vuelve a desplegar cada servicio del paso 2 y míralas otra vez. Un servicio que se quedó con la vieja lo
-  dice ahí (Privy: la línea `privy authorization key` con `credentials-refused`) o en su siguiente compra (Jupiter:
-  `Jupiter answered HTTP 401`, en `flota`). **Deshacer**, mientras no hayas revocado la vieja: vuelve a poner el valor
-  viejo donde vive y despliega; la llave de cobro, antes otra vez en la cadena (paso 3: pídeme el paso).
+  la vieja, vuelve a desplegar cada servicio del paso 2 y míralas otra vez. Un servicio que se quedó con la vieja de
+  Privy lo dice ahí: la línea `privy authorization key` con `credentials-refused`. **La clave de Jupiter no sale en esas
+  líneas** (`"keyed":true` solo dice que hay una): lo dice la siguiente compra, en `flota` (`Jupiter answered HTTP 401`
+  o `403` si se quedó con la vieja), y mientras no haya nada que comprar no lo dice nada. **Deshacer**, mientras no hayas
+  revocado la vieja: vuelve a poner el valor viejo donde vive y despliega; la llave de cobro, antes otra vez en la
+  cadena (paso 3: pídeme el paso).
 
 ## Si algo falla
 

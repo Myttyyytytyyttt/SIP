@@ -224,7 +224,7 @@ describe("workerRefusals", () => {
           "SIP_SOLANA_JUPITER_API_KEY on this service, or take jupiter-key out of SIP_SOLANA_CUTS.",
       ]);
       expect(workerRefusals({ ...keyless, jupiterApiKey: jupiterKey }, gated("on"), { SIP_SOLANA_JUPITER_API_KEY: jupiterKey.reveal() })).toEqual([]);
-      // A SHADOW CARRIES NO KEY OF ANY KIND (the local shadow starts its workers without one): the same cut, keyless, is its normal.
+      // A SHADOW IS MEANT TO RUN KEYLESS (test-local/shadow/harness.ts starts its workers without a key), and G1 asks for a key only from `on`: for a shadow, the same cut with no key is normal.
       expect(workerRefusals(config({ cuts: JUPITER_CUT }), gated("shadow"), {})).toEqual([]);
     });
 
