@@ -28,11 +28,11 @@ import { Secret } from "@sip/solana-log";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { Alert } from "../src/alerts.js";
 import { CreditGovernor, InMemoryRpcUsageFeed, RpcUsageCollector, USAGE_BUCKET_MS, bucketStart, type RpcUsageRow, type UsageClass, type UsageProvider } from "../src/credit-governor.js";
-import { DispatchStore, PgRpcUsageFeed, SCHEDULER_POOL_MAX, USAGE_SUMMARY_SQL, createDispatchPool } from "../src/dispatch-store.js";
+import { DispatchStore, LIVE_WORKERS_SQL, PgRpcUsageFeed, SCHEDULER_POOL_MAX, USAGE_SUMMARY_SQL, createDispatchPool } from "../src/dispatch-store.js";
 import { FENCE_REJECT_ALERT_KEY, FleetAlerts } from "../src/fleet-alerts.js";
 import { PgFleetStore } from "../src/fleet-pg.js";
 import { BELL_DELAY_MS, FleetReceiver } from "../src/fleet-receiver.js";
-import { FleetStatusReader } from "../src/fleet-status.js";
+import { FleetStatusReader, WORKER_DEAD_AFTER_MS } from "../src/fleet-status.js";
 import type { RpcLane } from "../src/rpc-budget.js";
 import { QUOTA_STALE_MS, QuotaFollower } from "../src/rpc-quota.js";
 
@@ -182,6 +182,43 @@ describe.skipIf(!usable)("the P3a tracks wired to the store, on Postgres 16 (nee
       expect(out.workers).toEqual(["w-a", "w-b", "w-c", "w-d", "w-e"]);
       const { rows } = await db.query<{ total: number }>("SELECT sum(rps_quota)::float8 AS total FROM sip_solana.worker WHERE quota_at IS NOT NULL");
       expect(rows[0]!.total).toBeCloseTo(out.quotas.fleetRps - out.quotas.schedulerRps, 4);
+    });
+
+    it("a worker leaving as its drain starts: stopped at once with its busy kept, out of the next hand-out, still out after its beats, and its lease its own as before", async () => {
+      const { scheduler, a } = await fleetOfFour();
+      // w-a HOLDS A VAULT AND SAYS SO: a drain is a job still running.
+      await db.query("INSERT INTO sip_solana.vault_work (vault_addr, system) VALUES ('Vau1tLeaving', 'queue')");
+      const [held] = await a.claim(1);
+      expect(held).toMatchObject({ vault: "Vau1tLeaving", fence: 1n });
+      await a.beatProcess(1);
+      expect((await scheduler.handOutQuotas({ maxWorkers: 4 })).workers).toEqual(["w-a", "w-b"]);
+      const row = async () =>
+        (await db.query<{ stopped_at: Date | null; busy: number }>("SELECT stopped_at, busy FROM sip_solana.worker WHERE worker_id = 'w-a'")).rows[0]!;
+      const live = async () => (await db.query<{ worker_id: string }>(LIVE_WORKERS_SQL, [WORKER_DEAD_AFTER_MS / 1000])).rows.map((r) => r.worker_id);
+
+      await a.processLeaving();
+      const left = await row();
+      expect(left.stopped_at).not.toBeNull();
+      expect(left.busy).toBe(1);
+      // THE HAND-OUT'S OWN STATEMENT NO LONGER NAMES IT, and the next hand-out gives w-b the workers' whole share.
+      expect(await live()).toEqual(["w-b"]);
+      const next = await scheduler.handOutQuotas({ maxWorkers: 4 });
+      expect(next.workers).toEqual(["w-b"]);
+      expect(next.quotas.perWorkerRps).toBe(32);
+
+      // ITS DRAIN BEATS ON: the share it last heard, written no more, and a beat never brings the row back.
+      expect(await a.beatProcess(1, { jobsLast10Min: 1 })).toMatchObject({ rpsQuota: 16 });
+      expect(await row()).toEqual({ stopped_at: left.stopped_at, busy: 1 });
+      expect(await live()).toEqual(["w-b"]);
+      expect((await scheduler.handOutQuotas({ maxWorkers: 4 })).workers).toEqual(["w-b"]);
+
+      // ITS LEASE IS ITS OWN AS BEFORE: the heartbeat renews it and the release lands.
+      expect(await a.heartbeat([held!])).toEqual(new Set(["Vau1tLeaving"]));
+      expect(await a.release(held!, "SIGTERM: drained")).toBe(true);
+      // THE CLOSE AT THE END zeroes busy.
+      await a.processStopped();
+      expect((await row()).busy).toBe(0);
+      expect((await row()).stopped_at).not.toBeNull();
     });
 
     it("shows each worker's quota age on the fleet page, and none for a worker never handed one", async () => {

@@ -314,6 +314,12 @@ export interface FleetWorkerRow {
   readonly heartbeatAgeMs: number | null;
   /** Heartbeat older than WORKER_DEAD_AFTER_MS, and not stopped: the reap's verdict, read rather than written. */
   readonly dead: boolean;
+  /**
+   * When the row was closed — or, for a worker behind its health gate, when its
+   * drain started (WORKER_LEAVING_SQL, src/dispatch-store.ts): out of the quota
+   * hand-out from then, it may go on beating and holding leases until the drain
+   * is over.
+   */
   readonly stoppedAt: string | null;
   readonly slots: number;
   readonly busy: number;

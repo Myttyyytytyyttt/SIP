@@ -36,16 +36,26 @@
 // answers 503 starting while its row is registered and its claims cannot answer
 // (the test holds vault_work locked until two have failed, which is past its
 // first heartbeat: ready is the first claim that ANSWERS — not one that failed,
-// not a beat), 200 once a claim answers, and 503 from SIGTERM: the test holds
-// the worker's row, so the shutdown waits at closing it — for up to the store's
-// 5 s statement timeout (DISPATCH_STATEMENT_TIMEOUT_MS), and then exits 0
-// anyway — and the 503 is read inside that wait. That the 503 comes before the
-// DRAIN is the code's order (the shutdown's first line, bin/worker.mts), not
-// this test's: with no job in flight the drain takes no time. A claim whose
-// STATEMENT ERRORS is no answer either: with vault_work renamed away once the
-// worker is past its boot — in a database of that test's own, which no other
-// test opens — it says 503 for as long as its claims fail, and 200 once the
-// table is back. A worker whose PORT is taken exits 1 before it writes its row.
+// not a beat), and 200 once a claim answers. Then it claims a vault whose job
+// waits at its first chain read, on an "endpoint" that takes the request and
+// never answers until the test lets it go, and SIGTERM finds its drain waiting
+// on that job: /health says 503, and its row leaves the quota hand-out —
+// stopped_at set, LIVE_WORKERS_SQL no longer naming it — while the vault is
+// still its own; let go, the job ends, the vault is handed back, the row is
+// closed and it exits 0. THIS CASE USED TO HOLD THE WORKER'S ROW to read the 503
+// inside a wait. The leave is an UPDATE of that same row, so a held row holds
+// it too, and nothing could be read of it before the exit; the drain's own wait
+// is where it is read now. The held row is a case of its own: held through the
+// whole shutdown, the leave and the close wait on it side by side
+// (pg_stat_activity shows both), each fails at the store's 5 s statement
+// timeout (DISPATCH_STATEMENT_TIMEOUT_MS) as a log line, and the worker exits 0
+// at one timeout, not two. And WITHOUT THE GATE a worker draining the same kind
+// of job leaves its row in the hand-out until the close, as before the gate. A
+// claim whose STATEMENT ERRORS is no answer either: with vault_work renamed
+// away once the worker is past its boot — in a database of that test's own,
+// which no other test opens — it says 503 for as long as its claims fail, and
+// 200 once the table is back. A worker whose PORT is taken exits 1 before it
+// writes its row.
 //
 // No tight timing: every wait polls, with a minute to spare (cde9180).
 //
@@ -61,7 +71,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { Keypair } from "@solana/web3.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { LIVE_WORKERS_SQL, WORKER_LEAVING_SQL, WORKER_STOPPED_SQL } from "../src/dispatch-store.js";
+import { WORKER_DEAD_AFTER_MS } from "../src/fleet-status.js";
 import { SIP_PROGRAM_ID } from "../src/idl.js";
 
 const URL_RAW = process.env["KEEPER_TEST_PG_URL"];
@@ -119,6 +132,37 @@ const probe = async (port: number, method = "GET"): Promise<Reply | null> => {
     return null;
   }
 };
+
+/**
+ * AN "ENDPOINT" THAT TAKES THE REQUEST AND NEVER ANSWERS, as the silent database
+ * below, for RPC: a job's first chain read waits on it, so the job — and a drain
+ * — lasts until letGo(), which refuses every new connection, cuts the ones it
+ * holds and closes, and the read fails at once. letGo() can be called again.
+ */
+async function silentEndpoint(): Promise<{ readonly url: string; reached(): boolean; letGo(): Promise<void> }> {
+  const sockets: Socket[] = [];
+  let open = true;
+  const server = createSocketServer((socket) => {
+    socket.on("error", () => undefined);
+    if (open) sockets.push(socket);
+    else socket.destroy();
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const port = (server.address() as { port: number }).port;
+  let closed: Promise<void> | null = null;
+  return {
+    url: `http://127.0.0.1:${port}/`,
+    reached: () => sockets.length > 0,
+    letGo: () => {
+      open = false;
+      closed ??= new Promise<void>((done) => {
+        server.close(() => done());
+        for (const socket of sockets) socket.destroy();
+      });
+      return closed;
+    },
+  };
+}
 
 /**
  * A child of the package, `env -i`, offline but for the loopback, every listen()
@@ -394,14 +438,29 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
   });
 
   beforeEach(async () => {
-    await db.query("TRUNCATE sip_solana.worker");
+    await db.query("TRUNCATE sip_solana.worker, sip_solana.vault_work");
   });
 
   /** A shadow worker's environment over `url`: no gate and no PORT, unless the test adds them. */
   const shadow = (url: string): Record<string, string> => ({ ...SHADOW_NO_DATABASE, DATABASE_URL: url });
 
-  const workerRows = async (pool: pg.Pool = db): Promise<{ worker_id: string; stopped_at: Date | null }[]> =>
-    (await pool.query<{ worker_id: string; stopped_at: Date | null }>("SELECT worker_id, stopped_at FROM sip_solana.worker WHERE kind = 'worker'")).rows;
+  const workerRows = async (pool: pg.Pool = db): Promise<{ worker_id: string; stopped_at: Date | null; busy: number }[]> =>
+    (await pool.query<{ worker_id: string; stopped_at: Date | null; busy: number }>("SELECT worker_id, stopped_at, busy FROM sip_solana.worker WHERE kind = 'worker'")).rows;
+
+  /** The workers the scheduler's hand-out divides among now: its own statement. */
+  const inHandOut = async (): Promise<string[]> =>
+    (await db.query<{ worker_id: string }>(LIVE_WORKERS_SQL, [WORKER_DEAD_AFTER_MS / 1000])).rows.map((row) => row.worker_id);
+
+  /** One vault on the queue, due now, for the next claim to take. */
+  const queueVault = async (): Promise<string> => {
+    const vault = Keypair.generate().publicKey.toBase58();
+    await db.query("INSERT INTO sip_solana.vault_work (vault_addr, system) VALUES ($1, 'queue')", [vault]);
+    return vault;
+  };
+
+  /** Who holds `vault`: a worker_id, or null. */
+  const holderOf = async (vault: string): Promise<string | null> =>
+    (await db.query<{ holder: string | null }>("SELECT holder FROM sip_solana.vault_work WHERE vault_addr = $1", [vault])).rows[0]?.holder ?? null;
 
   it("refuses roundup over a database without the price tape's table: exit 2, and nothing ever listened", async () => {
     const worker = start({ ...shadow(bareUrl), ...gated(REFUSED_PORT), SIP_SOLANA_EXTRA_MODES: "roundup", SIP_SOLANA_EXTRA_MODES_VAULTS: "*" });
@@ -439,55 +498,109 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
     }
   };
 
-  it("answers 503 while registered and its claims fail, 200 once a claim answers, and 503 from SIGTERM until it exits 0", async () => {
+  it("answers 503 while registered and its claims fail, 200 once a claim answers, and from SIGTERM 503 — out of the hand-out while its drain still holds a vault — until it exits 0", async () => {
     const port = await freePort();
-    // THE QUEUE HELD: while this transaction holds vault_work, every claim waits
-    // for the lock, fails at its statement timeout (DISPATCH_STATEMENT_TIMEOUT_MS)
-    // and is tried again CLAIM_IDLE_MS later. TWO FAILED ARE PAST THE FIRST
-    // HEARTBEAT (HEARTBEAT_EVERY_MS from the loop's start), whose beat writes only
-    // the worker's row: still 503 there is ready on a claim that ANSWERED, not on
-    // one that failed, not on a beat, not on a shorter timer.
-    const worker = await holding("LOCK TABLE sip_solana.vault_work IN EXCLUSIVE MODE", [], async () => {
-      const child = start({ ...shadow(databaseUrl), ...gated(port) });
-      await until("the worker's row", child, async () => ((await workerRows()).length === 1 ? true : null));
-      await until("two claims to fail behind the lock", child, async () => (child.lines('"event":"the claim failed; trying again shortly"') >= 2 ? true : null));
-      for (let seen = 0; seen < 3; seen++) {
-        const reply = await until("/health to answer", child, () => probe(port));
-        expect(reply).toMatchObject({ status: 503, body: { ok: false, phase: "starting", role: "worker" } });
-        await sleep(200);
-      }
-      expect(child.log).not.toContain('"event":"worker ready"');
-      return child;
-    });
+    const endpoint = await silentEndpoint();
+    try {
+      // THE QUEUE HELD: while this transaction holds vault_work, every claim waits
+      // for the lock, fails at its statement timeout (DISPATCH_STATEMENT_TIMEOUT_MS)
+      // and is tried again CLAIM_IDLE_MS later. TWO FAILED ARE PAST THE FIRST
+      // HEARTBEAT (HEARTBEAT_EVERY_MS from the loop's start), whose beat writes only
+      // the worker's row: still 503 there is ready on a claim that ANSWERED, not on
+      // one that failed, not on a beat, not on a shorter timer.
+      const worker = await holding("LOCK TABLE sip_solana.vault_work IN EXCLUSIVE MODE", [], async () => {
+        const child = start({ ...shadow(databaseUrl), SIP_SOLANA_RPC_URLS: endpoint.url, ...gated(port) });
+        await until("the worker's row", child, async () => ((await workerRows()).length === 1 ? true : null));
+        await until("two claims to fail behind the lock", child, async () => (child.lines('"event":"the claim failed; trying again shortly"') >= 2 ? true : null));
+        for (let seen = 0; seen < 3; seen++) {
+          const reply = await until("/health to answer", child, () => probe(port));
+          expect(reply).toMatchObject({ status: 503, body: { ok: false, phase: "starting", role: "worker" } });
+          await sleep(200);
+        }
+        expect(child.log).not.toContain('"event":"worker ready"');
+        return child;
+      });
 
-    const ready = await until("/health to answer 200", worker, async () => {
-      const reply = await probe(port);
-      return reply !== null && reply.status === 200 ? reply : null;
-    });
-    expect(ready.body).toMatchObject({ ok: true, phase: "ready", role: "worker", version: "local", slots: 2 });
-    expect(Date.parse(String(ready.body?.["startedAt"]))).not.toBeNaN();
-    expect(worker.log).toContain('"event":"worker ready"');
-    const rows = await workerRows();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.stopped_at).toBeNull();
-    expect(await probe(port, "HEAD")).toEqual({ status: 200, body: null });
-    expect((await fetch(`http://127.0.0.1:${port}/status`)).status).toBe(404);
+      const ready = await until("/health to answer 200", worker, async () => {
+        const reply = await probe(port);
+        return reply !== null && reply.status === 200 ? reply : null;
+      });
+      expect(ready.body).toMatchObject({ ok: true, phase: "ready", role: "worker", version: "local", slots: 2 });
+      expect(Date.parse(String(ready.body?.["startedAt"]))).not.toBeNaN();
+      expect(worker.log).toContain('"event":"worker ready"');
+      const rows = await workerRows();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.stopped_at).toBeNull();
+      const workerId = rows[0]!.worker_id;
+      expect(await inHandOut()).toEqual([workerId]);
+      expect(await probe(port, "HEAD")).toEqual({ status: 200, body: null });
+      expect((await fetch(`http://127.0.0.1:${port}/status`)).status).toBe(404);
 
-    // SIGTERM WITH THE WORKER'S ROW HELD: the shutdown turns /health 503 at its
-    // first line, then waits at closing the row — for up to the store's 5 s
-    // statement timeout (DISPATCH_STATEMENT_TIMEOUT_MS), after which it exits 0
-    // anyway — so the 503 is read inside that wait, before the exit.
-    const stopping = await holding("SELECT 1 FROM sip_solana.worker WHERE worker_id = $1 FOR UPDATE", [rows[0]!.worker_id], async () => {
+      // A JOB THAT WAITS AT ITS FIRST CHAIN READ: the vault claimed, the endpoint reached.
+      const vault = await queueVault();
+      await until("its job to wait at its chain read", worker, async () => (endpoint.reached() && (await holderOf(vault)) === workerId ? true : null));
+
+      // SIGTERM WITH ITS DRAIN WAITING ON THAT JOB: /health turns 503 at the
+      // shutdown's first line, and the row leaves the quota hand-out while the
+      // vault is still this worker's — beside the drain, not after it. Both are
+      // read inside the drain's wait, which lasts until the test lets the job go.
       worker.kill("SIGTERM");
-      return await until("/health to answer 503 after SIGTERM", worker, async () => {
+      const stopping = await until("/health to answer 503 after SIGTERM", worker, async () => {
         const reply = await probe(port);
         return reply !== null && reply.status === 503 ? reply : null;
       });
+      expect(stopping.body).toMatchObject({ ok: false, phase: "stopping", role: "worker" });
+      await until("its row to leave the hand-out", worker, async () => ((await workerRows())[0]?.stopped_at != null ? true : null));
+      expect(await inHandOut()).toEqual([]);
+      expect(await holderOf(vault)).toBe(workerId);
+      expect(worker.exited).toBeNull();
+
+      // LET GO: the read fails, the job ends, the vault is handed back, the row is closed (busy 0), exit 0.
+      await endpoint.letGo();
+      expect(await worker.exit(), worker.log).toBe(0);
+      expect(worker.log).toContain('"event":"worker stopped"');
+      expect(worker.log).not.toContain("could not leave the quota hand-out");
+      expect(await holderOf(vault)).toBeNull();
+      expect(await workerRows()).toEqual([{ worker_id: workerId, stopped_at: expect.any(Date), busy: 0 }]);
+      // ONE LISTEN, ON PORT: nothing else in the process ever listened.
+      expect(worker.listened()).toEqual([[port]]);
+    } finally {
+      await endpoint.letGo();
+    }
+  }, 3 * WAIT_MS);
+
+  it("with its row held through the whole shutdown, the leave and the close wait on it side by side, each a log line when it times out, and it exits 0 at one statement timeout", async () => {
+    const port = await freePort();
+    const worker = start({ ...shadow(databaseUrl), ...gated(port) });
+    await until("/health to answer 200", worker, async () => ((await probe(port))?.status === 200 ? true : null));
+    const workerId = (await workerRows())[0]!.worker_id;
+    // RIGHT AFTER A BEAT: the next is HEARTBEAT_EVERY_MS away, and the shutdown
+    // stops the beat's timer long before it, so no beat can be waiting on the
+    // held row with one of the worker's two connections — the one the close needs.
+    const beatAt = async (): Promise<number> =>
+      (await db.query<{ at: Date }>("SELECT heartbeat_at AS at FROM sip_solana.worker WHERE worker_id = $1", [workerId])).rows[0]!.at.getTime();
+    const before = await beatAt();
+    await until("a beat", worker, async () => ((await beatAt()) > before ? true : null));
+    await holding("SELECT 1 FROM sip_solana.worker WHERE worker_id = $1 FOR UPDATE", [workerId], async () => {
+      worker.kill("SIGTERM");
+      // THE LEAVE IS AN UPDATE OF THIS ROW, AND THE CLOSE TOO. Side by side: the
+      // close is sent while the leave still waits, so the two waits end together.
+      await until("the leave and the close to wait on the held row together", worker, async () => {
+        const waiting = (
+          await db.query<{ query: string }>("SELECT query FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'")
+        ).rows.map((row) => row.query);
+        return waiting.includes(WORKER_LEAVING_SQL) && waiting.includes(WORKER_STOPPED_SQL) ? true : null;
+      });
+      expect(await probe(port)).toMatchObject({ status: 503, body: { ok: false, phase: "stopping" } });
+      // HELD TO THE END: each times out into its own log line, and the worker exits 0 all the same.
+      expect(await worker.exit(), worker.log).toBe(0);
     });
-    expect(stopping.body).toMatchObject({ ok: false, phase: "stopping", role: "worker" });
-    expect(await worker.exit(), worker.log).toBe(0);
-    expect(worker.log).toContain('"event":"worker stopped"');
-    // ONE LISTEN, ON PORT: nothing else in the process ever listened.
+    expect(worker.lines('"event":"the worker could not leave the quota hand-out')).toBe(1);
+    expect(worker.lines('"event":"the worker row could not be closed"')).toBe(1);
+    expect(worker.lines('"event":"worker stopped"')).toBe(1);
+    expect(worker.log).not.toContain('"event":"unhandled rejection"');
+    // NOTHING LANDED WHILE THE ROW WAS HELD.
+    expect(await workerRows()).toEqual([{ worker_id: workerId, stopped_at: null, busy: 0 }]);
     expect(worker.listened()).toEqual([[port]]);
   }, 3 * WAIT_MS);
 
@@ -544,20 +657,43 @@ describe.skipIf(!usable)("the worker's /health over a real database (needs KEEPE
     }
   }, 3 * WAIT_MS);
 
-  it("listens on nothing without the gate, PORT set or not: registered, beating, stopped, and not one listen", async () => {
-    const worker = start({ ...shadow(databaseUrl), PORT: String(await freePort()) });
-    // ITS FIRST BEAT IS ITS LOOP RUNNING (WorkerLoop.start sets the beat's timer),
-    // and the SIGTERM handler is in place before the loop starts.
-    await until("the worker's first beat", worker, async () => {
-      const beat = await db.query<{ beat: boolean }>("SELECT heartbeat_at > started_at + interval '1 second' AS beat FROM sip_solana.worker WHERE kind = 'worker'");
-      return beat.rows[0]?.beat === true ? true : null;
-    });
-    worker.kill("SIGTERM");
-    expect(await worker.exit(), worker.log).toBe(0);
-    expect(worker.log).toContain('"event":"worker stopped"');
-    expect(worker.log).not.toContain("listening for /health");
-    expect(worker.log).not.toContain('"event":"worker ready"');
-    // NOT ONE LISTEN, from its first line to its exit.
-    expect(worker.listened(), worker.log).toEqual([]);
+  it("listens on nothing without the gate, PORT set or not: registered, beating, in the hand-out through its drain and closed after it — as before the gate — and not one listen", async () => {
+    const endpoint = await silentEndpoint();
+    try {
+      const worker = start({ ...shadow(databaseUrl), SIP_SOLANA_RPC_URLS: endpoint.url, PORT: String(await freePort()) });
+      // ITS FIRST BEAT IS ITS LOOP RUNNING (WorkerLoop.start sets the beat's timer),
+      // and the SIGTERM handler is in place before the loop starts.
+      await until("the worker's first beat", worker, async () => {
+        const beat = await db.query<{ beat: boolean }>("SELECT heartbeat_at > started_at + interval '1 second' AS beat FROM sip_solana.worker WHERE kind = 'worker'");
+        return beat.rows[0]?.beat === true ? true : null;
+      });
+      const workerId = (await workerRows())[0]!.worker_id;
+      // A JOB THAT WAITS AT ITS FIRST CHAIN READ, so its drain lasts until the test lets it go.
+      const vault = await queueVault();
+      await until("its job to wait at its chain read", worker, async () => (endpoint.reached() && (await holderOf(vault)) === workerId ? true : null));
+      worker.kill("SIGTERM");
+      await until("its shutdown to start", worker, async () => (worker.lines('"event":"worker stopping"') === 1 ? true : null));
+      // NO LEAVE WITHOUT THE GATE: through a second of its drain the row is not
+      // stopped and the hand-out still names it, where a gated worker's leave
+      // lands at once.
+      for (let seen = 0; seen < 10; seen++) {
+        expect((await workerRows())[0]!.stopped_at).toBeNull();
+        expect(await inHandOut()).toEqual([workerId]);
+        expect(await holderOf(vault)).toBe(workerId);
+        await sleep(100);
+      }
+      await endpoint.letGo();
+      expect(await worker.exit(), worker.log).toBe(0);
+      expect(worker.log).toContain('"event":"worker stopped"');
+      // CLOSED AFTER ITS DRAIN, as before the gate.
+      expect(await holderOf(vault)).toBeNull();
+      expect(await workerRows()).toEqual([{ worker_id: workerId, stopped_at: expect.any(Date), busy: 0 }]);
+      expect(worker.log).not.toContain("listening for /health");
+      expect(worker.log).not.toContain('"event":"worker ready"');
+      // NOT ONE LISTEN, from its first line to its exit.
+      expect(worker.listened(), worker.log).toEqual([]);
+    } finally {
+      await endpoint.letGo();
+    }
   }, 2 * WAIT_MS);
 });

@@ -38,6 +38,7 @@ import {
   PLAN_FLOOR_SQL,
   PgRpcUsageFeed,
   RECORD_SIGNATURE_SQL,
+  REGISTER_WORKER_SQL,
   RESOLVE_INTENT_SQL,
   SCHEDULER_POOL_MAX,
   USAGE_ADD_SQL,
@@ -45,7 +46,9 @@ import {
   USAGE_READ_SQL,
   USAGE_SUMMARY_SQL,
   WORKER_BEAT_SQL,
+  WORKER_LEAVING_SQL,
   WORKER_POOL_MAX,
+  WORKER_STOPPED_SQL,
   WRITE_QUOTAS_SQL,
   createDispatchPool,
   dispatchConnections,
@@ -58,6 +61,7 @@ import { createCarryPool } from "../src/carry-store.js";
 import type { RpcUsageRow } from "../src/credit-governor.js";
 import { WORKER_DEAD_AFTER_MS, WORKER_STATS_KEYS } from "../src/fleet-status.js";
 import { QuotaFollower, fleetQuotas } from "../src/rpc-quota.js";
+import { PARK_SQL, STALE_INTENTS_SQL } from "../src/scheduler-pg.js";
 
 const PACKAGE = new URL("..", import.meta.url);
 const source = (path: string): string => readFileSync(fileURLToPath(new URL(path, PACKAGE)), "utf8");
@@ -687,6 +691,32 @@ describe("the merge's wiring, over a scripted client: the quota hand-out, worker
     expect(none.sent).toHaveLength(1);
     await expect(new DispatchStore(none.pool, "sched").handOutQuotas({ maxWorkers: 0 })).rejects.toThrow(/maxWorkers/);
     expect(none.sent).toHaveLength(1);
+  });
+
+  it("a worker leaves the hand-out with stopped_at alone, on the database's clock; nothing but a registration clears it", async () => {
+    // STOPPED_AT AND NOTHING ELSE: busy is the drain's, which is still running jobs; the close at the end zeroes it.
+    expect(WORKER_LEAVING_SQL).toBe("UPDATE sip_solana.worker SET stopped_at = clock_timestamp() WHERE worker_id = $1");
+    expect(WORKER_STOPPED_SQL).toBe("UPDATE sip_solana.worker SET stopped_at = clock_timestamp(), busy = 0 WHERE worker_id = $1");
+    // A LEAVE LASTS: the hand-out leaves a stopped row out, the beat never writes stopped_at, and only registering
+    // (once, at boot, under a fresh worker_id) clears it.
+    expect(LIVE_WORKERS_SQL).toContain("stopped_at IS NULL");
+    expect(WORKER_BEAT_SQL).not.toContain("stopped_at");
+    expect(REGISTER_WORKER_SQL).toContain("ON CONFLICT (worker_id) DO UPDATE SET heartbeat_at = clock_timestamp(), stopped_at = NULL");
+    const db = scripted(() => ({ rows: [] }));
+    await new DispatchStore(db.pool, "w").processLeaving();
+    expect(db.sent).toEqual([{ text: WORKER_LEAVING_SQL, values: ["w"] }]);
+    expect(db.releases).toEqual([false]);
+    // A LEAVE THAT FAILS THROWS, its client destroyed: bin/worker.mts makes it a log line.
+    const failing = scripted(() => serverError("57014", "canceling statement due to statement timeout"));
+    await expect(new DispatchStore(failing.pool, "w").processLeaving()).rejects.toThrow("statement timeout");
+    expect(failing.releases).toEqual([true]);
+  });
+
+  it("a leave moves no lease: no statement that judges or moves one names the worker table", () => {
+    const leaseStatements = { CLAIM_SQL, HEARTBEAT_SQL, GATE_LOCK_SQL, GATE_INSERT_SQL, GATE_ONE_STATEMENT_SQL, COMPLETE_SQL, OPEN_INTENTS_SQL, PLAN_FLOOR_SQL, PARK_SQL, STALE_INTENTS_SQL };
+    for (const [name, text] of Object.entries(leaseStatements)) expect(text, name).not.toMatch(/sip_solana\.worker\b/);
+    // The pattern does find the table where it is named.
+    expect(WORKER_LEAVING_SQL).toMatch(/sip_solana\.worker\b/);
   });
 
   it("PgRpcUsageFeed: a flush is one statement of eight arrays that ADDS onto its key; nothing for nothing", async () => {

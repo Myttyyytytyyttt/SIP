@@ -119,6 +119,8 @@
 //     write; a worker's beat (beatProcess, or quotaSource for QuotaFollower)
 //     reads it back as an AGE on that one clock, so a worker whose own clock is
 //     wrong still drops to its floor two minutes after the scheduler went quiet;
+//     a worker behind its health gate leaves it as its drain starts
+//     (processLeaving), not when its row is closed;
 //   * worker.stats, the page's contract with the worker (src/fleet-status.ts
 //     WORKER_STATS_KEYS): beatProcess writes those keys and no other;
 //   * rpc_usage (src/credit-governor.ts): PgRpcUsageFeed is the RpcUsageFeed
@@ -466,6 +468,24 @@ export const WORKER_BEAT_SQL = `UPDATE ${WORKER} SET heartbeat_at = clock_timest
 RETURNING rps_quota, jup_quota, round(extract(epoch FROM clock_timestamp() - quota_at) * 1000) AS quota_age_ms,
           (SELECT round(extract(epoch FROM clock_timestamp() - f.tick_at) * 1000) FROM ${FLEET} f WHERE f.id) AS tick_age_ms`;
 export const WORKER_STOPPED_SQL = `UPDATE ${WORKER} SET stopped_at = clock_timestamp(), busy = 0 WHERE worker_id = $1`;
+/**
+ * A WORKER LEAVING THE HAND-OUT as its drain starts (bin/worker.mts, behind
+ * SIP_SOLANA_WORKER_HEALTH=on): stopped_at, on the database's clock, and nothing
+ * else. LIVE_WORKERS_SQL leaves a stopped row out, so the scheduler's next
+ * hand-out divides the budget among the workers that stay. `busy` is left as it
+ * is, because the drain is still finishing jobs and its beats go on saying how
+ * many; WORKER_STOPPED_SQL zeroes it when the row is closed, after the drain.
+ *
+ * A LEAVE LASTS. The beat (WORKER_BEAT_SQL) never writes stopped_at; only
+ * REGISTER_WORKER_SQL's ON CONFLICT clears it, and a process registers once, at
+ * boot, under a worker_id of its own. Past the hand-out, stopped_at is read only
+ * by the fleet page (src/fleet-pg.ts: a stopped row is never `dead`, and stays
+ * listed for an hour). No statement that judges or moves a lease names this
+ * table — CLAIM, HEARTBEAT, the GATE, COMPLETE and RELEASE, the takeover's reads
+ * and the reap's (src/scheduler-pg.ts) — so a leaving worker's leases are what
+ * they were: it renews, completes and releases them as before.
+ */
+export const WORKER_LEAVING_SQL = `UPDATE ${WORKER} SET stopped_at = clock_timestamp() WHERE worker_id = $1`;
 
 /** The workers a hand-out divides among: kind 'worker', not stopped, heard within $1 seconds. */
 export const LIVE_WORKERS_SQL = `SELECT worker_id FROM ${WORKER}
@@ -972,6 +992,15 @@ export class DispatchStore {
     if (live.length === 0 || quotas.perWorkerRps === null) return { quotas, workers: [] };
     const written = await this.#one(WRITE_QUOTAS_SQL, [live, quotas.perWorkerRps, quotas.perWorkerJupiterPerMinute]);
     return { quotas, workers: written.map((row) => String(row["worker_id"])) };
+  }
+
+  /**
+   * Out of the quota hand-out (WORKER_LEAVING_SQL), as a gated worker's drain
+   * starts: the row stopped, its leases untouched. The row is still closed after
+   * the drain (processStopped). Throws when the database cannot be asked.
+   */
+  async processLeaving(): Promise<void> {
+    await this.#one(WORKER_LEAVING_SQL, [this.holder]);
   }
 
   /** The process's row closed, on its way out. */

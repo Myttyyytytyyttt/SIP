@@ -30,6 +30,13 @@
 //
 // SIGTERM: stop claiming, drain sends in flight for up to SIGTERM_DRAIN_MS, then
 // release every vault still held (due now), close the worker row, exit 0.
+// Behind its health gate (below) it also LEAVES THE QUOTA HAND-OUT AS THE DRAIN
+// STARTS (WORKER_LEAVING_SQL, src/dispatch-store.ts): its row is stopped at once,
+// so the scheduler's next hand-out divides among the workers that stay while
+// this one finishes what it holds, instead of once its row is closed. Beside
+// the drain, never before it and never waited for: a leave that fails is a log
+// line, and the row is closed at the end all the same. Without the gate the
+// shutdown is what it was.
 //
 // ITS HEALTH GATE, ONLY WITH SIP_SOLANA_WORKER_HEALTH=on (src/worker-health.ts):
 // GET and HEAD /health on PORT. Opt-in, because PORT is set on every worker —
@@ -628,7 +635,22 @@ const shutdown = async (signal: string): Promise<void> => {
   health?.gate.stopping();
   if (authorizationKeyTimer !== null) clearInterval(authorizationKeyTimer);
   log.info("worker stopping", fields({ signal, busy: loop.busy }));
-  const drained = await loop.stop();
+  // THE DRAIN STARTS HERE: no claim from now on, every job told it may not act.
+  const draining = loop.stop();
+  // OUT OF THE QUOTA HAND-OUT, behind the gate only (the header): started once
+  // the loop has stopped claiming, and never awaited. Its one statement has the
+  // store's bound (DISPATCH_STATEMENT_TIMEOUT_MS). Awaited, the close's wait
+  // would begin only once the leave's had ended, and a row something holds
+  // would cost the exit two statement timeouts; side by side, it costs one.
+  // pool.end() below still lets it finish if it holds a connection.
+  if (health !== null) {
+    void store
+      .processLeaving()
+      .catch((error: unknown) =>
+        log.warn("the worker could not leave the quota hand-out; its row is closed once the drain is over", fields({ detail: summarizeUpstreamError(error) })),
+      );
+  }
+  const drained = await draining;
   await collector.flush(usageFeed).catch(() => undefined);
   await store.processStopped().catch((error: unknown) => log.warn("the worker row could not be closed", fields({ detail: summarizeUpstreamError(error) })));
   await pool.end().catch(() => undefined);
