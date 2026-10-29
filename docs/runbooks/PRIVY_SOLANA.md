@@ -646,12 +646,16 @@ la [sección 8](#8-pon-al-día-la-política-viva-solo-settle_v2), después esta.
 
 1. Dashboard de Privy, en la app `cmtrt36tb00080dlbrda5aqam`: **Configuration → App settings → Basics**. Crea una app
    secret nueva y cópiala al gestor en ese momento.
-2. Railway, servicio `sip-solana-keeper`: cambia `SIP_SOLANA_PRIVY_APP_SECRET` y despliega. Si el vigilante de volumen
-   está armado, la toma por referencia: redespliégalo también. La web no la usa: la rechaza por el nombre
-   ([VERCEL_WEB.md](VERCEL_WEB.md)).
-3. `/status` del vigilante: `signing.authorizationKey` tiene que volver a decir `matches`, con
-   `signing.authorizationKeyAt` posterior al reinicio. Esa comprobación lee Privy con la app secret, así que con una
-   secret mala diría `credentials-refused`.
+2. Railway: cambia `SIP_SOLANA_PRIVY_APP_SECRET` donde viva: en `sip-solana-keeper`, de donde la toman por referencia
+   `sip-solana-worker` y, si está armado, el vigilante de volumen; o en la variable compartida del proyecto, si la
+   pasaste allí. Despliega `sip-solana-worker` y cada vigilante de siempre que siga encendido. Uno parado
+   ([RAILWAY_SOLANA.md](RAILWAY_SOLANA.md), 10.8, paso 8) **no se despliega**: podría volver a arrancar armado. Cómo
+   guardar el cambio sin desplegarlo está en RAILWAY_SOLANA.md, 10.9, «Rotar un secreto». La web no la usa: la rechaza
+   por el nombre ([VERCEL_WEB.md](VERCEL_WEB.md)).
+3. En los *Deploy Logs* de `sip-solana-worker`, al arrancar: `privy authorization key belongs to the signer quorum`. Esa
+   comprobación lee Privy con la app secret, así que con una secret mala la línea `privy authorization key` diría
+   `credentials-refused`. Si `sip-solana-keeper` sigue encendido, también su `/status`: `signing.authorizationKey` tiene
+   que volver a decir `matches`, con `signing.authorizationKeyAt` posterior al reinicio.
 4. Solo entonces borra la secret vieja en el dashboard.
 
 **La llave del vigilante.** El único camino que trae esta guía es el de la

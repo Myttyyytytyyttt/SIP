@@ -724,9 +724,10 @@ ganador se cobra entero. Esta variable la guarda en la tabla `sip_solana.loss_ca
 > nuevo; lo que puede avisar después, y qué hacer, está en **10.9**. La herramienta para mirar y mover la flota es
 > `flota-prod` (10.4). El `CMD` del Dockerfile sigue siendo `bin/keeper.mts`: los dos servicios nuevos arrancan por su
 > comando de arranque (abajo), y con `SIP_SOLANA_DISPATCH` sin poner (u `off`) cualquiera de los dos lo dice y sale con
-> 0 sin abrir una conexión. El ciclo entero en sombra (los dos servicios, el traspaso, un worker muerto a mitad de
-> trabajo y otro que lo releva) lo prueba `test/dispatcher-e2e.test.ts` contra el stub de cadena del bench y un Postgres
-> desechable. Diseño: ADR del dispatcher, §2.4, §3.8–§3.12 y §6.
+> 0 sin abrir una conexión (un worker con la puerta de `/health`, no: 10.1). El ciclo entero en sombra (los dos
+> servicios, el traspaso, un worker muerto a mitad de trabajo y otro que lo releva) lo prueba
+> `test/dispatcher-e2e.test.ts` contra el stub de cadena del bench y un Postgres desechable. Diseño: ADR del
+> dispatcher, §2.4, §3.8–§3.12 y §6.
 
 ### 10.1 Los dos servicios nuevos
 
@@ -744,52 +745,91 @@ borra**, ni siquiera cuando se pare (10.8, paso 8).
   instante de avisarle y cada despliegue es una toma de control con espera, ADR §3.11).
 - **El comando de arranque** (*Settings → Deploy → Custom Start Command*; la imagen arranca en
   `packages/solana-keeper`): `node_modules/.bin/tsx bin/scheduler.mts` en `sip-solana-scheduler` y
-  `node_modules/.bin/tsx bin/worker.mts` en `sip-solana-worker`. Sin él, la imagen arranca el vigilante de siempre.
-- **`sip-solana-worker` contesta `/health` y nada más** (ni `/status` ni dominio público), para que un despliegue que
-  no arranca no sustituya al que funciona. Sin *Healthcheck Path*, Railway da por bueno un despliegue en cuanto arranca
-  su contenedor y quita el anterior ([despliegues](https://docs.railway.com/reference/deployments)), así que una
-  configuración que el worker rechaza al arrancar (sale con 2, o con 0 sin `SIP_SOLANA_DISPATCH`) deja la cola sin
-  nadie. Con *Healthcheck Path*, Railway solo cambia al nuevo cuando contesta `200` en `PORT`; si en 5 min no lo hace,
-  lo marca *Failed* y el anterior sigue trabajando ([healthchecks](https://docs.railway.com/reference/healthchecks),
-  [despliegue malo](https://docs.railway.com/guides/roll-back-bad-deploy)). El worker abre el puerto **solo después de
-  todas sus comprobaciones de arranque**, así que una configuración rechazada no contesta nunca. Contesta `503`
-  mientras arranca, `200` en cuanto se ha apuntado en la base y su primera reclamación a la cola ha contestado, y `503`
-  otra vez desde que le llega SIGTERM. Si no puede abrir el puerto, sale con 1 (`worker: health server failed`).
-  Railway solo lo mira al desplegar: si el worker se para después, lo dicen `fleet.workers` y `queue-lag` (10.9), no
-  `/health`. **Solo protege de lo que el worker rechaza al arrancar** (una variable que falta, sobra o no tiene forma) y
-  de una base que no contesta: una URL o una llave bien escrita pero equivocada arranca, sustituye al anterior y lo
-  dicen después sus alertas (`settle-key-mismatch`, la authorization key, `job-failing:<vault>`…: 10.9).
+  `node_modules/.bin/tsx bin/worker.mts` en `sip-solana-worker`. Sin él, la imagen arranca el vigilante de siempre. Si
+  el servicio tiene `SIP_SOLANA_WORKER_HEALTH` (aunque sea `off`), ese vigilante se niega a arrancar (`configuration
+  refused`): su propio `/health` contesta `200` en cuanto escucha, y pasaría el healthcheck del worker (abajo).
+- **`sip-solana-worker` contesta `/health` y nada más, si se lo pides** (`SIP_SOLANA_WORKER_HEALTH=on`): es su puerta
+  de `/health`, para que un despliegue que no arranca no sustituya al que funciona. Sin *Healthcheck Path*, Railway da
+  por bueno un despliegue en cuanto arranca su contenedor y quita el anterior
+  ([despliegues](https://docs.railway.com/reference/deployments)), así que una configuración que el worker rechaza al
+  arrancar (sale con 2, o con 0 sin `SIP_SOLANA_DISPATCH`) deja la cola sin nadie. **Sin la variable no abre ningún
+  puerto**, como hasta ahora, aunque tenga `PORT` (lo tienen todos). Con ella abre `/health` en `PORT` **solo después
+  de todas sus comprobaciones de arranque**: contesta `503` mientras arranca, `200` en cuanto se ha apuntado en la base
+  y su primera reclamación a la cola ha contestado, y `503` otra vez desde que Railway le manda parar (SIGTERM). Una
+  configuración que rechaza no contesta nunca, y con *Healthcheck Path* Railway solo cambia al nuevo cuando contesta
+  `200`: si no lo hace a tiempo, lo marca *Failed* y **el anterior sigue trabajando**
+  ([healthchecks](https://docs.railway.com/reference/healthchecks),
+  [despliegue malo](https://docs.railway.com/guides/roll-back-bad-deploy)). Si no puede abrir el puerto, sale con 1
+  (`worker: health server failed`). **La variable y el *Healthcheck Path* van juntos**: la variable sola no protege
+  nada (Railway no espera a nadie), y el *Healthcheck Path* sin la variable hace que cada despliegue acabe *Failed* (el
+  worker no escucha). Railway solo lo mira al desplegar: si el worker se para después, lo dicen `fleet.workers` y
+  `queue-lag` (10.9), no `/health`. **Solo protege de lo que el worker rechaza al arrancar** (una variable que falta,
+  sobra o no tiene forma) y de una base que no contesta: una URL o una llave bien escrita pero equivocada arranca,
+  sustituye al anterior y lo dicen después sus alertas (`settle-key-mismatch`, la authorization key,
+  `job-failing:<vault>`…: 10.9).
 
   **Para activarlo, en este orden:**
-  1. **El push** que trae este código. Ese despliegue todavía no lo protege nada (el servicio aún no tiene
-     *Healthcheck Path*), así que míralo: en *Deployments* de `sip-solana-worker` el activo es ese commit, y en sus
-     *Deploy Logs* salen `worker: listening for /health` y, enseguida, `worker ready`.
-  2. Railway → `sip-solana-worker` → *Settings → Deploy* → *Healthcheck Path* = `/health`; y en *Variables*,
-     **`PORT` = `8080`**. Sin la variable el worker escucha en el 8080 de la imagen (`ENV PORT=8080` del Dockerfile), o
-     en el `PORT` que le ponga Railway: su guía dice que inyecta `PORT` y que el healthcheck llama a ese puerto, pero no
-     qué hace en un servicio sin dominio público, como este. Puesta a mano no hay duda: el worker escucha en el 8080 y
-     el healthcheck llama al 8080. No cambia nada más.
-  3. **Deploy**, una vez: aplica los dos cambios y vuelve a desplegar el mismo código, ya protegido.
+  1. **El push** que trae este código. No cambia lo que hace: sin la variable el worker no abre ningún puerto. Míralo
+     igual: en *Deployments* de `sip-solana-worker` el activo es ese commit, y en sus *Deploy Logs* la línea
+     `worker starting` dice `"health":"off"`.
+  2. **Antes de tocar nada**, en `sip-solana-worker`:
+     - *Variables*: ninguna `SIP_SOLANA_WORKER_…` aparte de `SIP_SOLANA_WORKER_SLOTS` (`SIP_SOLANA_WORKERS_MAX`, con
+       S, es otra y se queda). Si hay otra, avísame antes de seguir: el worker no la lee, solo deja un aviso en su log.
+     - *Settings → Build → Watch Paths*: las mismas que en `sip-solana-scheduler`, o ninguna en los dos, para que un
+       push despliegue los dos o ninguno.
+
+     **Luego, un solo cambio**, sin pulsar Deploy entre medias:
+     - *Variables*: **`PORT` = `8080`**, **`SIP_SOLANA_WORKER_HEALTH` = `on`** y **`RAILWAY_HEALTHCHECK_TIMEOUT_SEC` =
+       `120`** (Railway espera hasta 2 min a que conteste `200`, en vez de 5);
+     - *Settings → Deploy*: **Healthcheck Path** = `/health`.
+
+     Sin `PORT` el worker escucharía en el 8080 de la imagen (`ENV PORT=8080` del Dockerfile), o en el `PORT` que le
+     ponga Railway: su guía dice que inyecta `PORT` y que el healthcheck llama a ese puerto, pero no qué hace en un
+     servicio sin dominio público, como este. Puesta a mano no hay duda: el worker escucha en el 8080 y el healthcheck
+     llama al 8080.
+  3. **Deploy**, una vez: aplica los cuatro cambios y vuelve a desplegar el mismo código, ya con la puerta.
      - **Comprobar**: el despliegue nuevo pasa a *Active* en unos segundos. En sus *Build Logs* Railway escribe
        `Starting Healthcheck`, algún intento fallido mientras el worker arranca (es normal: `failed with service
        unavailable` si aún no escucha, `failed with status 503` si ya escucha y aún no ha reclamado) y luego que lo
-       pasó; en sus *Deploy Logs*, `worker ready`. El anterior se para, y al rato `flota` dice «Trabajadores: 1 vivo».
-     - **Deshacer**: si acaba *Failed* aunque sus *Deploy Logs* digan `worker ready`, el healthcheck de Railway no
-       llega a `/health`. Quita el *Healthcheck Path* y `PORT`, Deploy, y avísame: el worker queda como antes del paso 2.
+       pasó. En sus *Deploy Logs*: `worker: listening for /health`; `worker starting`, que ahora dice
+       `"health":{"on":true,"port":8080}`, en `jupiter` `"keyed":true` y en `alerts` `"kind":"telegram"` (si dice
+       otra cosa, avísame); y `worker ready`. El anterior se para, y al rato `flota` dice «Trabajadores: 1 vivo».
+     - **Deshacer**: si acaba *Failed* aunque sus *Deploy Logs* digan `worker ready`, el healthcheck de Railway no llega
+       a `/health` (puede que no llegue a un servicio sin dominio público). Quita los cuatro cambios del paso 2, Deploy,
+       y avísame: el worker queda como antes del paso 2. Si acaba *Failed* sin `worker ready`, el worker no arrancó y
+       el anterior sigue trabajando: qué buscar está en 10.9.
 
-  **Qué verás** en cada despliegue del worker a partir de ahí: el nuevo se queda en *Deploying* hasta que `/health`
-  contesta `200` (unos segundos, tras `worker ready`); **mientras tanto sigue trabajando el worker anterior**, y el
-  nuevo ya trabaja a su lado; solo entonces Railway para el anterior (con los 30 s de
-  `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`). Si la configuración nueva no arranca, el despliegue nuevo acaba en *Failed* (a
-  los 5 min como mucho) y **el anterior sigue sirviendo la cola**; qué buscar en sus *Deploy Logs* está en «Si algo
-  falla», al final. Arréglalo y vuelve a desplegar.
-
-  **Con *Healthcheck Path*, una configuración que no arranca ya no para el worker ni lo desarma.** Quitar
-  `SIP_SOLANA_DISPATCH` (o ponerla en `off`), dejar `on` sin armar o pasar a `shadow` todavía armado acaba en *Failed*,
-  el anterior sigue trabajando tal cual y a Telegram no llega nada: el nuevo sale antes de poder avisar. Tras cualquier
-  cambio de variables, mira en *Deployments* que el nuevo queda *Active*. **Para pararlo**:
-  *Deployments* → el despliegue activo → **Remove**, y *Settings → Source* → **Disconnect** si un push no debe volver
-  a desplegarlo (como en 10.8, paso 8.2).
+  **Con la puerta de `/health` puesta:**
+  - **Cada despliegue del worker** se queda en *Deploying* hasta que el nuevo contesta `200` (unos segundos, tras
+    `worker ready`), ya trabajando al lado del anterior. Solo entonces Railway para el anterior, que termina lo que
+    tenga entre manos (con los 30 s de `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`) y desde ese momento ya no cuenta en el
+    reparto de cuotas del scheduler. Si la configuración nueva no arranca, el despliegue acaba *Failed* en unos 2 min
+    y **el anterior sigue sirviendo la cola tal cual**, y por Telegram no llega nada: un worker que se niega a arrancar
+    sale antes de poder avisar. Así acaban quitar `SIP_SOLANA_DISPATCH`, dejar `on` sin armar o pasar a `shadow`
+    todavía armado. Por eso, **tras cualquier cambio de variables, mira en *Deployments* que el nuevo queda
+    *Active***; si acaba *Failed*, qué buscar está en 10.9. Arréglalo y vuelve a desplegar.
+  - **Para pararlo sin que un push lo vuelva a arrancar**: `SIP_SOLANA_DISPATCH` = `off` → Deploy. El nuevo no abre
+    base ni RPC ni reclama nada, contesta `200` (en sus *Deploy Logs*, `it answers /health 200 (off)`) y Railway retira
+    el anterior; un push lo vuelve a desplegar igual de parado. Mientras tanto nadie cobra ni compra los vaults de la
+    cola: `flota` dice «Trabajadores: 0 vivos», y en cuanto un vault espere más de dos ticks el scheduler avisa
+    `queue-lag`. Para volver: `on` → Deploy. **Con `SIP_SOLANA_DISPATCH` vacía o borrada no arranca** (acaba *Failed*
+    y sigue el anterior): una variable que se pierde en una edición no pasa por una parada.
+  - **Para quitarlo del todo**: *Deployments* → el activo → **Remove**, y *Settings → Source* → **Disconnect** (como en
+    10.8, paso 8.2). Solo *Remove* no basta: el siguiente push lo vuelve a desplegar.
+  - **Un despliegue durante una caída de la base acaba *Failed*** y se queda el anterior: vuelve a desplegarlo cuando
+    pase. Un push puede acabar igual, con el worker en el código de antes, así que **un push no ha terminado hasta que
+    el worker corre el commit nuevo**: en *Deployments* de `sip-solana-worker`, el *Active* es el del push (y en el
+    `/status` del scheduler, la `version` de su fila en `fleet.workers` empieza por ese commit).
+  - **Para volver con *Rollback* a un despliegue sin la puerta** (de antes de este push, o de antes del paso 2), quita
+    antes el *Healthcheck Path*: ese worker no escucharía y acabaría *Failed*. Un *Rollback* devuelve también las
+    variables de aquel despliegue: después, revisa las del servicio.
+  - **Tampoco arranca con tres ajustes que sin la puerta solo avisan, o ni eso**: en `on`, con `jupiter-key` en
+    `SIP_SOLANA_CUTS` y sin `SIP_SOLANA_JUPITER_API_KEY` (sin la puerta compraría sin clave por `lite-api.jup.ag`, sin
+    decirlo); con `SIP_SOLANA_JUPITER_API_KEY` o `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` y sin `jupiter-key`; y en `on`
+    sin `SIP_SOLANA_ALERT_WEBHOOK`. Así que, con la puerta, quitar `jupiter-key` del worker es quitar también esas dos
+    variables, en el mismo despliegue. Con puerta o sin ella, su línea `worker starting` dice si Jupiter va con clave
+    (`jupiter`: `keyed`, las llamadas por minuto y el host) y adónde van las alertas (`alerts`: `telegram`, `webhook` o
+    `none`).
 - **Su estado lo enseña el `/status` de la flota**, que sirve el scheduler desde Postgres (`fleet.workers`, y cada vault
   con su último trabajo en `fleet.vaults`). **Manda sus propias alertas** (desde 34816a1) al mismo
   `SIP_SOLANA_ALERT_WEBHOOK` que los vigilantes, con «[worker] » delante: la misma escalera por wallet y por vault que
@@ -803,11 +843,14 @@ borra**, ni siquiera cuando se pare (10.8, paso 8).
 
   | variable | dónde | valor | sin ponerla |
   |---|---|---|---|
-  | `SIP_SOLANA_DISPATCH` | los dos | `off`, `shadow` u `on` | `off`: sale con 0 (no para un servicio con *Healthcheck Path*: arriba) |
+  | `SIP_SOLANA_DISPATCH` | los dos | `off`, `shadow` u `on` | `off`: sale con 0. Un worker con `SIP_SOLANA_WORKER_HEALTH=on` **no arranca** sin ella, y con `off` escrita se queda encendido sin hacer nada (arriba) |
   | `SIP_SOLANA_SWEEP_MS` | scheduler | el tick, en ms (≥ 5000) | 60000 |
   | `SIP_SOLANA_PLAN_RPS` | los dos, **el mismo valor** | peticiones por segundo del plan de Helius (1–10000) | 50 (Developer) |
   | `SIP_SOLANA_WORKERS_MAX` | los dos, **el mismo valor** | cuántas réplicas de worker puede haber como mucho (1–64) | 2 |
   | `SIP_SOLANA_WORKER_SLOTS` | worker | trabajos a la vez por réplica (1–8) | 2 |
+  | `SIP_SOLANA_WORKER_HEALTH` | worker | `on` u `off`: con `on`, la puerta de `/health` (arriba) | `off`: no abre ningún puerto |
+  | `PORT` | worker con `SIP_SOLANA_WORKER_HEALTH=on` | `8080`: donde contesta `/health` | el que ponga Railway, o el 8080 de la imagen |
+  | `RAILWAY_HEALTHCHECK_TIMEOUT_SEC` | worker con `SIP_SOLANA_WORKER_HEALTH=on` (la lee Railway, no el worker) | `120`: los segundos que Railway espera el `200` | 300 |
   | `SIP_SOLANA_PLAN_CREDITS_MONTH` | scheduler | créditos del plan al mes | 10 000 000 |
   | `SIP_SOLANA_ARCHIVAL_CREDITS` | scheduler | `1` o `10`: lo que cuesta una llamada de archivo (4.1) | `1` |
   | `SIP_SOLANA_JUPITER_CALLS_PER_MINUTE` | scheduler, y el worker con `jupiter-key` | las llamadas a Jupiter por minuto de la organización, que el scheduler reparte | 30 (sin clave) |
@@ -825,8 +868,8 @@ borra**, ni siquiera cuando se pare (10.8, paso 8).
   `shadow` no arranca armado**, y **uno en `on` no arranca sin armar** (`SIP_SOLANA_BROADCAST=1` y la frase exacta de
   `SIP_SOLANA_ALLOW_BROADCAST`).
 - **`/health` solo lo mira Railway al desplegar.** Un scheduler colgado se reinicia porque **sale solo** con código de
-  error (ADR §3.11), no porque Railway lo vigile. El worker no tiene ese reloj: su `/health` solo sirve para desplegar
-  (arriba).
+  error (ADR §3.11), no porque Railway lo vigile. El worker no tiene ese reloj: su `/health`, si lo tiene
+  (`SIP_SOLANA_WORKER_HEALTH=on`), solo sirve para desplegar (arriba).
 - **`SIP_SOLANA_DISPATCH`** (`off`, `shadow` u `on`; un valor distinto **no arranca**): en `shadow` los workers pasan por
   la puerta de envío igual que en `on` pero **no envían nada** y no llevan ninguna clave.
 - **El ensayo en sombra va con su PROPIA base de datos**, nunca con la `DATABASE_URL` de producción. En la sombra todos
@@ -847,9 +890,10 @@ La cuenta exacta la hace `dispatchConnections` (`src/dispatch-store.ts`): el sch
 | 2 | 7 | 12 | 24 |
 | 3 | 9 | 14 | 28 |
 
-Con un pooler de sesión de 15 (supuesto, sin comprobar) **no cabe ningún `r` mientras los dos vigilantes de siempre
-siguen vivos durante un push**. Antes del primer servicio nuevo: mira el host de `DATABASE_URL` y el tamaño del pooler,
-y súbelo o usa el host directo (60 conexiones) (decisión 32). El comando del traspaso (10.4) abre 1 más mientras corre.
+Sin los vigilantes de siempre, un push con 1, 2 o 3 workers llega a 10, 14 o 18. **El *Pool Size* del pooler de sesión
+de Supabase está en 30 desde el 28-oct** (el 25-oct se leyó 15), así que cabe toda la tabla: lo más justo es un push
+con 3 workers y los dos vigilantes de siempre encendidos, 28 de 30. Cada comando que abre la base por su cuenta suma 1
+mientras corre: el del traspaso (10.4), `flota-prod` y `setup-read-model`.
 
 ### 10.3 Los vigilantes de siempre durante la migración (`SIP_SOLANA_DISPATCH` en ellos)
 
@@ -1012,6 +1056,9 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
 - **Luego, el worker**: `SIP_SOLANA_EXTRA_MODES=roundup,fixed` y `SIP_SOLANA_EXTRA_MODES_VAULTS=<el vault de prueba>`,
   con `SIP_SOLANA_EXTRA_MODES_LIVE=0`: el worker mide y anota cada operación (en la línea "job done", `perTrade`) y no
   envía nada (M4). Para cobrar de verdad (M5): `SIP_SOLANA_EXTRA_MODES_FROM_SLOT=<el slot de ahora>` y `LIVE=1`.
+- **Antes de actualizar el programa**: el worker que vaya a servir redondeo o fijo tiene que llevar ya esos modos, en
+  seco (`SIP_SOLANA_EXTRA_MODES_LIVE=0`), cuando la actualización se despliegue. Desde ese momento cualquier dueño de un
+  vault puede firmar el paso a esos modos: `set_policy_v3` solo pide su firma.
 - **El vault tiene que estar en la cola** (`vault_work.system = queue`, 10.4): la lista de vaults solo dice qué modos
   puede cobrar el worker que ya lo tiene.
 - **Si Pyth se queda parado**: una operación de redondeo sin muestra de la cinta a ±120 s se valora con la lectura de
@@ -1022,9 +1069,9 @@ actualice, ninguno existe, y los vigilantes de siempre los dejarían en reposo (
   seco), o quitar **todas** las que tenga de las cuatro (`SIP_SOLANA_EXTRA_MODES`, `SIP_SOLANA_EXTRA_MODES_VAULTS`,
   `SIP_SOLANA_EXTRA_MODES_LIVE` y `SIP_SOLANA_EXTRA_MODES_FROM_SLOT`) antes de pulsar Deploy, en un solo despliegue: el
   vault queda en reposo. En los dos casos nada se pierde. **Quitar solo `SIP_SOLANA_EXTRA_MODES` no vale**:
-  `SIP_SOLANA_EXTRA_MODES_VAULTS` se queda sola y el worker no arranca (`configuration refused`). Con *Healthcheck Path*
-  (10.1) ese despliegue acaba en *Failed* y sigue el worker anterior, con los modos todavía puestos; sin él, la cola se
-  queda sin worker.
+  `SIP_SOLANA_EXTRA_MODES_VAULTS` se queda sola y el worker no arranca (`configuration refused`). Con la puerta de
+  `/health` (10.1) ese despliegue acaba en *Failed* y sigue el worker anterior, con los modos todavía puestos; sin ella,
+  la cola se queda sin worker.
 
 ### 10.8 Todo al sistema nuevo
 
@@ -1171,8 +1218,9 @@ deshacerlo, y el paso 9 dice cómo volver desde cualquier punto. `"$F"` es `flot
      yendo a los vigilantes de siempre y la web en el de beneficio, para primero `sip-solana-worker` y después
      `sip-solana-scheduler` (con el scheduler parado, un worker avisa `scheduler-stale` a los 10 min), cada uno como
      en el paso 8.2, con *Remove* y *Disconnect*: quitarle `SIP_SOLANA_DISPATCH` no para un servicio con
-     *Healthcheck Path* (10.1). Deja `SIP_SOLANA_DISPATCH` en los vigilantes mientras quede alguna fila que no sea
-     `legacy` (10.3), y `SIP_SOLANA_CARRY_STORE=on` siempre (10.5).
+     *Healthcheck Path* (no arranca y sigue el anterior). Al worker con la puerta de `/health` (10.1) también lo para
+     `SIP_SOLANA_DISPATCH=off` → Deploy, y así sigue aunque haya pushes. Deja `SIP_SOLANA_DISPATCH` en los vigilantes
+     mientras quede alguna fila que no sea `legacy` (10.3), y `SIP_SOLANA_CARRY_STORE=on` siempre (10.5).
 
 ### 10.9 Si algo falla con el sistema nuevo
 
@@ -1268,20 +1316,54 @@ lo tiene en crudo: `fleet.vaults`, `fleet.unserved`, `fleet.legacy`, `fleet.work
 - **Cualquier otra** (por ejemplo `lease-expired`, `fence-reject`, `pg-saturated`, `scheduler-tick-failed`,
   `discovery-stale` o `watchdog-exit` del scheduler; del worker, la escalera por wallet y por vault del vigilante de
   siempre, `carry-store` o la authorization key de Privy): `flota`, y pásame el aviso entero con la hora.
+- **Un despliegue de `sip-solana-worker` acaba en *Failed*** (pasa con *Healthcheck Path*: 10.1). Ningún aviso de
+  Telegram lo dice, y el worker anterior sigue trabajando, con el código y las variables de antes. En los *Deploy Logs*
+  del fallido busca:
+  - `configuration refused`: la línea nombra cada variable que falta, sobra o no tiene forma, nunca su valor. Sale
+    también por `SIP_SOLANA_WORKER_HEALTH` con un valor que no es `on` ni `off`; y, con `SIP_SOLANA_WORKER_HEALTH=on`,
+    por un `PORT` que falta o no es un número de 1 a 65535, por `SIP_SOLANA_DISPATCH` sin poner o vacía y por los tres
+    ajustes de Jupiter y alertas de 10.1. Si dice `runs the legacy keeper (bin/keeper.mts, the image's CMD)`, lo que
+    arrancó es el vigilante de siempre: el servicio ha perdido su comando de arranque. Vuelve a ponerlo en *Settings →
+    Deploy → Custom Start Command* (`node_modules/.bin/tsx bin/worker.mts`) y despliega.
+  - `the price tape's table is not in this database` (10.7).
+  - `could not be asked at boot` o `uncaught exception`: casi siempre, la base no contesta. Vuelve a desplegar cuando
+    conteste.
+  - `worker: health server failed`: no pudo abrir `PORT`.
+  - Repetida, `the claim failed`: no puede leer la cola.
+  - `"health":"off"` en la línea `worker starting`, o `SIP_SOLANA_DISPATCH is off (unset is off)`: a ese despliegue le
+    falta `SIP_SOLANA_WORKER_HEALTH=on` (y, en el segundo caso, `SIP_SOLANA_DISPATCH`); con *Healthcheck Path* y sin
+    ella no pasa ninguno (10.1).
+
+  Si en cambio dice `worker ready`, el healthcheck no llega a su puerto: revisa en *Variables* `PORT` = `8080` y el
+  *Healthcheck Path* `/health` (10.1). Sus *Build Logs* lo confirman: si todos los intentos dicen `status 503`, el
+  worker escucha pero nunca queda listo (busca `the claim failed`); si todos dicen `service unavailable` aunque los
+  *Deploy Logs* digan `worker ready`, Railway no llega a su puerto. Arreglado, vuelve a desplegar.
+- **Rotar un secreto** (la llave de cobro, la app secret o la authorization key de Privy, la clave de Jupiter, la URL de
+  Telegram, la de la base…). Cada servicio coge el valor nuevo **solo cuando se despliega**; el que ya corre sigue con
+  el viejo.
+  1. Cámbialo donde vive: en *Variables* de `sip-solana-keeper` si el worker lo toma de allí por referencia (10.1), en
+     una variable compartida del proyecto, o en el propio servicio. **Si `sip-solana-keeper` está parado** (10.8, paso
+     8), **no lo despliegues**: podría volver a arrancar el vigilante de siempre, armado. Railway deja el cambio
+     pendiente hasta que pulsas *Deploy*, y pulsado con la tecla **Alt** (⌥ en el Mac) lo aplica sin redesplegar nada
+     ([cambios pendientes](https://docs.railway.com/guides/staged-changes)).
+  2. Despliega, de uno en uno, cada servicio encendido que lo use: `sip-solana-worker` y, si también es suyo (la base,
+     el RPC, el Telegram), `sip-solana-scheduler`. En los *Deploy Logs* del worker tiene que salir `worker starting` (y
+     `worker ready`, con la puerta de `/health`) y, si cambiaste algo de Privy, `privy authorization key belongs to the
+     signer quorum`.
+  3. **La llave de cobro**, en este orden: primero la cadena (`set_attester` y `set_keeper` con la wallet nueva, que
+     firma la de administración: pídeme el paso) y enseguida la variable y el despliegue del worker. Mientras no
+     coincidan, cada trabajo acaba `RETRY` sin cobrar ni comprar nada y el worker avisa `settle-key-mismatch` (arriba);
+     en cuanto coinciden, el siguiente trabajo sigue solo. La wallet nueva paga las comisiones: mándale SOL antes
+     (`crank-low`, arriba).
+
+  Luego, lo que diga [SECRETS.md](SECRETS.md) para la vieja.
 
 ## Si algo falla
 
 - **El vigilante termina de desplegar y se reinicia en bucle**: abre los logs de `sip-solana-keeper` y busca
   `configuration refused`. La línea nombra la variable que falta o sobra, nunca su valor.
-- **Un despliegue de `sip-solana-worker` acaba en *Failed***: el worker anterior sigue trabajando (10.1). En los
-  *Deploy Logs* del fallido busca `configuration refused` (nombra la variable, nunca su valor),
-  `SIP_SOLANA_DISPATCH is off` (sin la variable, u `off`), `the price tape's table is not in this database` (10.7),
-  `could not be asked at boot` o `uncaught exception` (casi siempre, la base no contesta),
-  `worker: health server failed` (no pudo abrir `PORT`) o, repetida, `the claim failed` (no puede leer la cola). Si en
-  cambio dice `worker ready`, el healthcheck no llega a su puerto: revisa en *Variables* `PORT` = `8080` y el
-  *Healthcheck Path* `/health` (10.1). Sus *Build Logs* lo confirman: si todos los intentos dicen `status 503`, el
-  worker escucha pero nunca queda listo (busca `the claim failed`); si todos dicen `service unavailable` aunque los
-  *Deploy Logs* digan `worker ready`, Railway no llega a su puerto.
+- **Un despliegue de `sip-solana-worker` acaba en *Failed***: el worker anterior sigue trabajando; qué buscar en sus
+  *Deploy Logs* está en 10.9.
 - **El vigilante dice que el atestador no coincide**: `SIP_SOLANA_SETTLE_KEY` no es la wallet de cobro que se configuró
   en el programa. No lo arregles cambiando el programa: revisa qué archivo pegaste.
 - **Un secreto se pega en el sitio equivocado** (en la web, en un chat, en un log): se rota, como dice
